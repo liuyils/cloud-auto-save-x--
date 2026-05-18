@@ -72,5 +72,5 @@ RUN printf '%s\n' \
     'serverurl=unix:///run/supervisor.sock' \
     > /etc/supervisord.conf
 
-EXPOSE 5173
+EXPOSE 5115
 CMD ["/usr/bin/supervisord","-c","/etc/supervisord.conf"]
