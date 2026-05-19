@@ -19,9 +19,10 @@ from app.services.drama_share_repair import repair_banned_drama_tasks
 from app.services.tmdb_cache import purge_cold_cache, refresh_expired_cache, refresh_linked_tasks
 from app.services.tmdb_cache_scheduler import get_or_create_tmdb_cache_scheduler_setting
 from app.services.drive_account_probe_scheduler import get_or_create_drive_account_probe_scheduler_setting
-from app.services.drive_accounts import probe_drive_account
+from app.services.drive_accounts import probe_drive_account, sign_in_drive_account
 from app.models.drive_account import DriveAccount
 from app.extensions.runtime.task_executor import TaskExecutor
+from app.core.errors import ApiError
 
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ class TaskSchedulerManager:
         if not bool(getattr(setting, "enabled", False)):
             if self.scheduler.get_job(job_id):
                 self.scheduler.remove_job(job_id)
+                logger.info("已移除驱动账号探测调度")
             return
         trigger = CronTrigger.from_crontab(str(setting.crontab), timezone=str(setting.timezone or "Asia/Shanghai"))
         self.scheduler.add_job(
@@ -132,6 +134,14 @@ class TaskSchedulerManager:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
+        )
+        job = self.scheduler.get_job(job_id)
+        logger.info(
+            "已加载驱动账号探测调度 enabled_only=%s crontab=%s timezone=%s next_run=%s",
+            bool(getattr(setting, "enabled_only", True)),
+            str(getattr(setting, "crontab", "")),
+            str(getattr(setting, "timezone", "")),
+            getattr(job, "next_run_time", None),
         )
 
 
@@ -194,20 +204,49 @@ def run_drive_account_probe() -> None:
         db.commit()
         db.refresh(setting)
         enabled_only = bool(getattr(setting, "enabled_only", True))
-        accounts = db.execute(select(DriveAccount).order_by(DriveAccount.is_default.desc(), DriveAccount.id.asc())).scalars().all()
+        accounts = (
+            db.execute(select(DriveAccount).order_by(DriveAccount.is_default.desc(), DriveAccount.id.asc()))
+            .scalars()
+            .all()
+        )
+        logger.info("开始执行驱动账号自动探测 enabled_only=%s accounts=%s", enabled_only, len(accounts))
+        ok = 0
+        skipped = 0
+        failed = 0
         for account in accounts:
             if enabled_only and not bool(getattr(account, "enabled", False)):
+                skipped += 1
                 continue
             try:
-                probe_drive_account(db, int(account.id))
+                probed = probe_drive_account(db, int(account.id))
+                ok += 1
+                if getattr(probed, "runtime_status", None) != "active":
+                    continue
+                try:
+                    sign_in_drive_account(db, int(account.id))
+                except ApiError as exc:
+                    if exc.code in {"DRIVE_SIGNIN_UNSUPPORTED"}:
+                        logger.info("驱动账号自动签到不支持 account_id=%s", getattr(account, "id", None))
+                    else:
+                        logger.warning(
+                            "驱动账号自动签到失败 account_id=%s code=%s msg=%s",
+                            getattr(account, "id", None),
+                            exc.code,
+                            exc.message,
+                        )
+                except Exception as exc:
+                    logger.warning("驱动账号自动签到异常 account_id=%s err=%s", getattr(account, "id", None), str(exc))
             except Exception as exc:
+                failed += 1
                 try:
                     account.runtime_status = "inactive"
                     account.last_error = str(exc)
                 except Exception:
                     pass
+                logger.warning("驱动账号自动探测失败 account_id=%s err=%s", getattr(account, "id", None), str(exc))
                 continue
         db.commit()
+        logger.info("驱动账号自动探测完成 ok=%s skipped=%s failed=%s", ok, skipped, failed)
 
 
 task_scheduler_manager = TaskSchedulerManager()

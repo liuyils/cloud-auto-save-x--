@@ -182,6 +182,11 @@ def sign_in_drive_account(db: Session, account_id: int) -> dict[str, Any]:
         raise bad_request("DRIVE_SIGNIN_UNSUPPORTED", "该网盘暂不支持签到")
     if not result.get("ok", True):
         raise bad_request("DRIVE_SIGNIN_FAILED", result.get("message") or "签到失败", detail=str(result.get("reward") or result.get("message") or ""))
+    config_snapshot = adapter.export_runtime_config()
+    if isinstance(config_snapshot, dict) and config_snapshot:
+        account.config_json = json.dumps(config_snapshot, ensure_ascii=False)
+        account.cookie = AdapterRegistry.serialize_config(account.drive_type, config_snapshot)
+        db.flush()
     return result
 
 
