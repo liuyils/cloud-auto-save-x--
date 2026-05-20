@@ -439,7 +439,7 @@ class DramaTaskExecutor:
                 continue
             file_name_re = origin_name
             if not _is_dir(raw):
-                if (not disable_guessit_fallback) and (not pattern.strip()) and (not replace.strip()):
+                if (not disable_guessit_fallback) and (not pattern.strip()) and (not replace.strip()) and bool(tmdb_series_title):
                     try:
                         from app.extensions.runtime.guessit_fallback import guessit_media_target
 

@@ -160,7 +160,7 @@ def _pick_leading_episode(base: str) -> int | None:
 
 
 _DEFAULT_STRICT_KNOWN_EP_PATTERNS = [
-    r"^\s*(\d{1,4})\s*[\s._\-\\/／]+\s*(?:4k|8k|2160p|1080p|720p)(?:[\s._\-\\/／].*)?$",
+    r"^\s*(\d{1,4})\s*[\s._\-\\/／~]+\s*(?:4k|8k|2160p|1080p|720p)(?:[\s._\-\\/／].*)?$",
     r"^\s*(\d{1,4})\s*$",
 ]
 

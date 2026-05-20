@@ -974,7 +974,7 @@ def post_share_preview(payload: SharePreviewIn, db: Session = Depends(get_db)):
         if matched:
             file_name_re = file_name
             if not is_dir:
-                if not disable_guessit_fallback and (not pattern.strip()) and (not replace.strip()):
+                if not disable_guessit_fallback and (not pattern.strip()) and (not replace.strip()) and bool(tmdb_series_title):
                     try:
                         from app.extensions.runtime.guessit_fallback import guessit_media_target
 
