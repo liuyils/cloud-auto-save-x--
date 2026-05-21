@@ -46,6 +46,24 @@ const runLogDialog = reactive({
   taskId: 0,
 })
 
+type RunAllLogItem = {
+  taskId: number
+  taskname: string
+  status: string
+  stage: string
+  message: string
+  content: string
+}
+
+const runAllDialog = reactive({
+  visible: false,
+  title: '执行全部：日志',
+  running: false,
+  stopRequested: false,
+  items: [] as RunAllLogItem[],
+  activeNames: [] as Array<string | number>,
+})
+
 const deleteDialog = reactive({
   visible: false,
   loading: false,
@@ -54,11 +72,39 @@ const deleteDialog = reactive({
 
 const runLogPre = ref<HTMLElement | null>(null)
 let runLogController: AbortController | null = null
+let runAllController: AbortController | null = null
+const runAllPreRefs = new Map<number, HTMLElement>()
+
+function setRunAllPreRef(taskId: number) {
+  return (el: any) => {
+    if (el) runAllPreRefs.set(taskId, el as HTMLElement)
+    else runAllPreRefs.delete(taskId)
+  }
+}
 
 const viewport = reactive({ width: window.innerWidth })
 const isMobile = computed(() => viewport.width <= 768)
 const isPad = computed(() => viewport.width > 768 && viewport.width <= 1024)
 const showAllActions = computed(() => isMobile.value || viewport.width > 1024)
+
+const runAllStats = computed(() => {
+  const items = runAllDialog.items
+  const stats: Record<string, number> = {
+    pending: 0,
+    running: 0,
+    success: 0,
+    failed: 0,
+    skipped: 0,
+    aborted: 0,
+    unknown: 0,
+  }
+  for (const item of items) {
+    const key = String(item.status || 'unknown')
+    if (Object.prototype.hasOwnProperty.call(stats, key)) stats[key] += 1
+    else stats.unknown += 1
+  }
+  return stats
+})
 
 function onResize() {
   viewport.width = window.innerWidth
@@ -473,6 +519,45 @@ function stopRunLogStream() {
   runLogController = null
 }
 
+function stopRunAllStream() {
+  runAllDialog.stopRequested = true
+  if (!runAllController) return
+  runAllController.abort()
+  runAllController = null
+}
+
+async function copyRunAllLog() {
+  const blocks = runAllDialog.items.map((item) => {
+    const header = `===== ${item.taskname}（${item.status || 'unknown'}）=====`
+    const stage = item.stage ? `阶段：${item.stage}\n` : ''
+    const msg = item.message ? `结果：${item.message}\n` : ''
+    const body = String(item.content || '').trimEnd()
+    return `${header}\n${stage}${msg}${body}`.trimEnd()
+  })
+  const text = blocks.join('\n\n').trim()
+  if (!text) return
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.style.position = 'fixed'
+      textarea.style.top = '0'
+      textarea.style.left = '0'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      textarea.setSelectionRange(0, 99999)
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    }
+    ElMessage.success('日志已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
+
 async function copyRunLog() {
   const text = String(runLogDialog.content || '')
   if (!text) return
@@ -514,6 +599,7 @@ async function saveScheduler() {
 }
 
 async function confirmRunAll() {
+  if (runAllDialog.running) return
   try {
     await ElMessageBox.confirm('确认现在手动执行全部“追剧任务”吗？将按当前任务的 runweek/enddate 自动跳过不符合条件的任务。', '手动执行', {
       type: 'warning',
@@ -523,18 +609,145 @@ async function confirmRunAll() {
   } catch {
     return
   }
-  const target = filteredTasks.value
-  let skippedBan = 0
-  for (const task of target) {
-    if (!task.enabled) continue
-    if (task.shareurl_ban) {
-      skippedBan += 1
-      continue
+  const target = filteredTasks.value.filter((task) => task.enabled)
+  const skippedBan = target.filter((task) => Boolean(task.shareurl_ban)).length
+  const runnable = target.filter((task) => !task.shareurl_ban)
+
+  runAllDialog.items = runnable.map((task) => ({
+    taskId: Number(task.id) || 0,
+    taskname: String(task.taskname || '').trim() || `任务 #${task.id}`,
+    status: 'pending',
+    stage: '',
+    message: '',
+    content: '',
+  }))
+  runAllDialog.activeNames = runnable.map((task) => Number(task.id) || 0)
+  runAllDialog.title = `执行全部：日志（${runnable.length} 个任务）`
+  runAllDialog.visible = true
+  runAllDialog.running = true
+  runAllDialog.stopRequested = false
+
+  try {
+    for (const item of runAllDialog.items) {
+      if (runAllDialog.stopRequested) {
+        item.status = item.status === 'pending' ? 'aborted' : item.status
+        continue
+      }
+
+      item.status = 'running'
+      item.stage = ''
+      item.message = ''
+      item.content = ''
+
+      if (runAllController) runAllController.abort()
+      runAllController = new AbortController()
+
+      const url = `/api/tasks/${item.taskId}/run/stream`
+
+      function appendLine(text: string) {
+        item.content += `${text}\n`
+        nextTick(() => {
+          const el = runAllPreRefs.get(item.taskId)
+          if (!el) return
+          el.scrollTop = el.scrollHeight
+        })
+      }
+
+      function parseSseBlock(block: string) {
+        const lines = block.split('\n')
+        let eventType = ''
+        const dataLines: string[] = []
+        for (const line of lines) {
+          if (line.startsWith('event:')) eventType = line.slice(6).trim()
+          if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+        }
+        return { eventType, dataStr: dataLines.join('\n') }
+      }
+
+      try {
+        const headers: Record<string, string> = {}
+        if (auth.accessToken) headers.Authorization = `Bearer ${auth.accessToken}`
+        const response = await fetch(url, { method: 'POST', headers, signal: runAllController.signal })
+        if (!response.ok) {
+          const text = await response.text().catch(() => '')
+          item.status = 'failed'
+          item.message = text || `HTTP ${response.status}`
+          continue
+        }
+        const reader = response.body?.getReader()
+        if (!reader) {
+          item.status = 'failed'
+          item.message = '响应不支持流式读取'
+          continue
+        }
+        const decoder = new TextDecoder()
+        let buffer = ''
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+          const parts = buffer.split('\n\n')
+          buffer = parts.pop() || ''
+          for (const part of parts) {
+            if (!part.trim()) continue
+            const parsed = parseSseBlock(part)
+            if (!parsed.eventType) continue
+            let data: any = null
+            try {
+              data = parsed.dataStr ? JSON.parse(parsed.dataStr) : null
+            } catch {
+              data = null
+            }
+            if (parsed.eventType === 'init') {
+              item.status = 'running'
+              continue
+            }
+            if (parsed.eventType === 'stage') {
+              item.stage = String(data?.stage || '')
+              continue
+            }
+            if (parsed.eventType === 'log') {
+              appendLine(String(data?.line ?? ''))
+              continue
+            }
+            if (parsed.eventType === 'done') {
+              item.status = String(data?.status || '')
+              item.message = String(data?.message || '')
+              const exe = data?.execution || null
+              if (!item.stage) {
+                const s = String(exe?.stage || '')
+                if (s) item.stage = s
+              }
+              if (!String(item.content || '').trim()) {
+                const full = String(exe?.run_log || '')
+                if (full) item.content = full
+              }
+              break
+            }
+          }
+          if (item.status !== 'running') break
+        }
+        if (item.status === 'running') {
+          item.status = 'unknown'
+          item.message = '执行结束但未收到 done 事件'
+        }
+      } catch (e: any) {
+        if (e?.name === 'AbortError') {
+          item.status = runAllDialog.stopRequested ? 'aborted' : 'aborted'
+          item.message = runAllDialog.stopRequested ? '已停止读取' : '读取中断'
+          continue
+        }
+        item.status = 'failed'
+        item.message = e?.message || String(e || '')
+      } finally {
+        runAllController = null
+      }
     }
-    await handleRun(task)
-  }
-  if (skippedBan > 0) {
-    ElMessage.warning(`已跳过 ${skippedBan} 个封禁任务`)
+  } finally {
+    runAllDialog.running = false
+    runAllDialog.stopRequested = false
+    await loadData()
+    if (skippedBan > 0) ElMessage.warning(`已跳过 ${skippedBan} 个封禁任务`)
   }
 }
 
@@ -632,7 +845,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="toolbar__right">
         <el-button type="primary" @click="loadData">刷新</el-button>
-        <el-button v-if="canRun" @click="confirmRunAll">执行全部</el-button>
+        <el-button v-if="canRun" :loading="runAllDialog.running" :disabled="runAllDialog.running" @click="confirmRunAll">执行全部</el-button>
         <el-button v-if="canWrite" :loading="stopCompletedSaving" @click="confirmStopCompleted">停止已完结任务</el-button>
         <el-button v-if="canWrite" :loading="repairSaving" @click="confirmRepairBanned">修复失效任务</el-button>
         <el-button v-if="canWrite" type="success" @click="openCreateDrawer">新增任务</el-button>
@@ -857,6 +1070,51 @@ onBeforeUnmount(() => {
       </div>
       <pre ref="runLogPre" style="white-space: pre-wrap; font-size: 12px; line-height: 1.5; background: var(--el-fill-color-blank); border: 1px solid var(--el-border-color-lighter); border-radius: 16px; padding: 12px; max-height: 65vh; overflow: auto">{{ runLogDialog.content }}</pre>
     </el-dialog>
+
+    <el-dialog v-model="runAllDialog.visible" :title="runAllDialog.title" :width="isMobile ? '96vw' : '1100px'" :fullscreen="isMobile">
+      <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap">
+        <el-tag :type="runAllDialog.running ? 'warning' : 'success'">{{ runAllDialog.running ? 'running' : 'done' }}</el-tag>
+        <el-tag v-if="runAllStats.success" type="success">success：{{ runAllStats.success }}</el-tag>
+        <el-tag v-if="runAllStats.failed" type="danger">failed：{{ runAllStats.failed }}</el-tag>
+        <el-tag v-if="runAllStats.skipped" type="info">skipped：{{ runAllStats.skipped }}</el-tag>
+        <el-tag v-if="runAllStats.aborted" type="warning">aborted：{{ runAllStats.aborted }}</el-tag>
+        <el-tag v-if="runAllStats.pending" type="info">pending：{{ runAllStats.pending }}</el-tag>
+        <el-tag v-if="runAllStats.unknown" type="danger">unknown：{{ runAllStats.unknown }}</el-tag>
+        <el-button style="margin-left: auto" :disabled="!runAllDialog.running" @click="stopRunAllStream">停止全部</el-button>
+        <el-button :disabled="!runAllDialog.items.length" @click="copyRunAllLog">复制全部日志</el-button>
+      </div>
+
+      <el-collapse v-model="runAllDialog.activeNames">
+        <el-collapse-item v-for="item in runAllDialog.items" :key="item.taskId" :name="item.taskId">
+          <template #title>
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
+              <el-tag
+                v-if="item.status"
+                :type="
+                  item.status === 'success'
+                    ? 'success'
+                    : item.status === 'running'
+                      ? 'warning'
+                      : item.status === 'skipped'
+                        ? 'info'
+                        : item.status === 'pending'
+                          ? 'info'
+                          : item.status === 'aborted'
+                            ? 'warning'
+                            : 'danger'
+                "
+              >
+                {{ item.status }}
+              </el-tag>
+              <span style="font-weight: 600">{{ item.taskname }}</span>
+              <span v-if="item.stage" style="font-size: 12px; color: var(--el-text-color-secondary)">阶段：{{ item.stage }}</span>
+              <span v-if="item.message" style="font-size: 12px; color: var(--el-text-color-secondary)">{{ item.message }}</span>
+            </div>
+          </template>
+          <pre :ref="setRunAllPreRef(item.taskId)" class="run-all-pre">{{ item.content }}</pre>
+        </el-collapse-item>
+      </el-collapse>
+    </el-dialog>
   </div>
 </template>
 
@@ -932,6 +1190,18 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 10px;
   align-items: baseline;
+}
+
+.run-all-pre {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--el-fill-color-blank);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 16px;
+  padding: 12px;
+  max-height: 45vh;
+  overflow: auto;
 }
 
 .task-card__label {
