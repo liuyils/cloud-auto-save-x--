@@ -296,6 +296,7 @@ class AliyunAdapter(BaseCloudDriveAdapter):
         if not ignore_auth:
             if not self._ensure_token_valid():
                 raise Exception("Token 无效")
+        self._throttle_request()
         
         url = f"{host}{path}"
         req_headers = dict(self._session.headers)

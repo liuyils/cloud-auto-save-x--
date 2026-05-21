@@ -301,7 +301,8 @@ class XunleiAdapter(BaseCloudDriveAdapter):
         """发送 HTTP 请求并返回 JSON"""
         if not self._ensure_tokens_valid():
             return {"error": "TokenInvalid", "error_description": "Token 无效"}
-
+        self._throttle_request()
+        
         try:
             if method.upper() == "GET":
                 resp = self._session.get(url, params=params, timeout=30)

@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 from treelib import Tree
@@ -17,6 +18,9 @@ from app.extensions.runtime.plugin_loader import sync_plugin_definitions
 from app.extensions.runtime.plugin_registry import PluginRegistry
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
+
+
+_DB_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass(slots=True)
@@ -195,7 +199,7 @@ class TaskExecutor:
         task_list = PluginHookRunner.task_before(plugins, [task_data], default_adapter, emit_line=log.line)
         task_data = task_list[0] if task_list else task_data
         adapter = account_manager.get_adapter_for_task(task_data)
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(timezone.utc).astimezone(_DB_TZ)
         task_id = int(getattr(task, "id", 0) or 0)
 
         if adapter is None:
@@ -207,7 +211,7 @@ class TaskExecutor:
                 task_id=task_id,
                 status='failed',
                 started_at=started_at,
-                finished_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc).astimezone(_DB_TZ),
                 message='没有匹配的驱动账号',
                 stage=log.stage,
                 run_log=log.render(),
@@ -356,7 +360,7 @@ class TaskExecutor:
             task_id=task_id,
             status=payload.status,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc).astimezone(_DB_TZ),
             tree_summary=payload.tree_summary,
             message=payload.message,
             stage=payload.stage,

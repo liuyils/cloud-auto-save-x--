@@ -60,6 +60,7 @@ class UCAdapter(BaseCloudDriveAdapter):
 
     def _send_request(self, method: str, url: str, **kwargs) -> requests.Response:
         """发送 HTTP 请求"""
+        self._throttle_request()
         headers = {
             "cookie": self.cookie,
             "content-type": "application/json",

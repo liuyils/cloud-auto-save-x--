@@ -73,7 +73,8 @@ class QuarkAdapter(BaseCloudDriveAdapter):
         import requests
         import random
         from datetime import datetime
-
+        self._throttle_request()
+        
         headers = {
             "cookie": self.cookie,
             "content-type": "application/json",

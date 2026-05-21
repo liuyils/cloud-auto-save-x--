@@ -182,7 +182,7 @@ class BaiduAdapter(BaseCloudDriveAdapter):
         """发送 HTTP 请求"""
         if not self._session:
             raise Exception("Session 未初始化，请检查 Cookie")
-
+        self._throttle_request()
         if params is None:
             params = {}
         if params:

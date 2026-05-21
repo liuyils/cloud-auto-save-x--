@@ -296,6 +296,7 @@ class Pan123Adapter(BaseCloudDriveAdapter):
         headers: Optional[Dict[str, str]] = None,
         timeout: int = 30,
     ) -> Dict:
+        self._throttle_request()
         url = path
         if not url.startswith("http://") and not url.startswith("https://"):
             base = base_url or self._api_base

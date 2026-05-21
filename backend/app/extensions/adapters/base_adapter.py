@@ -5,6 +5,9 @@
 """
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Optional, Any
+import random
+import threading
+import time
 
 
 class BaseCloudDriveAdapter(ABC):
@@ -33,7 +36,26 @@ class BaseCloudDriveAdapter(ABC):
         self.index = index + 1
         self.is_active = False
         self.nickname = ""
+
+        self._rate_limit_min_interval = 0.05
+        self._rate_limit_max_interval = 0.10
+        self._rate_limit_lock = threading.Lock()
+        self._last_request_at = 0.0
+
         self.savepath_fid: Dict[str, str] = {"/": "0"}
+
+    def _throttle_request(self) -> None:
+        with self._rate_limit_lock:
+            now = time.monotonic()
+            if self._last_request_at > 0:
+                interval = random.uniform(
+                    self._rate_limit_min_interval, self._rate_limit_max_interval
+                )
+                elapsed = now - self._last_request_at
+                if elapsed < interval:
+                    time.sleep(interval - elapsed)
+                    now = time.monotonic()
+            self._last_request_at = now
 
     @classmethod
     def get_config_meta(cls) -> dict[str, Any]:

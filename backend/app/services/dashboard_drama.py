@@ -41,7 +41,7 @@ def _normalize_api_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None or value.utcoffset() is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=BEIJING_TZ)
     return value.astimezone(BEIJING_TZ)
 
 

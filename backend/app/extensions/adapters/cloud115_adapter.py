@@ -5,7 +5,9 @@
 """
 import re
 import time
+import random
 import logging
+import threading
 import requests
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
@@ -72,6 +74,10 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
     #  HTTP 基础方法
     # ----------------------------------------------------------------
 
+    def _request(self, session: requests.Session, method: str, url: str, **kwargs):
+        self._throttle_request()
+        return session.request(method=method, url=url, **kwargs)
+
     def _create_share_session(self, share_code: str, receive_code: str = ""):
         """
         创建用于浏览分享链接的独立空 session（不携带用户 cookie）。
@@ -86,7 +92,9 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         })
         # 访问分享页面获取 session cookie
         try:
-            share_session.get(
+            self._request(
+                share_session,
+                "GET",
                 f"{self.WEB_URL}/s/{share_code}?password={receive_code}&",
                 timeout=15,
             )
@@ -126,7 +134,9 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
     def get_account_info(self) -> Any:
         """获取账户信息"""
         try:
-            resp = self.auth_session.get(
+            resp = self._request(
+                self.auth_session,
+                "GET",
                 f"{self.PASSPORTAPI_URL}/app/1.0/web/26.0/user/base_info?_t=", timeout=15
             )
             data = self._safe_json(resp)
@@ -184,7 +194,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
             f"&cid=0&receive_code={passcode}&format=json"
         )
         try:
-            resp = share_session.get(url, timeout=15)
+            resp = self._request(share_session, "GET", url, timeout=15)
             data = self._safe_json(resp)
             if data.get("data", {}).get("shareinfo",{}).get("forbid_reason"):
                 return {
@@ -248,7 +258,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
                 f"&asc=0&cid={cid}&receive_code={receive_code}&format=json"
             )
             try:
-                resp = share_session.get(url, timeout=15)
+                resp = self._request(share_session, "GET", url, timeout=15)
                 data = self._safe_json(resp)
                 if not data.get("state"):
                     return {
@@ -310,7 +320,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
                         f"&receive_code={receive_code}&format=json"
                     )
                     try:
-                        resp = share_session.get(url, timeout=15)
+                        resp = self._request(share_session, "GET", url, timeout=15)
                         data = self._safe_json(resp)
                         if not data.get("state"):
                             break
@@ -373,8 +383,12 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
                 "fc_mix": 0,
             }
             try:
-                resp = self.auth_session.get(
-                    f"{self.API_URL}/files", params=params, timeout=15
+                resp = self._request(
+                    self.auth_session,
+                    "GET",
+                    f"{self.API_URL}/files",
+                    params=params,
+                    timeout=15,
                 )
                 data = self._safe_json(resp)
                 if not data.get("state"):
@@ -459,7 +473,9 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         })
         # 先访问分享页获取 session cookie
         try:
-            save_session.get(
+            self._request(
+                save_session,
+                "GET",
                 f"{self.WEB_URL}/s/{share_code}?password={receive_code}&",
                 timeout=15,
             )
@@ -487,7 +503,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         logging.info(f"[115] receive: {url}, file_id={data['file_id']}")
         errors = []
         try:
-            resp = save_session.post(url, data=data, timeout=30)
+            resp = self._request(save_session, "POST", url, data=data, timeout=30)
             result = self._safe_json(resp)
             logging.info(f"[115] receive resp: {result}")
             if not result.get("state"):
@@ -581,8 +597,12 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
 
         data = {"pid": parent_cid, "cname": dir_name}
         try:
-            resp = self.auth_session.post(
-                f"{self.API_URL}/files/add", data=data, timeout=15
+            resp = self._request(
+                self.auth_session,
+                "POST",
+                f"{self.API_URL}/files/add",
+                data=data,
+                timeout=15,
             )
             result = self._safe_json(resp)
             if result.get("state"):
@@ -610,8 +630,12 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         """重命名文件"""
         data = {f"files_new_name[{fid}]": file_name}
         try:
-            resp = self.auth_session.post(
-                f"{self.API_URL}/files/batch_rename", data=data, timeout=15
+            resp = self._request(
+                self.auth_session,
+                "POST",
+                f"{self.API_URL}/files/batch_rename",
+                data=data,
+                timeout=15,
             )
             result = self._safe_json(resp)
             if result.get("state"):
@@ -630,8 +654,12 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         for i, fid in enumerate(filelist):
             data[f"fid[{i}]"] = fid
         try:
-            resp = self.auth_session.post(
-                f"{self.API_URL}/rb/delete", data=data, timeout=15
+            resp = self._request(
+                self.auth_session,
+                "POST",
+                f"{self.API_URL}/rb/delete",
+                data=data,
+                timeout=15,
             )
             result = self._safe_json(resp)
             if result.get("state"):

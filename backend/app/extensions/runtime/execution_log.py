@@ -3,13 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
+
+
+_DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass
 class ExecutionLog:
     lines: list[str] = field(default_factory=list)
     stage: str | None = None
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).astimezone())
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).astimezone(_DISPLAY_TZ))
     emit_line: Callable[[str], None] | None = field(default=None, repr=False)
     emit_stage: Callable[[str], None] | None = field(default=None, repr=False)
 

@@ -160,6 +160,36 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         self._last_share_code = ""
         self._auth_state: Dict[str, Any] | None = None
 
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        raise_status: bool = True,
+        timeout: int | float = 15,
+        allow_redirects: bool | None = None,
+        **kwargs,
+    ) -> requests.Response:
+        if allow_redirects is not None:
+            kwargs["allow_redirects"] = allow_redirects
+        self._throttle_request()
+        
+        resp = self._session.request(method=method, url=url, timeout=timeout, **kwargs)
+        if raise_status:
+            resp.raise_for_status()
+        return resp
+
+    def _request_json(self, method: str, url: str, **kwargs) -> Any:
+        resp = self._request(method, url, **kwargs)
+        try:
+            return resp.json()
+        except Exception:
+            raise RuntimeError((resp.text or "").strip()[:200] or "响应解析失败")
+
+    def _request_text(self, method: str, url: str, **kwargs) -> str:
+        resp = self._request(method, url, **kwargs)
+        return resp.text or ""
+
     def _mask_mobile(self, mobile: str) -> str:
         s = str(mobile or "").strip()
         if len(s) < 7:
@@ -394,8 +424,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
     def _get_login_url_params(self) -> Dict[str, Any]:
         url = f"{self.HOST_URL}/api/portal/loginUrl.action"
         params = {"pageId": 1, "redirectURL": f"{self.HOST_URL}/main.action"}
-        resp = self._session.get(url, params=params, timeout=15, allow_redirects=True)
-        resp.raise_for_status()
+        resp = self._request("GET", url, params=params, timeout=15, allow_redirects=True)
 
         parsed = urlparse(resp.url)
         qs = parse_qs(parsed.query or "")
@@ -416,14 +445,13 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         }
 
         conf_url = f"{self.HOST_URL.replace('cloud.189.cn', 'open.e.189.cn')}/api/logbox/oauth2/appConf.do"
-        conf_resp = self._session.post(
+        conf = self._request_json(
+            "POST",
             conf_url,
             headers=headers,
             data={"version": "2.0", "appKey": app_id},
             timeout=15,
         )
-        conf_resp.raise_for_status()
-        conf = conf_resp.json()
         if not isinstance(conf, dict) or str(conf.get("result")) != "0":
             raise RuntimeError(conf.get("msg") or "页面已过期，刷新页面后重试")
         data = conf.get("data") or {}
@@ -431,9 +459,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             raise RuntimeError("页面已过期，刷新页面后重试")
 
         encrypt_url = f"{self.HOST_URL.replace('cloud.189.cn', 'open.e.189.cn')}/api/logbox/config/encryptConf.do"
-        enc_resp = self._session.post(encrypt_url, headers=headers, data={"appId": app_id}, timeout=15)
-        enc_resp.raise_for_status()
-        enc = enc_resp.json()
+        enc = self._request_json("POST", encrypt_url, headers=headers, data={"appId": app_id}, timeout=15)
         if not isinstance(enc, dict) or int(enc.get("result", 1)) != 0:
             raise RuntimeError("页面已过期，刷新页面后重试")
         enc_data = enc.get("data") or {}
@@ -487,20 +513,18 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         captcha_token = str(login_params.get("captchaToken") or "")
         if captcha_token:
             img_url = f"{self.AUTH_URL}picCaptcha.do"
-            img = self._session.get(img_url, params={"token": captcha_token}, timeout=30)
-            img.raise_for_status()
+            img = self._request("GET", img_url, params={"token": captcha_token}, timeout=30)
             return captcha_token, "", img.content or b""
 
         app_id = str(login_params.get("appKey") or login_params.get("appId") or "cloud")
         uuid_url = f"{self.AUTH_URL}getUUID.do"
-        resp = self._session.post(
+        j = self._request_json(
+            "POST",
             uuid_url,
             data={"appId": app_id},
             headers={"lt": lt, "reqId": req_id},
             timeout=30,
         )
-        resp.raise_for_status()
-        j = resp.json()
         if not isinstance(j, dict) or int(j.get("result", 1)) != 0:
             raise RuntimeError("获取验证码失败，请刷新重试")
         token = str(j.get("encryuuid") or "")
@@ -509,13 +533,13 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             raise RuntimeError("获取验证码失败，请刷新重试")
 
         img_url = f"{self.AUTH_URL}image.do"
-        img = self._session.get(
+        img = self._request(
+            "GET",
             img_url,
             params={"uuid": encode_uuid, "REQID": req_id},
             headers={"lt": lt, "reqId": req_id},
             timeout=30,
         )
-        img.raise_for_status()
         return token, encode_uuid, img.content or b""
 
     def _login_submit(
@@ -568,10 +592,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
                     "X-Requested-With": "XMLHttpRequest",
                 }
             )
-        resp = self._session.post(url, data=data, headers=headers, timeout=15)
-        resp.raise_for_status()
-        j = resp.json()
-        return j
+        return self._request_json("POST", url, data=data, headers=headers, timeout=15)
 
     def _login_by_username_password(self, username: str, password: str, captcha_code: str = "") -> bool:
         try:
@@ -782,9 +803,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             "noCache": str(time.time()),
             "needClassification": "true",
         }
-        resp = self._session.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        j = resp.json()
+        j = self._request_json("GET", url, params=params, timeout=15)
         if not isinstance(j, dict):
             return {}
         if j.get("res_code", 1) != 0:
@@ -841,8 +860,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             "Referer": "https://m.cloud.189.cn/",
             "Accept": "application/json, text/plain, */*",
         }
-        resp = self._session.get(url, params={"noCache": str(time.time())}, headers=headers, timeout=20)
-        resp.raise_for_status()
+        resp = self._request("GET", url, params={"noCache": str(time.time())}, headers=headers, timeout=20)
         try:
             data = resp.json()
         except Exception:
@@ -953,9 +971,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
 
     def _fetch_share_page(self, code: str) -> str:
         url = f"{self.HOST_URL}/web/share"
-        resp = self._session.get(url, params={"code": code}, timeout=15, allow_redirects=True)
-        resp.raise_for_status()
-        return resp.text or ""
+        return self._request_text("GET", url, params={"code": code}, timeout=15, allow_redirects=True)
 
     def _parse_share_page(self, html: str) -> Dict[str, str]:
         if "您访问的页面地址有误" in html:
@@ -1039,8 +1055,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         page = 1
         while True:
             params["pageNum"] = page
-            resp = self._session.get(url, params=params, timeout=15)
-            resp.raise_for_status()
+            resp = self._request("GET", url, params=params, timeout=15)
             try:
                 j = resp.json()
                 if isinstance(j, dict) and int(j.get("res_code", 1)) != 0:
@@ -1393,9 +1408,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             }
             if parent_id not in ("0", "", None):
                 params["fileId"] = parent_id
-            resp = self._session.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            j = resp.json()
+            j = self._request_json("GET", url, params=params, timeout=15)
             if isinstance(j, dict) and "errorVO" in j:
                 raise RuntimeError("提取码错误或资源不可访问")
             data = (j or {}).get("data") if isinstance(j, dict) else None
@@ -1429,9 +1442,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
                 merged: List[Dict[str, Any]] = []
                 page = 1
                 while True:
-                    resp = self._session.get(url, params={"fileId": "-11", "noCache": str(time.time())}, timeout=15)
-                    resp.raise_for_status()
-                    j = resp.json()
+                    j = self._request_json("GET", url, params={"fileId": "-11", "noCache": str(time.time())}, timeout=15)
                     if not isinstance(j, dict) or "errorCode" in j:
                         raise RuntimeError("获取目录列表失败")
                     data = j.get("data") or []
@@ -1479,9 +1490,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
                     "mediaType": 0,
                     "noCache": str(time.time()),
                 }
-                resp = self._session.get(url, params=params, timeout=15)
-                resp.raise_for_status()
-                j = resp.json()
+                j = self._request_json("GET", url, params=params, timeout=15)
                 if not isinstance(j, dict) or "errorCode" in j:
                     raise RuntimeError("获取目录列表失败")
                 ao = j.get("fileListAO") or {}
@@ -1539,9 +1548,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
                 parent_id = found
                 continue
             url = f"{self.HOST_URL}/v2/createFolder.action"
-            resp = self._session.get(url, params={"parentId": str(parent_id), "fileName": name}, timeout=15)
-            resp.raise_for_status()
-            j = resp.json()
+            j = self._request_json("GET", url, params={"parentId": str(parent_id), "fileName": name}, timeout=15)
             fid = j.get("fileId") if isinstance(j, dict) else None
             if not fid:
                 return {"code": 1, "message": "创建目录失败", "data": {}}
@@ -1741,8 +1748,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             data["targetFolderId"] = str(target_folder_id)
         if share_id:
             data["shareId"] = str(share_id)
-        resp = self._session.post(url, data=data, timeout=15)
-        resp.raise_for_status()
+        resp = self._request("POST", url, data=data, timeout=15)
         task_id = (resp.text or "").strip().strip('"').strip("'")
         if not task_id:
             raise RuntimeError("创建任务失败")
@@ -1759,9 +1765,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
     def _check_batch_task(self, task_type: str, task_id: str) -> Dict[str, Any]:
         self._ensure_login()
         url = f"{self.HOST_URL}/checkBatchTask.action"
-        resp = self._session.post(url, data={"type": task_type, "taskId": task_id}, timeout=15)
-        resp.raise_for_status()
-        j = resp.json()
+        j = self._request_json("POST", url, data={"type": task_type, "taskId": task_id}, timeout=15)
         if not isinstance(j, dict):
             raise RuntimeError("查询任务失败")
         return j
@@ -1772,7 +1776,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         data: Dict[str, Any] = {"type": task_type, "taskInfos": json.dumps(task_infos, ensure_ascii=False)}
         if target_folder_id:
             data["targetFolderId"] = str(target_folder_id)
-        resp = self._session.post(url, data=data, timeout=15)
+        resp = self._request("POST", url, data=data, timeout=15, raise_status=False)
         if self._debug:
             try:
                 t = (resp.text or "").replace("\r", " ").replace("\n", " ").strip()
@@ -1798,7 +1802,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
     def _open_batch_check_task(self, task_type: str, task_id: str) -> Dict[str, Any]:
         self._ensure_login()
         url = f"{self.HOST_URL}/api/open/batch/checkBatchTask.action"
-        resp = self._session.post(url, data={"type": task_type, "taskId": task_id}, timeout=15)
+        resp = self._request("POST", url, data={"type": task_type, "taskId": task_id}, timeout=15, raise_status=False)
         if self._debug:
             try:
                 t = (resp.text or "").replace("\r", " ").replace("\n", " ").strip()
