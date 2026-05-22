@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -10,8 +10,6 @@ from sqlalchemy.orm import Session
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
 from app.services.task_scheduler import get_or_create_task_scheduler_setting
-
-BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _safe_json_object(value: str | None) -> dict:
@@ -37,19 +35,6 @@ def _normalize_weekdays(value: object) -> list[int]:
     return sorted(set(days))
 
 
-def _normalize_api_datetime(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    if value.tzinfo is None or value.utcoffset() is None:
-        value = value.replace(tzinfo=BEIJING_TZ)
-    return value.astimezone(BEIJING_TZ)
-
-
-def _to_beijing_date(value: datetime) -> date:
-    dt = _normalize_api_datetime(value) or datetime.now(timezone.utc).astimezone(BEIJING_TZ)
-    return dt.date()
-
-
 def _daterange(start: date, end: date) -> list[date]:
     if start > end:
         return []
@@ -67,11 +52,10 @@ def build_drama_overview(db: Session, *, days: int = 30) -> dict:
     except (TypeError, ValueError):
         window_days = 30
     window_days = max(1, min(365, window_days))
-
-    now_utc = datetime.now(timezone.utc)
+    
+    now_utc = datetime.now()
     since = now_utc - timedelta(days=window_days)
-    now_beijing = now_utc.astimezone(BEIJING_TZ)
-    month_start = datetime(now_beijing.year, now_beijing.month, 1, tzinfo=BEIJING_TZ)
+    month_start = datetime(now_utc.year, now_utc.month, 1)
 
     scheduler = get_or_create_task_scheduler_setting(db)
     tasks = (
@@ -107,8 +91,9 @@ def build_drama_overview(db: Session, *, days: int = 30) -> dict:
     duration_count = 0
     monthly_success_count = 0
 
-    start_day = _to_beijing_date(since)
-    end_day = _to_beijing_date(now_utc)
+    start_day = since.date()
+    end_day = now_utc.date()
+        
     trend_map: dict[str, dict[str, object]] = {
         d.isoformat(): {"total": 0, "success": 0, "failed": 0, "skipped": 0, "dur_sum": 0.0, "dur_cnt": 0}
         for d in _daterange(start_day, end_day)
@@ -136,7 +121,7 @@ def build_drama_overview(db: Session, *, days: int = 30) -> dict:
         else:
             execution_failed += 1
 
-        started_at = _normalize_api_datetime(execution.started_at) or execution.started_at
+        started_at = execution.started_at
         day_key = started_at.date().isoformat()
         bucket = trend_map.get(day_key)
         if bucket is not None:
@@ -148,7 +133,7 @@ def build_drama_overview(db: Session, *, days: int = 30) -> dict:
             else:
                 bucket["failed"] = int(bucket["failed"]) + 1
 
-        finished_at = _normalize_api_datetime(execution.finished_at) if execution.finished_at else None
+        finished_at = execution.finished_at if execution.finished_at else None
         if finished_at is not None:
             delta = (finished_at - started_at).total_seconds()
             if delta >= 0 and delta < 3600 * 24 * 2:
@@ -217,5 +202,5 @@ def build_drama_overview(db: Session, *, days: int = 30) -> dict:
         },
         "trend": trend,
         "recent_failures": recent_failures,
-        "updated_at": _normalize_api_datetime(now_utc),
+        "updated_at": now_utc,
     }

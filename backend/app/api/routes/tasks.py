@@ -68,17 +68,8 @@ from app.services.tasks import create_task, delete_task, get_task, list_tasks, s
 from app.services.tmdb_settings import get_or_create_tmdb_setting, get_tmdb_runtime_config
 
 router = APIRouter()
-_DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 def _share_preview_batch_cache_clear() -> None:
     _preview_batch_cache_clear()
-
-
-def _normalize_api_datetime(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=_DISPLAY_TZ)
-    return value
 
 
 def _execution_out(item) -> TaskExecutionOut:
@@ -86,8 +77,8 @@ def _execution_out(item) -> TaskExecutionOut:
         id=item.id,
         task_id=item.task_id,
         status=item.status,
-        started_at=_normalize_api_datetime(item.started_at) or item.started_at,
-        finished_at=_normalize_api_datetime(item.finished_at),
+        started_at=item.started_at,
+        finished_at=item.finished_at,
         tree_summary=item.tree_summary,
         message=item.message,
         stage=getattr(item, "stage", None),
@@ -720,7 +711,7 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
     init_payload = {
         "task_id": int(task.id),
         "taskname": str(task.taskname),
-        "started_at": datetime.now(timezone.utc).astimezone(_DISPLAY_TZ).isoformat(),
+        "started_at": datetime.now().isoformat(),
     }
     audit.write_audit_log(
         db,
@@ -784,7 +775,7 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
                                 "task_id": task_id,
                                 "status": "failed",
                                 "started_at": log.started_at.isoformat(),
-                                "finished_at": datetime.now(timezone.utc).astimezone(_DISPLAY_TZ).isoformat(),
+                                "finished_at": datetime.now().isoformat(),
                                 "tree_summary": None,
                                 "message": message,
                                 "stage": log.stage,
@@ -839,7 +830,7 @@ def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, cur
     init_payload = {
         "task_id": 0,
         "taskname": str(payload.taskname),
-        "started_at": datetime.now(timezone.utc).astimezone(_DISPLAY_TZ).isoformat(),
+        "started_at": datetime.now().isoformat(),
         "preview": True,
     }
     audit.write_audit_log(
@@ -920,7 +911,7 @@ def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, cur
                                 "task_id": 0,
                                 "status": "failed",
                                 "started_at": log.started_at.isoformat(),
-                                "finished_at": datetime.now(timezone.utc).astimezone(_DISPLAY_TZ).isoformat(),
+                                "finished_at": datetime.now().isoformat(),
                                 "tree_summary": None,
                                 "message": message,
                                 "stage": log.stage,

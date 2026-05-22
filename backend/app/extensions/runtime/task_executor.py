@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,9 +18,6 @@ from app.extensions.runtime.plugin_loader import sync_plugin_definitions
 from app.extensions.runtime.plugin_registry import PluginRegistry
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
-
-
-_DB_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass(slots=True)
@@ -199,7 +196,7 @@ class TaskExecutor:
         task_list = PluginHookRunner.task_before(plugins, [task_data], default_adapter, emit_line=log.line)
         task_data = task_list[0] if task_list else task_data
         adapter = account_manager.get_adapter_for_task(task_data)
-        started_at = datetime.now(timezone.utc).astimezone(_DB_TZ)
+        started_at = datetime.now()
         task_id = int(getattr(task, "id", 0) or 0)
         snapshot_row = None
 
@@ -212,7 +209,7 @@ class TaskExecutor:
                 task_id=task_id,
                 status='failed',
                 started_at=started_at,
-                finished_at=datetime.now(timezone.utc).astimezone(_DB_TZ),
+                finished_at=datetime.now(),
                 message='没有匹配的驱动账号',
                 stage=log.stage,
                 run_log=log.render(),
@@ -295,7 +292,7 @@ class TaskExecutor:
                     snapshot_row = None
             log.set_stage("end")
             log.section("程序结束")
-            finished_at_local = datetime.now(timezone.utc).astimezone()
+            finished_at_local = datetime.now()
             duration_s = (finished_at_local - log.started_at).total_seconds()
             log.line(f"状态: success")
             log.line(f"运行时长: {duration_s:.2f}s")
@@ -347,7 +344,7 @@ class TaskExecutor:
             log.line(f"阶段={stage}: {message}")
             log.set_stage(stage)
             log.section("程序结束")
-            finished_at_local = datetime.now(timezone.utc).astimezone()
+            finished_at_local = datetime.now()
             duration_s = (finished_at_local - log.started_at).total_seconds()
             log.line(f"状态: {status}")
             log.line(f"运行时长: {duration_s:.2f}s")
@@ -376,7 +373,7 @@ class TaskExecutor:
             task_id=task_id,
             status=payload.status,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc).astimezone(_DB_TZ),
+            finished_at=datetime.now(),
             tree_summary=payload.tree_summary,
             message=payload.message,
             stage=payload.stage,

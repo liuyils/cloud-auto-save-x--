@@ -110,7 +110,7 @@ def probe_drive_account(db: Session, account_id: int) -> DriveAccount:
         config=runtime_config,
         account_name=account.name,
     )
-    account.last_checked_at = datetime.now(timezone.utc)
+    account.last_checked_at = datetime.now()
     ok = False
     if adapter is None:
         account.runtime_status = 'error'

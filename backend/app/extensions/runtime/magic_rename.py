@@ -7,12 +7,6 @@ from typing import Any
 
 from natsort import natsorted
 
-_BEIJING_TZ = timezone(timedelta(hours=8))
-
-
-def _bj_now() -> datetime:
-    return datetime.now(_BEIJING_TZ)
-
 
 class MagicRename:
     magic_regex: dict[str, dict[str, str]] = {
@@ -172,7 +166,7 @@ class MagicRename:
                     value = m.group()
                     if key == "{DATE}":
                         digits = "".join([c for c in value if c.isdigit()])
-                        value = str(_bj_now().year)[: (8 - len(digits))] + digits
+                        value = str(datetime.now().year)[: (8 - len(digits))] + digits
                     replace = replace.replace(key, value)
                     matched = True
                     break

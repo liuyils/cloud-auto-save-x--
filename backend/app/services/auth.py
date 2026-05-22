@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from fastapi import Request, Response
 from sqlalchemy import select
@@ -20,13 +20,13 @@ from app.models.user import User
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now()
 
 
 def _normalize_dt(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value
+    return value.astimezone().replace(tzinfo=None)
 
 
 def _client_ip(request: Request) -> str | None:

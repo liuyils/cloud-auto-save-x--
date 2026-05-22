@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -26,7 +26,7 @@ class PluginRegistry:
             .all()
         )
         items: list[dict[str, Any]] = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now()
         for definition in rows:
             config = definition.config
             if config is None or not config.enabled:

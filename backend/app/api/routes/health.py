@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 import os
 
 from fastapi import APIRouter, Depends
@@ -26,7 +26,7 @@ def health(db: Session = Depends(get_db)):
     return {
         "status": "ok" if db_connected else "degraded",
         "db_connected": db_connected,
-        "time": datetime.now(UTC).isoformat(),
+        "time": datetime.now().isoformat(),
         "build_sha": build_sha,
         "build_tag": build_tag,
     }

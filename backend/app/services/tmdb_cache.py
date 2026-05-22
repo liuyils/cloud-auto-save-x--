@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
@@ -22,7 +22,7 @@ _lock_timeout = timedelta(minutes=10)
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now()
 
 
 def _load_json(payload: str | None) -> Any:

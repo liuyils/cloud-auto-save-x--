@@ -30,6 +30,7 @@ ENV BUILD_SHA=$BUILD_SHA \
 WORKDIR /app
 
 RUN apk add --no-cache nginx supervisor tzdata ca-certificates libffi openssl \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && mkdir -p /run/nginx /var/log/supervisor /app/backend/data
 
 COPY --from=backend-builder /usr/local /usr/local

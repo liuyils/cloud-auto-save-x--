@@ -52,7 +52,7 @@ def resolve_tmdb_latest_aired_episode(details: dict[str, Any] | None) -> tuple[i
     picked = None
     if isinstance(next_ep, dict):
         ad = _parse_air_date(next_ep.get("air_date"))
-        if ad is not None and ad <= datetime.now(_SH_TZ).date():
+        if ad is not None and ad <= datetime.now().date():
             picked = next_ep
     if picked is None:
         picked = last_ep if isinstance(last_ep, dict) else None

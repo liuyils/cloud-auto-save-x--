@@ -5,7 +5,7 @@ import re
 import os
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -16,8 +16,6 @@ from app.core.errors import bad_request
 from app.extensions.runtime.execution_log import ExecutionLog
 from app.extensions.runtime.magic_rename import MagicRename
 
-
-_DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class SkipTask(Exception):
@@ -541,7 +539,7 @@ class DramaTaskExecutor:
         runweek_mode = str(extra.get("runweek_mode") or "manual").strip().lower()
         runweek = extra.get("runweek") or []
         enddate = _parse_enddate(self.task_data.get("enddate"))
-        now = datetime.now(timezone.utc).astimezone(_DISPLAY_TZ)
+        now = datetime.now()
         self._set_stage("validate_schedule")
         self._section("验证调度条件")
         self._line(f"执行时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")

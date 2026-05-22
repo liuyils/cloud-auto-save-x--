@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -9,7 +9,7 @@ from app.models.share_preview_batch_cache import SharePreviewBatchCache
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now()
 
 
 def get_cached_preview_batch_item(db: Session, *, shareurl: str) -> tuple[SharePreviewBatchCache | None, bool]:

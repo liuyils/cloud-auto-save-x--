@@ -197,8 +197,7 @@ def _iso_to_cst(iso_time_str: str) -> str:
 
     try:
         dt = datetime.fromisoformat(str(iso_time_str))
-        tz = timezone(timedelta(hours=8))
-        dt_cst = dt if dt.astimezone(tz) > datetime.now(tz) else dt.astimezone(tz)
+        dt_cst = dt if dt > datetime.now() else dt
         return dt_cst.strftime("%Y-%m-%d %H:%M:%S") if dt_cst.year >= 1970 else ""
     except Exception:
         return ""

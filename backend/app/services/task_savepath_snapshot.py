@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 from typing import Any
 
@@ -151,7 +151,7 @@ def upsert_task_savepath_snapshot(
             files_json=files_json,
             file_count=file_count,
             total_size=total_size,
-            captured_at=datetime.now(timezone.utc),
+            captured_at=datetime.now(),
         )
         db.add(row)
         return row
@@ -162,7 +162,7 @@ def upsert_task_savepath_snapshot(
     row.files_json = files_json
     row.file_count = file_count
     row.total_size = total_size
-    row.captured_at = datetime.now(timezone.utc)
+    row.captured_at = datetime.now()
     return row
 
 

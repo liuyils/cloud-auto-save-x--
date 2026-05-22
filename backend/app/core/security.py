@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import bcrypt
 from jose import JWTError, jwt
@@ -30,7 +30,7 @@ def validate_password_strength(password: str) -> None:
 
 
 def create_access_token(subject: str, permissions: list[str]) -> str:
-    now = datetime.now(UTC)
+    now = datetime.now()
     expire = now + timedelta(seconds=settings.access_token_expires_seconds)
     payload = {"sub": subject, "perms": permissions, "iat": int(now.timestamp()), "exp": int(expire.timestamp())}
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
