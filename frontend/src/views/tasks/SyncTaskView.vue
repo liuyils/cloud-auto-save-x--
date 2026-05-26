@@ -99,6 +99,8 @@ const runLogDialog = reactive({
   stage: '',
   message: '',
   syncTaskId: 0,
+  sourceType: '',
+  targetType: '',
   startedAt: '',
 })
 
@@ -130,6 +132,17 @@ let runFileLoadedExecutionId = 0
 
 const runLogPre = ref<HTMLElement | null>(null)
 let runLogController: AbortController | null = null
+
+const showRunFileProgress = computed(() => {
+  const st = String((runLogDialog as any)?.sourceType || '')
+  const tt = String((runLogDialog as any)?.targetType || '')
+  if (st && tt) return st === 'openlist' && tt === 'openlist'
+  const id = Number(runLogDialog.syncTaskId) || 0
+  if (!id) return false
+  const task = tasks.value.find((t) => Number(t.id) === id)
+  if (!task) return false
+  return String(task?.source?.type || '') === 'openlist' && String(task?.target?.type || '') === 'openlist'
+})
 
 const pathPicker = reactive({
   visible: false,
@@ -610,8 +623,10 @@ async function refreshLatestExecution(syncTaskId: number) {
   runLogDialog.message = String(exe.message || '')
   runLogDialog.startedAt = String(exe.started_at || '')
   if (exe.run_log) runLogDialog.content = String(exe.run_log || '')
-  applyStatsObject(exe.stats)
-  if (exe.id) await loadExecutionFiles(syncTaskId, Number(exe.id))
+  if (showRunFileProgress.value) {
+    applyStatsObject(exe.stats)
+    if (exe.id) await loadExecutionFiles(syncTaskId, Number(exe.id))
+  }
   return exe
 }
 
@@ -716,6 +731,8 @@ function onRunLogDialogClosed() {
     runLogController.abort()
     runLogController = null
   }
+  runLogDialog.sourceType = ''
+  runLogDialog.targetType = ''
 }
 
 async function runSync(row: SyncTaskItem) {
@@ -723,6 +740,8 @@ async function runSync(row: SyncTaskItem) {
     runLogDialog.visible = true
     runLogDialog.title = `执行日志：${row.name}`
     runLogDialog.syncTaskId = row.id
+    runLogDialog.sourceType = String(row?.source?.type || '')
+    runLogDialog.targetType = String(row?.target?.type || '')
     runLogDialog.status = 'running'
     runLogDialog.stage = ''
     runLogDialog.message = ''
@@ -750,6 +769,8 @@ async function runSync(row: SyncTaskItem) {
   runLogDialog.message = ''
   runLogDialog.content = ''
   runLogDialog.syncTaskId = row.id
+  runLogDialog.sourceType = String(row?.source?.type || '')
+  runLogDialog.targetType = String(row?.target?.type || '')
   runLogDialog.startedAt = ''
   resetRunFileStats()
   runFileView.value = 'list'
@@ -824,7 +845,7 @@ async function runSync(row: SyncTaskItem) {
           continue
         }
         if (parsed.eventType === 'progress') {
-          applyProgressPayload(data)
+          if (showRunFileProgress.value) applyProgressPayload(data)
           continue
         }
         if (parsed.eventType === 'done') {
@@ -839,7 +860,7 @@ async function runSync(row: SyncTaskItem) {
             const full = String(exe?.run_log || '')
             if (full) runLogDialog.content = full
           }
-          applyStatsObject(exe?.stats || null)
+          if (showRunFileProgress.value) applyStatsObject(exe?.stats || null)
           if (runLogDialog.status === 'success') ElMessage.success('同步已完成')
           else ElMessage.error(runLogDialog.message || '同步失败')
           await loadData()
@@ -864,6 +885,8 @@ async function runSync(row: SyncTaskItem) {
       runLogController = null
       runLogDialog.syncTaskId = 0
       runLogDialog.startedAt = ''
+      runLogDialog.sourceType = ''
+      runLogDialog.targetType = ''
     }
   }
 }
@@ -876,6 +899,8 @@ function stopRunLogStream() {
     runLogDialog.message = '已停止'
     runLogDialog.syncTaskId = 0
     runLogDialog.startedAt = ''
+    runLogDialog.sourceType = ''
+    runLogDialog.targetType = ''
     stopRunPoll()
     return
   }
@@ -1207,75 +1232,77 @@ onMounted(loadData)
         <el-button size="small" :disabled="runLogDialog.status !== 'running'" @click="stopRunLogStream">停止查看</el-button>
       </div>
 
-      <div :style="runStatsGridStyle">
-        <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
-          <div style="color: var(--el-text-color-secondary); font-size: 12px">总文件</div>
-          <div style="font-size: 22px; font-weight: 600">{{ runFileStats.total_files }}</div>
+      <div v-if="showRunFileProgress">
+        <div :style="runStatsGridStyle">
+          <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
+            <div style="color: var(--el-text-color-secondary); font-size: 12px">总文件</div>
+            <div style="font-size: 22px; font-weight: 600">{{ runFileStats.total_files }}</div>
+          </div>
+          <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
+            <div style="color: var(--el-text-color-secondary); font-size: 12px">已同步</div>
+            <div style="font-size: 22px; font-weight: 600">{{ runFileStats.copied_files + runFileStats.deleted_files }}</div>
+          </div>
+          <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
+            <div style="color: var(--el-text-color-secondary); font-size: 12px">已跳过</div>
+            <div style="font-size: 22px; font-weight: 600">{{ runFileStats.skipped_files }}</div>
+          </div>
+          <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
+            <div style="color: var(--el-text-color-secondary); font-size: 12px">失败</div>
+            <div style="font-size: 22px; font-weight: 600">{{ runFileStats.failed_files }}</div>
+          </div>
         </div>
-        <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
-          <div style="color: var(--el-text-color-secondary); font-size: 12px">已同步</div>
-          <div style="font-size: 22px; font-weight: 600">{{ runFileStats.copied_files + runFileStats.deleted_files }}</div>
-        </div>
-        <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
-          <div style="color: var(--el-text-color-secondary); font-size: 12px">已跳过</div>
-          <div style="font-size: 22px; font-weight: 600">{{ runFileStats.skipped_files }}</div>
-        </div>
-        <div style="background: var(--el-fill-color-light); border-radius: 8px; padding: 10px 12px">
-          <div style="color: var(--el-text-color-secondary); font-size: 12px">失败</div>
-          <div style="font-size: 22px; font-weight: 600">{{ runFileStats.failed_files }}</div>
-        </div>
-      </div>
 
-      <div style="display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 8px">
-        <div style="color: var(--el-text-color-secondary)">{{ runFileStats.done_files }}/{{ runFileStats.total_files }} 文件</div>
-        <el-radio-group v-model="runFileView" size="small">
-          <el-radio-button label="list">列表</el-radio-button>
-          <el-radio-button label="tree">树形</el-radio-button>
-        </el-radio-group>
-      </div>
-      <el-progress :percentage="toPercent(runFileStats.done_files, runFileStats.total_files)" :stroke-width="10" style="margin-bottom: 12px" />
+        <div style="display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 8px">
+          <div style="color: var(--el-text-color-secondary)">{{ runFileStats.done_files }}/{{ runFileStats.total_files }} 文件</div>
+          <el-radio-group v-model="runFileView" size="small">
+            <el-radio-button label="list">列表</el-radio-button>
+            <el-radio-button label="tree">树形</el-radio-button>
+          </el-radio-group>
+        </div>
+        <el-progress :percentage="toPercent(runFileStats.done_files, runFileStats.total_files)" :stroke-width="10" style="margin-bottom: 12px" />
 
-      <div v-if="runFileView === 'list'">
-        <el-table :data="runFileStats.events" size="small" style="width: 100%" :height="runEventsTableHeight">
-          <el-table-column label="状态" width="90">
-            <template #default="{ row }">
-              <el-tag v-if="row.status === 'success'" type="success" size="small">OK</el-tag>
-              <el-tag v-else-if="row.status === 'syncing'" type="info" size="small">SYNC</el-tag>
-              <el-tag v-else-if="row.status === 'pending'" type="info" size="small">PEND</el-tag>
-              <el-tag v-else-if="row.status === 'skipped'" type="warning" size="small">SKIP</el-tag>
-              <el-tag v-else type="danger" size="small">FAIL</el-tag>
+        <div v-if="runFileView === 'list'">
+          <el-table :data="runFileStats.events" size="small" style="width: 100%" :height="runEventsTableHeight">
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag v-if="row.status === 'success'" type="success" size="small">OK</el-tag>
+                <el-tag v-else-if="row.status === 'syncing'" type="info" size="small">SYNC</el-tag>
+                <el-tag v-else-if="row.status === 'pending'" type="info" size="small">PEND</el-tag>
+                <el-tag v-else-if="row.status === 'skipped'" type="warning" size="small">SKIP</el-tag>
+                <el-tag v-else type="danger" size="small">FAIL</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="动作" width="90">
+              <template #default="{ row }">
+                <el-tag v-if="row.action === 'copy'" type="info" size="small">copy</el-tag>
+                <el-tag v-else-if="row.action === 'delete'" type="danger" size="small">delete</el-tag>
+                <el-tag v-else type="info" size="small">{{ row.action || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="path" label="路径" min-width="360" show-overflow-tooltip />
+            <el-table-column label="大小" width="120">
+              <template #default="{ row }">
+                <span>{{ row.size != null ? formatSize(row.size) : '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="message" label="信息" min-width="160" show-overflow-tooltip />
+          </el-table>
+        </div>
+        <div v-else>
+          <el-tree :data="runFileTreeData" node-key="key" :expand-on-click-node="false" :style="runTreeStyle">
+            <template #default="{ data }">
+              <span>{{ data.label }}</span>
+              <el-tag
+                v-if="data.kind === 'file'"
+                size="small"
+                :type="data.status === 'success' ? 'success' : data.status === 'skipped' ? 'warning' : data.status === 'syncing' || data.status === 'pending' ? 'info' : 'danger'"
+                style="margin-left: 8px"
+              >
+                {{ data.status === 'success' ? 'OK' : data.status === 'skipped' ? 'SKIP' : data.status === 'syncing' ? 'SYNC' : data.status === 'pending' ? 'PEND' : 'FAIL' }}
+              </el-tag>
             </template>
-          </el-table-column>
-          <el-table-column label="动作" width="90">
-            <template #default="{ row }">
-              <el-tag v-if="row.action === 'copy'" type="info" size="small">copy</el-tag>
-              <el-tag v-else-if="row.action === 'delete'" type="danger" size="small">delete</el-tag>
-              <el-tag v-else type="info" size="small">{{ row.action || '-' }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="path" label="路径" min-width="360" show-overflow-tooltip />
-          <el-table-column label="大小" width="120">
-            <template #default="{ row }">
-              <span>{{ row.size != null ? formatSize(row.size) : '-' }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="message" label="信息" min-width="160" show-overflow-tooltip />
-        </el-table>
-      </div>
-      <div v-else>
-        <el-tree :data="runFileTreeData" node-key="key" :expand-on-click-node="false" :style="runTreeStyle">
-          <template #default="{ data }">
-            <span>{{ data.label }}</span>
-            <el-tag
-              v-if="data.kind === 'file'"
-              size="small"
-              :type="data.status === 'success' ? 'success' : data.status === 'skipped' ? 'warning' : data.status === 'syncing' || data.status === 'pending' ? 'info' : 'danger'"
-              style="margin-left: 8px"
-            >
-              {{ data.status === 'success' ? 'OK' : data.status === 'skipped' ? 'SKIP' : data.status === 'syncing' ? 'SYNC' : data.status === 'pending' ? 'PEND' : 'FAIL' }}
-            </el-tag>
-          </template>
-        </el-tree>
+          </el-tree>
+        </div>
       </div>
 
       <el-divider content-position="left">原始日志</el-divider>

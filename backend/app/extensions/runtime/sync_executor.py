@@ -964,11 +964,12 @@ class SyncExecutor:
             names: list[str] = list(group["names"])
             for i in range(0, len(names), strategy.openlist_copy_batch_size):
                 batch = names[i : i + strategy.openlist_copy_batch_size]
+                batch_paths = [posixpath.normpath(posixpath.join(group["dst_dir"], str(name))) for name in batch]
                 if strategy.request_interval_seconds > 0:
                     time.sleep(strategy.request_interval_seconds)
                 self._ensure_openlist_abs_dir(client, str(group["dst_dir"]), log=log)
-                for name in batch:
-                    push_event("copy", "syncing", posixpath.normpath(posixpath.join(group["dst_dir"], str(name))))
+                for p in batch_paths:
+                    push_event("copy", "syncing", p)
                 flush_now()
                 try:
                     log.line(f"openlist fs_copy: src_dir={group['src_dir']} dst_dir={group['dst_dir']} count={len(batch)}")
@@ -985,9 +986,29 @@ class SyncExecutor:
                     if isinstance(data, dict):
                         tasks = data.get("tasks") or []
                     if isinstance(tasks, list) and tasks:
-                        self._wait_openlist_tasks(client, "copy", tasks, log=log, flush_now=flush_now)
-                    for name in batch:
-                        push_event("copy", "success", posixpath.normpath(posixpath.join(group["dst_dir"], str(name))))
+                        last_emit_ts = 0.0
+                        last_emit_val: float | None = None
+
+                        def _emit_batch_progress(p: float | None) -> None:
+                            nonlocal last_emit_ts, last_emit_val
+                            if p is None:
+                                return
+                            now = _now_ts()
+                            if now - last_emit_ts < 2.0:
+                                return
+                            if last_emit_val is not None and abs(float(p) - float(last_emit_val)) < 0.5 and now - last_emit_ts < 6.0:
+                                return
+                            if len(batch_paths) > 50:
+                                return
+                            msg = f"{float(p):.1f}%"
+                            for bp in batch_paths:
+                                push_event("copy", "syncing", bp, message=msg)
+                            last_emit_ts = now
+                            last_emit_val = float(p)
+
+                        self._wait_openlist_tasks(client, "copy", tasks, log=log, flush_now=flush_now, on_progress=_emit_batch_progress)
+                    for p in batch_paths:
+                        push_event("copy", "success", p)
                 except Exception as e:
                     log.line(
                         "openlist fs_copy failed: "
@@ -996,8 +1017,8 @@ class SyncExecutor:
                         f"err={str(e).strip() or type(e).__name__} "
                         f"http_status={getattr(e, 'http_status', None)} api_code={getattr(e, 'api_code', None)} api_message={getattr(e, 'api_message', None)}"
                     )
-                    for name in batch:
-                        push_event("copy", "failed", posixpath.normpath(posixpath.join(group["dst_dir"], str(name))), message=str(e))
+                    for p in batch_paths:
+                        push_event("copy", "failed", p, message=str(e))
 
         for dst_dir, names in delete_groups.items():
             for i in range(0, len(names), 200):
@@ -1024,6 +1045,7 @@ class SyncExecutor:
         *,
         log: ExecutionLog,
         flush_now: Callable[[], None] | None = None,
+        on_progress: Callable[[float | None], None] | None = None,
     ) -> None:
         tids: list[str] = []
         for t in tasks:
@@ -1037,6 +1059,7 @@ class SyncExecutor:
         last_print = 0.0
         start_ts = _now_ts()
         fail_counts: dict[str, int] = {tid: 0 for tid in tids}
+        progresses: dict[str, float | None] = {tid: None for tid in tids}
         while pending:
             done: set[str] = set()
             for tid in list(pending):
@@ -1050,6 +1073,10 @@ class SyncExecutor:
                         state_raw = data.get("state") if "state" in data else data.get("State")
                         state = str(state_raw or "").strip().lower()
                         progress = data.get("progress")
+                    try:
+                        progresses[tid] = float(progress) if progress is not None and str(progress).strip() != "" else None
+                    except Exception:
+                        progresses[tid] = None
 
                     terminal = False
                     if state in {"succeeded", "success", "finished", "done", "completed", "failed", "error", "canceled", "cancelled"}:
@@ -1104,6 +1131,9 @@ class SyncExecutor:
                     continue
             if done:
                 pending -= done
+            if on_progress is not None:
+                vals = [v for v in progresses.values() if isinstance(v, (int, float))]
+                on_progress((sum(vals) / len(vals)) if vals else None)
             if not pending:
                 break
             if _now_ts() - start_ts > 6 * 3600:
