@@ -58,6 +58,7 @@ from app.schemas.task_repair import RepairBannedTasksOut
 from app.services import audit
 from app.services.notifications.sender import send_runtime
 from app.services.notifications.task_notify import DRAMA_NOTIFY_TITLE, build_task_section
+from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution, trigger_linked_sync_tasks_async
 from app.services.share_preview_batch import cache_clear as _preview_batch_cache_clear
 from app.services.share_preview_batch import preview_share_batch
 from app.services.drama_update_progress import build_drama_update_progress
@@ -703,6 +704,8 @@ def post_run_task(request: Request, task_id: int, current: CurrentUser = Depends
                 send_runtime(db, DRAMA_NOTIFY_TITLE, section)
         except Exception:
             pass
+        if should_trigger_linked_sync_for_drama_execution(execution):
+            trigger_linked_sync_tasks_async([str(getattr(task, "task_uid", "") or "")], source="api.tasks.run")
     return _execution_out(execution)
 
 
@@ -750,6 +753,8 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
                             send_runtime(wdb, DRAMA_NOTIFY_TITLE, section)
                     except Exception:
                         pass
+                    if should_trigger_linked_sync_for_drama_execution(execution):
+                        trigger_linked_sync_tasks_async([str(getattr(wtask, "task_uid", "") or "")], source="api.tasks.run.stream")
                 q.put(
                     (
                         "done",

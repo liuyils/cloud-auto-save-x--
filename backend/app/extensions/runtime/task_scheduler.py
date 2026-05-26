@@ -20,6 +20,9 @@ from app.services.tmdb_cache import purge_cold_cache, refresh_expired_cache, ref
 from app.services.tmdb_cache_scheduler import get_or_create_tmdb_cache_scheduler_setting
 from app.services.drive_account_probe_scheduler import get_or_create_drive_account_probe_scheduler_setting
 from app.services.drive_accounts import probe_drive_account, sign_in_drive_account
+from app.services.sync_execution_cleanup import purge_old_sync_executions
+from app.services.sync_execution_recovery import abort_stale_running_sync_executions
+from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution, trigger_linked_sync_tasks_async
 from app.models.drive_account import DriveAccount
 from app.extensions.runtime.task_executor import TaskExecutor
 from app.core.errors import ApiError
@@ -37,6 +40,18 @@ class TaskSchedulerManager:
         self.scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
         self.scheduler.start()
         self.reload()
+        try:
+            self.scheduler.add_job(
+                run_sync_execution_recovery,
+                trigger=CronTrigger(minute="*/10", timezone="Asia/Shanghai"),
+                id="sync_execution_recovery",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=60,
+            )
+        except Exception as e:
+            logging.error(f"同步执行兜底调度加载失败: {e}")
 
     def shutdown(self) -> None:
         if self.scheduler is None:
@@ -149,7 +164,7 @@ class TaskSchedulerManager:
         if not bool(getattr(setting, "enabled", False)):
             if self.scheduler.get_job(job_id):
                 self.scheduler.remove_job(job_id)
-                logger.info("已移除驱动账号探测调度")
+                logging.info("已移除驱动账号探测调度")
             return
         try:
             trigger = CronTrigger.from_crontab(str(setting.crontab), timezone=str(setting.timezone or "Asia/Shanghai"))
@@ -207,6 +222,38 @@ def run_drama_tasks() -> None:
             repair_banned_drama_tasks(db)
         except Exception:
             db.rollback()
+        success_task_uids: list[str] = []
+        for task, execution in pairs:
+            if should_trigger_linked_sync_for_drama_execution(execution):
+                uid = str(getattr(task, "task_uid", "") or "").strip()
+                if uid:
+                    success_task_uids.append(uid)
+        if success_task_uids:
+            trigger_linked_sync_tasks_async(success_task_uids, source="scheduler.run_drama_tasks")
+
+
+def run_sync_execution_recovery() -> None:
+    with SessionLocal() as db:
+        try:
+            n = abort_stale_running_sync_executions(db, threshold_seconds=2 * 60 * 60)
+            cleanup = purge_old_sync_executions(db, keep_per_task=3)
+            if n or int(cleanup.get("deleted_executions") or 0) or int(cleanup.get("deleted_files") or 0):
+                db.commit()
+                if cleanup.get("deleted_executions") or cleanup.get("deleted_files"):
+                    logging.info(
+                        "同步执行历史清理完成 sync_tasks=%s deleted_executions=%s deleted_files=%s",
+                        int(cleanup.get("sync_tasks") or 0),
+                        int(cleanup.get("deleted_executions") or 0),
+                        int(cleanup.get("deleted_files") or 0),
+                    )
+            else:
+                db.rollback()
+        except OperationalError as e:
+            logging.error(f"同步执行兜底调度失败: {e}")
+            db.rollback()
+        except Exception as e:
+            logging.error(f"同步执行兜底调度异常: {e}")
+            db.rollback()
 
 
 def run_tmdb_cache_refresh() -> None:
@@ -226,7 +273,7 @@ def run_tmdb_cache_refresh() -> None:
                 result = refresh_expired_cache(db, max_items=max_items, force=True)
             deleted = purge_cold_cache(db, retention_days=retention_days)
             db.commit()
-            logger.info(
+            logging.info(
                 "TMDB 缓存定时刷新执行完成 only_refresh_linked_tasks=%s max_items_per_run=%s refreshed=%s targets=%s configured=%s purged=%s",
                 only_linked,
                 max_items,

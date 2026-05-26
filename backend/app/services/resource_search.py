@@ -485,7 +485,8 @@ def fetch_task_suggestions(
             data = r.json()
 
             if isinstance(data, dict):
-                return data if isinstance(data, list) else []
+                items = data.get("data") if isinstance(data.get("data"), list) else []
+                return items
             return data if isinstance(data, list) else []
         except Exception:
             return []
@@ -596,9 +597,6 @@ def fetch_task_suggestions(
             removed_by_drive_type += 1
             continue
         name = item.get("taskname") if item.get("taskname") else item.get("content", "")
-        if keyword and keyword.lower() not in name.lower():
-            removed_by_accounts += 1
-            continue
         item['taskname'] = name
         filtered.append(item)
 

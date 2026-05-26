@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.errors import bad_request, not_found
 from app.extensions.runtime.adapter_registry import AdapterRegistry
 from app.extensions.runtime.task_executor import TaskExecutor
+from app.models.sync_task_drama_link import SyncTaskDramaLink
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
 
@@ -74,6 +75,7 @@ def get_task(db: Session, task_id: int) -> Task:
     task = db.execute(select(Task).options(selectinload(Task.executions)).where(Task.id == task_id)).scalars().first()
     if task is None:
         raise not_found('TASK_NOT_FOUND', '任务不存在')
+    return task
 
 
 def create_task(db: Session, **payload) -> Task:
@@ -187,6 +189,7 @@ def set_task_enabled(db: Session, task_id: int, enabled: bool) -> Task:
 
 def delete_task(db: Session, task_id: int) -> None:
     task = get_task(db, task_id)
+    db.query(SyncTaskDramaLink).filter(SyncTaskDramaLink.task_uid == str(task.task_uid)).delete(synchronize_session=False)
     db.delete(task)
     db.flush()
 
