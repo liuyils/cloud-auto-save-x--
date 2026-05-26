@@ -11,6 +11,7 @@ class TaskBase(BaseModel):
     taskname: str = Field(min_length=1, max_length=255)
     shareurl: str = Field(min_length=1)
     savepath: str = Field(min_length=1, max_length=255)
+    sync_task_uids: list[str] | None = None
     pattern: str | None = Field(default=None, max_length=255)
     replace: str | None = Field(default=None, max_length=255)
     enddate: str | None = Field(default=None, max_length=32)
@@ -35,6 +36,7 @@ class TaskUpdateIn(BaseModel):
     taskname: str | None = Field(default=None, min_length=1, max_length=255)
     shareurl: str | None = None
     savepath: str | None = Field(default=None, min_length=1, max_length=255)
+    sync_task_uids: list[str] | None = None
     pattern: str | None = Field(default=None, max_length=255)
     replace: str | None = Field(default=None, max_length=255)
     enddate: str | None = Field(default=None, max_length=32)

@@ -28,6 +28,7 @@ export async function createTask(payload: {
   taskname: string
   shareurl: string
   savepath: string
+  sync_task_uids?: string[]
   pattern?: string | null
   replace?: string | null
   enddate?: string | null
@@ -53,6 +54,7 @@ export async function updateTask(
     taskname: string
     shareurl: string
     savepath: string
+    sync_task_uids: string[]
     pattern: string | null
     replace: string | null
     enddate: string | null

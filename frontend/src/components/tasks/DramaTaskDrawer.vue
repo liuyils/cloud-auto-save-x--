@@ -8,6 +8,7 @@ import { fetchTaskSuggestions } from '@/api/resourceSearch'
 import type { DriveAccountItem, PluginItem } from '@/types/extensions'
 import type { TMDBBrief } from '@/types/media'
 import type { TaskSuggestionItem } from '@/types/resourceSearch'
+import type { SyncTaskItem } from '@/types/syncTasks'
 import type { DriveBrowseItem, MagicRegexRule, SharePreviewItem, TaskItem } from '@/types/tasks'
 import { detectDriveTypeByUrl } from '@/utils/driveType'
 
@@ -24,6 +25,7 @@ type TaskFormPayload = {
   taskname: string
   shareurl: string
   savepath: string
+  sync_task_uids?: string[]
   pattern?: string | null
   replace?: string | null
   enddate?: string | null
@@ -45,6 +47,7 @@ const props = withDefaults(
     task?: TaskItem | null
     accounts: DriveAccountItem[]
     plugins: PluginItem[]
+    syncTasks?: SyncTaskItem[]
     submitting?: boolean
     presetTaskname?: string
     presetTmdb?: { tmdb_id: number; tmdb_media_type: 'movie' | 'tv' } | null
@@ -53,6 +56,7 @@ const props = withDefaults(
   {
     task: null,
     submitting: false,
+    syncTasks: () => [],
     presetTaskname: '',
     presetTmdb: null,
     autoDeepSuggest: false,
@@ -77,6 +81,7 @@ const state = reactive({
   savepath: '',
   account_choice: '__AUTO__' as string,
   enabled: true,
+  sync_task_uids: [] as string[],
   pattern: '' as string | null,
   replace: '' as string | null,
   ignore_extension: false,
@@ -144,6 +149,10 @@ const unavailableSelectedAccountLabel = computed(() => {
   const rt = item.runtime_status ? String(item.runtime_status) : ''
   const suffix = rt ? `${status}/${rt}` : status
   return `${item.name}${driveType}（${suffix}）`
+})
+
+const sortedSyncTasks = computed(() => {
+  return [...(props.syncTasks || [])].sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
 })
 
 const magicRegex = reactive({
@@ -978,6 +987,13 @@ function syncState() {
     state.savepath = props.task.savepath
     state.account_choice = props.task.account_name ? String(props.task.account_name) : '__AUTO__'
     state.enabled = props.task.enabled
+    const taskUid = String(props.task.task_uid || '').trim()
+    state.sync_task_uids = taskUid
+      ? sortedSyncTasks.value
+          .filter((it) => Array.isArray(it.drama_task_uids) && it.drama_task_uids.some((uid) => String(uid || '').trim() === taskUid))
+          .map((it) => String(it.uid || '').trim())
+          .filter(Boolean)
+      : []
     state.pattern = props.task.pattern || null
     state.replace = props.task.replace || null
     state.ignore_extension = props.task.ignore_extension
@@ -995,6 +1011,7 @@ function syncState() {
     state.savepath = ''
     state.account_choice = '__AUTO__'
     state.enabled = true
+    state.sync_task_uids = []
     state.pattern = ''
     state.replace = ''
     state.ignore_extension = true
@@ -1062,7 +1079,7 @@ watch(
 )
 
 watch(
-  () => [props.modelValue, props.task, props.plugins] as const,
+  () => [props.modelValue, props.task, props.plugins, props.syncTasks] as const,
   async ([visible]) => {
     if (!visible) return
     syncState()
@@ -1191,6 +1208,7 @@ function submit() {
     taskname: state.taskname.trim(),
     shareurl: state.shareurl.trim(),
     savepath: state.savepath.trim(),
+    sync_task_uids: [...(state.sync_task_uids || [])],
     pattern: state.pattern ? String(state.pattern).trim() : null,
     replace: state.replace ? String(state.replace).trim() : null,
     enddate: state.enddate ? String(state.enddate).trim() : null,
@@ -1692,6 +1710,19 @@ watch(
         <div class="drawer-form__switch-row">
           <el-switch v-model="state.enabled" active-text="启用任务" inactive-text="禁用任务" />
         </div>
+        <br>
+        <el-form-item label="关联同步任务（可选）">
+          <el-select v-model="state.sync_task_uids" multiple filterable clearable style="width: 100%" placeholder="选择同步任务">
+            <el-option
+              v-for="item in sortedSyncTasks"
+              :key="item.uid"
+              :label="item.enabled ? item.name : `${item.name}（已禁用）`"
+              :value="item.uid"
+              :disabled="!item.enabled"
+            />
+          </el-select>
+          <div class="drawer-form__hint">追剧任务执行成功后会触发这些同步任务执行。</div>
+        </el-form-item>
       </div>
 
       <div class="drawer-form__section">

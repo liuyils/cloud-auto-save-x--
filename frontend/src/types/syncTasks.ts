@@ -30,6 +30,7 @@ export type SyncExecutionItem = {
 
 export type SyncTaskItem = {
   id: number
+  uid: string
   name: string
   enabled: boolean
   source: SyncEndpoint

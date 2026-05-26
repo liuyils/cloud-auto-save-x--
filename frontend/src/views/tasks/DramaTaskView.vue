@@ -14,10 +14,12 @@ import {
   updateTask,
   updateTaskSchedulerSetting,
 } from '@/api/tasks'
+import { fetchSyncTasks } from '@/api/syncTasks'
 import { fetchDriveAccounts, fetchPlugins } from '@/api/extensions'
 import { TASK_RUN, TASK_WRITE } from '@/constants/permissions'
 import { useAuthStore } from '@/stores/auth'
 import type { DriveAccountItem, PluginItem } from '@/types/extensions'
+import type { SyncTaskItem } from '@/types/syncTasks'
 import type { TaskItem, TaskSchedulerSetting } from '@/types/tasks'
 import { validateCrontab5, validateTimezone } from '@/utils/cron'
 
@@ -30,6 +32,7 @@ const submitting = ref(false)
 const tasks = ref<TaskItem[]>([])
 const accounts = ref<DriveAccountItem[]>([])
 const plugins = ref<PluginItem[]>([])
+const syncTasks = ref<SyncTaskItem[]>([])
 const scheduler = ref<TaskSchedulerSetting | null>(null)
 const schedulerSaving = ref(false)
 const repairSaving = ref(false)
@@ -221,16 +224,18 @@ const activePlugins = computed(() => {
 async function loadData() {
   loading.value = true
   try {
-    const [taskData, pluginData, accountData, schedulerData] = await Promise.all([
+    const [taskData, pluginData, accountData, schedulerData, syncTaskData] = await Promise.all([
       fetchTasks(),
       fetchPlugins(),
       fetchDriveAccounts(),
       fetchTaskSchedulerSetting(),
+      fetchSyncTasks().catch(() => [] as SyncTaskItem[]),
     ])
     tasks.value = taskData
     plugins.value = pluginData
     accounts.value = accountData
     scheduler.value = schedulerData
+    syncTasks.value = syncTaskData || []
   } finally {
     loading.value = false
   }
@@ -239,6 +244,14 @@ async function loadData() {
 async function refreshPluginsIfNeeded() {
   try {
     plugins.value = await fetchPlugins()
+  } catch {
+    return
+  }
+}
+
+async function refreshSyncTasksIfNeeded() {
+  try {
+    syncTasks.value = await fetchSyncTasks()
   } catch {
     return
   }
@@ -259,6 +272,7 @@ watch(
   async (visible) => {
     if (!visible) return
     await refreshPluginsIfNeeded()
+    await refreshSyncTasksIfNeeded()
   },
   { immediate: false },
 )
@@ -1141,6 +1155,7 @@ onBeforeUnmount(() => {
       :task="currentTask"
       :accounts="accounts"
       :plugins="activePlugins"
+      :sync-tasks="syncTasks"
       :submitting="submitting"
       @save="submitTask"
       @run-once="handleRunOnce"
