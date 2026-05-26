@@ -46,8 +46,11 @@ export async function fetchSyncExecutions(syncTaskId: number) {
   return data
 }
 
-export async function fetchSyncExecutionLatest(syncTaskId: number) {
-  const { data } = await http.get<SyncExecutionItem | null>(`/sync-tasks/${syncTaskId}/executions/latest`)
+export async function fetchSyncExecutionLatest(syncTaskId: number, payload?: { max_log_chars?: number }) {
+  const max_log_chars = payload?.max_log_chars != null ? Number(payload.max_log_chars) : 0
+  const params: Record<string, any> = {}
+  if (max_log_chars > 0) params.max_log_chars = max_log_chars
+  const { data } = await http.get<SyncExecutionItem | null>(`/sync-tasks/${syncTaskId}/executions/latest`, { params })
   return data
 }
 

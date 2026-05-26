@@ -123,6 +123,8 @@ const runFileStats = reactive({
 
 const runFileView = ref<'list' | 'tree'>('list')
 let runPollTimer: any = null
+let runPollInFlight = false
+let runPollDelayMs = 3000
 let runFileIndex: Map<string, number> = new Map()
 let runFileLoadedExecutionId = 0
 
@@ -601,7 +603,7 @@ async function loadExecutionFiles(syncTaskId: number, executionId: number) {
 }
 
 async function refreshLatestExecution(syncTaskId: number) {
-  const exe = await fetchSyncExecutionLatest(syncTaskId)
+  const exe = await fetchSyncExecutionLatest(syncTaskId, { max_log_chars: 200000 })
   if (!exe) return null
   runLogDialog.status = String(exe.status || '')
   runLogDialog.stage = String(exe.stage || '')
@@ -615,22 +617,49 @@ async function refreshLatestExecution(syncTaskId: number) {
 
 function stopRunPoll() {
   if (runPollTimer) {
-    clearInterval(runPollTimer)
+    clearTimeout(runPollTimer)
     runPollTimer = null
   }
+  runPollInFlight = false
 }
 
 function startRunPoll(syncTaskId: number) {
   stopRunPoll()
-  runPollTimer = setInterval(async () => {
-    if (!runLogDialog.visible) return
-    if (runLogDialog.syncTaskId !== syncTaskId) return
-    const exe = await refreshLatestExecution(syncTaskId).catch(() => null)
-    if (exe && String(exe.status || '') !== 'running') {
-      stopRunPoll()
-      await loadData()
-    }
-  }, 1000)
+  runPollDelayMs = 3000
+
+  const schedule = (delayMs: number) => {
+    if (runPollTimer) clearTimeout(runPollTimer)
+    runPollTimer = setTimeout(async () => {
+      if (!runLogDialog.visible) return
+      if (runLogDialog.syncTaskId !== syncTaskId) return
+      if (runLogController) return schedule(5000)
+      if (runPollInFlight) return schedule(runPollDelayMs)
+
+      runPollInFlight = true
+      const t0 = Date.now()
+      const exe = await refreshLatestExecution(syncTaskId).catch(() => null)
+      const cost = Date.now() - t0
+      runPollInFlight = false
+
+      if (!runLogDialog.visible) return
+      if (runLogDialog.syncTaskId !== syncTaskId) return
+
+      if (exe && String(exe.status || '') !== 'running') {
+        stopRunPoll()
+        await loadData()
+        return
+      }
+
+      let nextDelay = 3000
+      if (cost >= 2500) nextDelay = 10000
+      else if (cost >= 1500) nextDelay = 8000
+      else if (cost >= 800) nextDelay = 5000
+      runPollDelayMs = nextDelay
+      schedule(nextDelay)
+    }, delayMs)
+  }
+
+  schedule(0)
 }
 
 const runFileTreeData = computed(() => {

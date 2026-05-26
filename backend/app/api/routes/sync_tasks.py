@@ -164,11 +164,19 @@ def get_sync_task_executions(sync_task_id: int, current: CurrentUser = Depends(g
 
 
 @router.get("/{sync_task_id:int}/executions/latest", response_model=SyncExecutionOut | None, dependencies=[Depends(require_permissions(SYNC_READ))])
-def get_sync_task_execution_latest(sync_task_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_sync_task_execution_latest(
+    sync_task_id: int,
+    max_log_chars: int = 0,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     rows = list_sync_executions(db, sync_task_id, limit=1)
     if not rows:
         return None
-    return _execution_out(rows[0])
+    out = _execution_out(rows[0])
+    if max_log_chars and out.run_log and len(out.run_log) > max_log_chars:
+        out.run_log = out.run_log[-int(max_log_chars) :]
+    return out
 
 
 @router.get(
