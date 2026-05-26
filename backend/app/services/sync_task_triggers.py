@@ -59,32 +59,35 @@ def _normalize_task_uids(values: list[str] | None) -> list[str]:
 
 
 def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
-    with SessionLocal() as db:
-        try:
+    try:
+        with SessionLocal() as db:
             links = db.execute(select(SyncTaskDramaLink.sync_task_uid).where(SyncTaskDramaLink.task_uid.in_(task_uids))).scalars().all()
             sync_uids = _normalize_task_uids([str(x) for x in links if x])
             if not sync_uids:
                 return
 
             tasks = (
-                db.execute(select(SyncTask).where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True)).order_by(SyncTask.id.asc()))
-                .scalars()
+                db.execute(
+                    select(SyncTask.id, SyncTask.uid, SyncTask.name)
+                    .where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True))
+                    .order_by(SyncTask.id.asc())
+                )
                 .all()
             )
             if not tasks:
                 return
 
-            logger.info("触发关联同步任务 source=%s drama_tasks=%s sync_tasks=%s", source, len(task_uids), len(tasks))
-            skipped = 0
-            failed = 0
-            success = 0
+        logger.info("触发关联同步任务 source=%s drama_tasks=%s sync_tasks=%s", source, len(task_uids), len(tasks))
+        skipped = 0
+        failed = 0
+        success = 0
 
-            executor = SyncExecutor(db)
-            for task in tasks:
+        for task_id, task_uid, task_name in tasks:
+            with SessionLocal() as tdb:
                 running = (
-                    db.execute(
+                    tdb.execute(
                         select(SyncExecution.id).where(
-                            SyncExecution.sync_task_id == int(task.id),
+                            SyncExecution.sync_task_id == int(task_id),
                             SyncExecution.status == "running",
                             SyncExecution.finished_at.is_(None),
                         )
@@ -94,25 +97,40 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
                 )
                 if running is not None:
                     skipped += 1
-                    logger.info("跳过同步任务：正在运行 sync_task_id=%s uid=%s name=%s running_execution_id=%s", task.id, task.uid, task.name, running)
+                    logger.info(
+                        "跳过同步任务：正在运行 sync_task_id=%s uid=%s name=%s running_execution_id=%s",
+                        task_id,
+                        task_uid,
+                        task_name,
+                        running,
+                    )
                     continue
                 try:
-                    executor.run_sync_task(task)
+                    task = tdb.get(SyncTask, int(task_id))
+                    if task is None:
+                        skipped += 1
+                        continue
+                    SyncExecutor(tdb).run_sync_task(task)
                     success += 1
                 except Exception as e:
                     failed += 1
-                    db.rollback()
-                    logger.warning("同步任务执行失败 sync_task_id=%s uid=%s name=%s err=%s", task.id, task.uid, task.name, str(e).strip() or type(e).__name__)
+                    tdb.rollback()
+                    logger.warning(
+                        "同步任务执行失败 sync_task_id=%s uid=%s name=%s err=%s",
+                        task_id,
+                        task_uid,
+                        task_name,
+                        str(e).strip() or type(e).__name__,
+                    )
 
-            logger.info(
-                "关联同步任务触发完成 source=%s drama_tasks=%s sync_tasks=%s success=%s skipped=%s failed=%s",
-                source,
-                len(task_uids),
-                len(tasks),
-                success,
-                skipped,
-                failed,
-            )
-        except Exception as e:
-            db.rollback()
-            logger.exception("关联同步任务触发异常 source=%s err=%s", source, str(e).strip() or type(e).__name__)
+        logger.info(
+            "关联同步任务触发完成 source=%s drama_tasks=%s sync_tasks=%s success=%s skipped=%s failed=%s",
+            source,
+            len(task_uids),
+            len(tasks),
+            success,
+            skipped,
+            failed,
+        )
+    except Exception as e:
+        logger.exception("关联同步任务触发异常 source=%s err=%s", source, str(e).strip() or type(e).__name__)

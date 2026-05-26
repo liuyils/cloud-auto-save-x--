@@ -11,7 +11,7 @@ import re
 from sqlalchemy import and_, func, or_, select, update as sa_update
 from sqlalchemy.orm import Session
 
-from app.core.deps import CurrentUser, get_current_user, require_permissions
+from app.core.deps import CurrentUser, get_current_user, get_current_user_scoped, require_permissions, require_permissions_scoped
 from app.core.errors import bad_request, not_found
 from app.core.permissions import TASK_READ, TASK_RUN, TASK_WRITE
 from app.core.settings import settings
@@ -709,25 +709,26 @@ def post_run_task(request: Request, task_id: int, current: CurrentUser = Depends
     return _execution_out(execution)
 
 
-@router.post('/{task_id:int}/run/stream', dependencies=[Depends(require_permissions(TASK_RUN))])
-def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    task = get_task(db, task_id)
-    init_payload = {
-        "task_id": int(task.id),
-        "taskname": str(task.taskname),
-        "started_at": datetime.now().isoformat(),
-    }
-    audit.write_audit_log(
-        db,
-        actor_user_id=current.user.id,
-        action='task.run.stream',
-        target_type='task',
-        target_id=str(init_payload["task_id"]),
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get('user-agent'),
-        success=True,
-    )
-    db.commit()
+@router.post('/{task_id:int}/run/stream', dependencies=[Depends(require_permissions_scoped(TASK_RUN))])
+def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = Depends(get_current_user_scoped)):
+    with SessionLocal() as adb:
+        task = get_task(adb, task_id)
+        init_payload = {
+            "task_id": int(task.id),
+            "taskname": str(task.taskname),
+            "started_at": datetime.now().isoformat(),
+        }
+        audit.write_audit_log(
+            adb,
+            actor_user_id=current.user.id,
+            action='task.run.stream',
+            target_type='task',
+            target_id=str(init_payload["task_id"]),
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get('user-agent'),
+            success=True,
+        )
+        adb.commit()
 
     q: queue.Queue[tuple[str, object]] = queue.Queue()
     done_sentinel = object()
@@ -829,8 +830,8 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
     )
 
 
-@router.post('/run/stream', dependencies=[Depends(require_permissions(TASK_RUN))])
-def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.post('/run/stream', dependencies=[Depends(require_permissions_scoped(TASK_RUN))])
+def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, current: CurrentUser = Depends(get_current_user_scoped)):
     import uuid
 
     init_payload = {
@@ -839,18 +840,19 @@ def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, cur
         "started_at": datetime.now().isoformat(),
         "preview": True,
     }
-    audit.write_audit_log(
-        db,
-        actor_user_id=current.user.id,
-        action='task.run.preview_stream',
-        target_type='task',
-        target_id='0',
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get('user-agent'),
-        success=True,
-        detail=str(payload.taskname or ""),
-    )
-    db.commit()
+    with SessionLocal() as adb:
+        audit.write_audit_log(
+            adb,
+            actor_user_id=current.user.id,
+            action='task.run.preview_stream',
+            target_type='task',
+            target_id='0',
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get('user-agent'),
+            success=True,
+            detail=str(payload.taskname or ""),
+        )
+        adb.commit()
 
     q: queue.Queue[tuple[str, object]] = queue.Queue()
     done_sentinel = object()

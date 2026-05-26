@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.deps import CurrentUser, get_current_user, require_permissions
+from app.core.deps import CurrentUser, get_current_user, get_current_user_scoped, require_permissions, require_permissions_scoped
 from app.core.errors import ApiError
 from app.core.permissions import SYNC_READ, SYNC_RUN, SYNC_WRITE
 from app.db.session import SessionLocal, get_db
@@ -256,37 +256,41 @@ def post_run_sync_task(
     return _execution_out(execution)
 
 
-@router.post("/{sync_task_id:int}/run/stream", dependencies=[Depends(require_permissions(SYNC_RUN))])
+@router.post("/{sync_task_id:int}/run/stream", dependencies=[Depends(require_permissions_scoped(SYNC_RUN))])
 def post_run_sync_task_stream(
     request: Request,
     sync_task_id: int,
     payload: SyncRunIn | None = None,
-    current: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user_scoped),
 ):
-    running = (
-        db.execute(
-            select(SyncExecution)
-            .where(SyncExecution.sync_task_id == sync_task_id, SyncExecution.status == "running", SyncExecution.finished_at.is_(None))
-            .order_by(SyncExecution.started_at.desc())
-        )
-        .scalars()
-        .first()
-    )
-    if running is not None:
-        raise ApiError(code="SYNC_TASK_RUNNING", message="同步任务正在执行", http_status=409, detail=str(running.id))
     init_payload = {"sync_task_id": int(sync_task_id), "started_at": datetime.now().isoformat()}
-    audit.write_audit_log(
-        db,
-        actor_user_id=current.user.id,
-        action="sync_task.run.stream",
-        target_type="sync_task",
-        target_id=str(sync_task_id),
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        success=True,
-    )
-    db.commit()
+    with SessionLocal() as adb:
+        running = (
+            adb.execute(
+                select(SyncExecution)
+                .where(
+                    SyncExecution.sync_task_id == sync_task_id,
+                    SyncExecution.status == "running",
+                    SyncExecution.finished_at.is_(None),
+                )
+                .order_by(SyncExecution.started_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+        if running is not None:
+            raise ApiError(code="SYNC_TASK_RUNNING", message="同步任务正在执行", http_status=409, detail=str(running.id))
+        audit.write_audit_log(
+            adb,
+            actor_user_id=current.user.id,
+            action="sync_task.run.stream",
+            target_type="sync_task",
+            target_id=str(sync_task_id),
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            success=True,
+        )
+        adb.commit()
 
     q: queue.Queue[tuple[str, object]] = queue.Queue()
     done_sentinel = object()
