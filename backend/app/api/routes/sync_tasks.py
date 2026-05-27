@@ -47,6 +47,15 @@ def _task_out(item: SyncTask, *, drama_task_uids: list[str] | None = None) -> Sy
             strategy = json.loads(item.strategy_json)
         except Exception:
             strategy = {}
+    addition = {}
+    raw_addition = getattr(item, "addition_json", None)
+    if raw_addition:
+        try:
+            parsed = json.loads(raw_addition)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            addition = parsed
     return SyncTaskOut(
         id=item.id,
         uid=item.uid,
@@ -57,6 +66,7 @@ def _task_out(item: SyncTask, *, drama_task_uids: list[str] | None = None) -> Sy
         mode=item.mode,
         strategy=strategy,
         drama_task_uids=list(drama_task_uids or []),
+        addition=addition,
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
@@ -159,6 +169,7 @@ def post_sync_task(request: Request, payload: SyncTaskCreateIn, current: Current
         mode=payload.mode,
         strategy=payload.strategy.model_dump(mode="json"),
         drama_task_uids=list(payload.drama_task_uids or []),
+        addition=payload.addition,
     )
     audit.write_audit_log(
         db,

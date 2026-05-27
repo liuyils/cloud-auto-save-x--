@@ -68,11 +68,19 @@ class PluginHookRunner:
         current = tasks
         for item in plugins:
             plugin = item['instance']
-            if getattr(plugin, 'is_active', False) and hasattr(plugin, 'task_before'):
-                definition = item.get("definition")
-                key = getattr(definition, "plugin_key", None) or ""
-                with _capture_print(emit_line, prefix=(f"[{key}] " if key else "")):
-                    current = plugin.task_before(tasklist=current, account=account) or current
+            definition = item.get("definition")
+            key = getattr(definition, "plugin_key", None) or ""
+            prefix = f"[{key}] " if key else ""
+            if not getattr(plugin, 'is_active', False):
+                if emit_line is not None and key:
+                    emit_line(f"{prefix}skipped: inactive")
+                continue
+            if not hasattr(plugin, 'task_before'):
+                continue
+            if emit_line is not None and key:
+                emit_line(f"{prefix}task_before")
+            with _capture_print(emit_line, prefix=prefix):
+                current = plugin.task_before(tasklist=current, account=account) or current
         return current
 
     @staticmethod
@@ -87,11 +95,19 @@ class PluginHookRunner:
         current = task
         for item in plugins:
             plugin = item['instance']
-            if getattr(plugin, 'is_active', False) and hasattr(plugin, 'run'):
-                definition = item.get("definition")
-                key = getattr(definition, "plugin_key", None) or ""
-                with _capture_print(emit_line, prefix=(f"[{key}] " if key else "")):
-                    current = plugin.run(current, account=account, tree=tree) or current
+            definition = item.get("definition")
+            key = getattr(definition, "plugin_key", None) or ""
+            prefix = f"[{key}] " if key else ""
+            if not getattr(plugin, 'is_active', False):
+                if emit_line is not None and key:
+                    emit_line(f"{prefix}skipped: inactive")
+                continue
+            if not hasattr(plugin, 'run'):
+                continue
+            if emit_line is not None and key:
+                emit_line(f"{prefix}run")
+            with _capture_print(emit_line, prefix=prefix):
+                current = plugin.run(current, account=account, tree=tree) or current
         return current
 
     @staticmethod
@@ -105,10 +121,18 @@ class PluginHookRunner:
         current = tasks
         for item in plugins:
             plugin = item['instance']
-            if getattr(plugin, 'is_active', False) and hasattr(plugin, 'task_after'):
-                definition = item.get("definition")
-                key = getattr(definition, "plugin_key", None) or ""
-                with _capture_print(emit_line, prefix=(f"[{key}] " if key else "")):
-                    result = plugin.task_after(tasklist=current, account=account) or {}
-                current = result.get('tasklist', current)
+            definition = item.get("definition")
+            key = getattr(definition, "plugin_key", None) or ""
+            prefix = f"[{key}] " if key else ""
+            if not getattr(plugin, 'is_active', False):
+                if emit_line is not None and key:
+                    emit_line(f"{prefix}skipped: inactive")
+                continue
+            if not hasattr(plugin, 'task_after'):
+                continue
+            if emit_line is not None and key:
+                emit_line(f"{prefix}task_after")
+            with _capture_print(emit_line, prefix=prefix):
+                result = plugin.task_after(tasklist=current, account=account) or {}
+            current = result.get('tasklist', current)
         return current

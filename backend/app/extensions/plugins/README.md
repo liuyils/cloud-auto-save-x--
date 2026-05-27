@@ -159,7 +159,7 @@ def run(self, task, **kwargs):
 ```shell
 docker run -d \
   # ... 例如添加这行挂载，其它一致
-  -v ./quark-auto-save/plugins/plex.py:/app/plugins/plex.py \
+  -v ./cloud-auto-save-x/backend/app/extensions/plugins/plex.py:/app/backend/app/extensions/plugins/plex.py \
   # ...
 ```
 

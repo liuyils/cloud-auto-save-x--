@@ -13,6 +13,7 @@ import {
   updateSyncTask,
 } from '@/api/syncTasks'
 import { fetchTasks } from '@/api/tasks'
+import { fetchSyncPlugins } from '@/api/extensions'
 import { SYNC_RUN, SYNC_WRITE } from '@/constants/permissions'
 import { useIsMobile } from '@/composables/useIsMobile'
 import { useAuthStore } from '@/stores/auth'
@@ -20,6 +21,7 @@ import { browseOpenList } from '@/api/openlist'
 import type { PathBrowseItem, PathBrowsePath } from '@/types/pathBrowse'
 import type { SyncExecutionItem, SyncMode, SyncTaskItem } from '@/types/syncTasks'
 import type { TaskItem } from '@/types/tasks'
+import type { PluginItem } from '@/types/extensions'
 
 const auth = useAuthStore()
 const canWrite = computed(() => auth.permissions.includes(SYNC_WRITE))
@@ -31,6 +33,22 @@ const submitting = ref(false)
 const tasks = ref<SyncTaskItem[]>([])
 const executionsMap = ref(new Map<number, SyncExecutionItem[]>())
 const dramaTasks = ref<TaskItem[]>([])
+const plugins = ref<PluginItem[]>([])
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value ?? {}))
+}
+
+const activePlugins = computed(() => {
+  return [...plugins.value]
+    .filter((item) => Boolean(item.installed) && Boolean(item.enabled))
+    .sort((a, b) => {
+      const ap = Number(a.priority) || 0
+      const bp = Number(b.priority) || 0
+      if (ap !== bp) return ap - bp
+      return String(a.plugin_key).localeCompare(String(b.plugin_key))
+    })
+})
 
 const dialogWidth = computed(() => (isMobile.value ? '100%' : '900px'))
 const dialogTop = computed(() => (isMobile.value ? '0' : '6vh'))
@@ -84,6 +102,7 @@ const drawer = reactive({
   targetType: 'openlist',
   targetPath: '/',
   dramaTaskUids: [] as string[],
+  addition: {} as Record<string, any>,
   overwrite: false,
   one_way_delete_extras: false,
   force_refresh: false,
@@ -471,12 +490,14 @@ async function confirmStopTask(row: SyncTaskItem) {
 async function loadData() {
   loading.value = true
   try {
-    const [data, taskRows] = await Promise.all([
+    const [data, taskRows, pluginRows] = await Promise.all([
       fetchSyncTasks(),
       fetchTasks().catch(() => [] as TaskItem[]),
+      fetchSyncPlugins().catch(() => [] as PluginItem[]),
     ])
     tasks.value = data
     dramaTasks.value = (taskRows || []).filter((t) => String(t.task_type || '') === 'drama')
+    plugins.value = pluginRows || []
     const mapping = new Map<number, SyncExecutionItem[]>()
     await Promise.all(
       data.map(async (t) => {
@@ -513,12 +534,14 @@ function openCreate() {
   drawer.targetType = 'openlist'
   drawer.targetPath = '/'
   drawer.dramaTaskUids = []
+  drawer.addition = {}
   drawer.overwrite = false
   drawer.one_way_delete_extras = false
   drawer.force_refresh = true
   drawer.concurrency = 4
   drawer.request_interval_seconds = 1
   drawer.openlist_copy_batch_size = 10
+  syncDrawerAddition({})
 }
 
 function openEdit(row: SyncTaskItem) {
@@ -533,12 +556,37 @@ function openEdit(row: SyncTaskItem) {
   drawer.targetType = row.target.type
   drawer.targetPath = row.target.path
   drawer.dramaTaskUids = [...(row.drama_task_uids || [])]
+  drawer.addition = clone((row as any).addition || {})
   drawer.overwrite = Boolean(row.strategy?.overwrite)
   drawer.one_way_delete_extras = Boolean(row.strategy?.one_way_delete_extras)
   drawer.force_refresh = Boolean(row.strategy?.force_refresh)
   drawer.concurrency = Number(row.strategy?.concurrency ?? 4) || 4
   drawer.request_interval_seconds = Number(row.strategy?.request_interval_seconds ?? 0) || 0
   drawer.openlist_copy_batch_size = Number(row.strategy?.openlist_copy_batch_size ?? 10) || 10
+  syncDrawerAddition(drawer.addition)
+}
+
+function syncDrawerAddition(value: any) {
+  const base: any = value && typeof value === 'object' && !Array.isArray(value) ? clone(value) : {}
+  for (const plugin of activePlugins.value) {
+    const key = plugin.plugin_key
+    const defaultCfg = clone(plugin.default_task_config || {})
+    const currentCfg: any = base[key]
+    if (!currentCfg || typeof currentCfg !== 'object' || Array.isArray(currentCfg)) {
+      base[key] = defaultCfg
+      continue
+    }
+    for (const [k, v] of Object.entries(defaultCfg)) {
+      if (!(k in currentCfg)) currentCfg[k] = clone(v)
+    }
+    for (const field of plugin.task_config_fields || []) {
+      const fieldKey = String((field as any).key || '').trim()
+      if (!fieldKey) continue
+      if (fieldKey in currentCfg) continue
+      if ((field as any).default !== undefined) currentCfg[fieldKey] = clone((field as any).default)
+    }
+  }
+  drawer.addition = base
 }
 
 async function submitDrawer() {
@@ -555,6 +603,7 @@ async function submitDrawer() {
       source: { type: String(drawer.sourceType), path: String(drawer.sourcePath || '') },
       target: { type: String(drawer.targetType), path: String(drawer.targetPath || '') },
       drama_task_uids: [...(drawer.dramaTaskUids || [])],
+      addition: clone(drawer.addition || {}),
       strategy: {
         overwrite: Boolean(drawer.overwrite),
         one_way_delete_extras: Boolean(drawer.one_way_delete_extras),
@@ -1358,6 +1407,44 @@ onMounted(loadData)
           <el-form-item label="OpenList copy 批量大小">
             <el-input-number v-model="drawer.openlist_copy_batch_size" :min="1" :max="5000" :step="50" :style="{ width: isMobile ? '100%' : '' }" />
           </el-form-item>
+
+          <el-divider content-position="left">插件选项（同步任务）</el-divider>
+          <div v-if="!activePlugins.length" style="color: var(--el-text-color-secondary); margin-bottom: 12px">暂无同步插件。</div>
+          <div v-else style="display: flex; flex-direction: column; gap: 10px">
+            <div v-for="plugin in activePlugins" :key="plugin.plugin_key" style="border: 1px solid var(--el-border-color); border-radius: 8px; padding: 10px 12px">
+              <div style="font-weight: 600; margin-bottom: 6px">{{ plugin.plugin_key }}</div>
+              <el-form-item v-for="field in plugin.task_config_fields || []" :key="field.key" :label="field.label || field.key">
+                <el-switch
+                  v-if="field.input_type === 'switch'"
+                  v-model="drawer.addition[plugin.plugin_key][field.key]"
+                  active-text="开启"
+                  inactive-text="关闭"
+                />
+                <el-input-number
+                  v-else-if="field.input_type === 'number'"
+                  v-model="drawer.addition[plugin.plugin_key][field.key]"
+                  style="width: 100%"
+                />
+                <el-input
+                  v-else-if="field.input_type === 'textarea'"
+                  v-model="drawer.addition[plugin.plugin_key][field.key]"
+                  type="textarea"
+                  :rows="field.secret ? 4 : 3"
+                  :placeholder="field.placeholder || ''"
+                />
+                <el-input
+                  v-else
+                  v-model="drawer.addition[plugin.plugin_key][field.key]"
+                  :type="field.input_type === 'password' ? 'password' : 'text'"
+                  :placeholder="field.placeholder || ''"
+                  :show-password="field.input_type === 'password'"
+                />
+                <div v-if="field.description" style="color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.4; margin-top: 6px">
+                  {{ field.description }}
+                </div>
+              </el-form-item>
+            </div>
+          </div>
         </el-form>
 
         <div style="display: flex; gap: 10px; justify-content: flex-end">

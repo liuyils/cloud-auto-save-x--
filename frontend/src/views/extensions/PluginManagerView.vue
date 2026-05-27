@@ -3,7 +3,7 @@ import { ElMessage } from 'element-plus'
 
 import PluginCard from '@/components/extensions/PluginCard.vue'
 import PluginConfigDrawer from '@/components/extensions/PluginConfigDrawer.vue'
-import { fetchPlugins, refreshPlugins, updatePlugin } from '@/api/extensions'
+import { fetchPlugins, fetchSyncPlugins, refreshPlugins, refreshSyncPlugins, updatePlugin, updateSyncPlugin } from '@/api/extensions'
 import { PLUGIN_WRITE } from '@/constants/permissions'
 import { useAuthStore } from '@/stores/auth'
 import type { PluginItem } from '@/types/extensions'
@@ -17,6 +17,7 @@ const refreshing = ref(false)
 const plugins = ref<PluginItem[]>([])
 const drawerVisible = ref(false)
 const currentPlugin = ref<PluginItem | null>(null)
+const activeTab = ref<'task' | 'sync'>('task')
 
 const summary = computed(() => ({
   total: plugins.value.length,
@@ -24,10 +25,17 @@ const summary = computed(() => ({
   error: plugins.value.filter((item) => item.runtime_status === 'error').length,
 }))
 
+function pickApi() {
+  if (activeTab.value === 'sync') {
+    return { fetch: fetchSyncPlugins, refresh: refreshSyncPlugins, update: updateSyncPlugin }
+  }
+  return { fetch: fetchPlugins, refresh: refreshPlugins, update: updatePlugin }
+}
+
 async function loadData() {
   loading.value = true
   try {
-    plugins.value = await fetchPlugins()
+    plugins.value = await pickApi().fetch()
   } finally {
     loading.value = false
   }
@@ -41,7 +49,7 @@ function openEditDrawer(row: PluginItem) {
 async function handleRefresh() {
   refreshing.value = true
   try {
-    plugins.value = await refreshPlugins()
+    plugins.value = await pickApi().refresh()
     ElMessage.success('插件扫描已刷新')
   } finally {
     refreshing.value = false
@@ -49,7 +57,7 @@ async function handleRefresh() {
 }
 
 async function handleToggle(row: PluginItem, enabled: boolean) {
-  await updatePlugin(row.plugin_key, { enabled })
+  await pickApi().update(row.plugin_key, { enabled })
   ElMessage.success('插件状态已更新')
   await loadData()
 }
@@ -58,7 +66,7 @@ async function submitForm(payload: { enabled: boolean; priority: number; config:
   if (!currentPlugin.value) return
   submitting.value = true
   try {
-    await updatePlugin(currentPlugin.value.plugin_key, payload)
+    await pickApi().update(currentPlugin.value.plugin_key, payload)
     drawerVisible.value = false
     ElMessage.success('插件配置已更新')
     await loadData()
@@ -66,6 +74,16 @@ async function submitForm(payload: { enabled: boolean; priority: number; config:
     submitting.value = false
   }
 }
+
+watch(
+  activeTab,
+  async () => {
+    drawerVisible.value = false
+    currentPlugin.value = null
+    await loadData()
+  },
+  { immediate: false },
+)
 
 onMounted(loadData)
 </script>
@@ -81,6 +99,11 @@ onMounted(loadData)
         <el-button v-if="canWrite" :loading="refreshing" type="success" @click="handleRefresh">扫描插件</el-button>
       </div>
     </div>
+
+    <el-tabs v-model="activeTab" style="margin-bottom: 12px">
+      <el-tab-pane name="task" label="追剧任务插件" />
+      <el-tab-pane name="sync" label="同步任务插件" />
+    </el-tabs>
 
     <section class="metric-strip">
       <div class="glass-panel metric-tile">
@@ -98,7 +121,6 @@ onMounted(loadData)
         <div class="metric-tile__value">{{ summary.error }}</div>
         <div class="metric-tile__hint">最近一次运行状态异常</div>
       </div>
-      
     </section>
 
     <section v-if="plugins.length" class="plugin-grid">

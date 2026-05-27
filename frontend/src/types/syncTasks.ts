@@ -41,6 +41,7 @@ export type SyncTaskItem = {
   mode: SyncMode
   strategy: SyncStrategy
   drama_task_uids?: string[]
+  addition?: Record<string, any>
   created_at: string
   updated_at: string
 }

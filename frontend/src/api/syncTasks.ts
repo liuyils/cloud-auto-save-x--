@@ -15,6 +15,7 @@ export async function createSyncTask(payload: {
   mode: string
   strategy: Record<string, any>
   drama_task_uids?: string[]
+  addition?: Record<string, any>
 }) {
   const { data } = await http.post<SyncTaskItem>('/sync-tasks', payload, { headers: { 'X-Silent-Toast': '1' } })
   return data
@@ -30,6 +31,7 @@ export async function updateSyncTask(
     mode: string
     strategy: Record<string, any>
     drama_task_uids: string[]
+    addition: Record<string, any>
   }>,
 ) {
   const { data } = await http.patch<SyncTaskItem>(`/sync-tasks/${syncTaskId}`, payload, { headers: { 'X-Silent-Toast': '1' } })

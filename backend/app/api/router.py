@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import audit_logs, auth, cache_management, dashboard, drive_accounts, health, magic_regex, media_discovery, metrics, notifications, openlist_settings, permissions, plugins, resource_search, roles, setup, sync_tasks, tasks, tmdb_cache, tmdb_settings, users
+from app.api.routes import audit_logs, auth, cache_management, dashboard, drive_accounts, health, magic_regex, media_discovery, metrics, notifications, openlist_settings, permissions, plugins, resource_search, roles, setup, sync_plugins, sync_tasks, tasks, tmdb_cache, tmdb_settings, users
 
 
 api_router = APIRouter()
@@ -13,6 +13,7 @@ api_router.include_router(permissions.router, prefix="/permissions", tags=["perm
 api_router.include_router(audit_logs.router, prefix="/audit-logs", tags=["audit-logs"])
 api_router.include_router(drive_accounts.router, prefix="/drive-accounts", tags=["drive-accounts"])
 api_router.include_router(plugins.router, prefix="/plugins", tags=["plugins"])
+api_router.include_router(sync_plugins.router, prefix="/sync-plugins", tags=["sync-plugins"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(sync_tasks.router, prefix="/sync-tasks", tags=["sync-tasks"])
 api_router.include_router(magic_regex.router, prefix="/magic-regex", tags=["magic-regex"])

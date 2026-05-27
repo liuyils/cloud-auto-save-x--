@@ -9,6 +9,8 @@ from app.models.openlist_setting import OpenListSetting
 from app.models.permission import Permission
 from app.models.plugin_config import PluginConfig
 from app.models.plugin_definition import PluginDefinition
+from app.models.sync_plugin_config import SyncPluginConfig
+from app.models.sync_plugin_definition import SyncPluginDefinition
 from app.models.refresh_token import RefreshToken
 from app.models.share_preview_batch_cache import SharePreviewBatchCache
 from app.models.role import Role
@@ -57,4 +59,6 @@ __all__ = [
     "SyncExecution",
     "SyncExecutionFile",
     "SyncFileSnapshot",
+    "SyncPluginConfig",
+    "SyncPluginDefinition",
 ]

@@ -146,3 +146,18 @@ export async function updatePlugin(pluginKey: string, payload: Partial<{ enabled
   const { data } = await http.patch<PluginItem>(`/plugins/${pluginKey}`, payload)
   return data
 }
+
+export async function fetchSyncPlugins() {
+  const { data } = await http.get<PluginItem[]>('/sync-plugins')
+  return data
+}
+
+export async function refreshSyncPlugins() {
+  const { data } = await http.post<PluginItem[]>('/sync-plugins/refresh')
+  return data
+}
+
+export async function updateSyncPlugin(pluginKey: string, payload: Partial<{ enabled: boolean; priority: number; config: Record<string, any> }>) {
+  const { data } = await http.patch<PluginItem>(`/sync-plugins/${pluginKey}`, payload)
+  return data
+}

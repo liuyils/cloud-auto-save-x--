@@ -774,6 +774,7 @@ def send(title: str, content: str, ignore_default_config: bool = False, channels
                 funcs.append((channel_id, mode))
 
             results: list[dict[str, object]] = []
+            mutex = threading.Lock()
 
             def _runner(channel_id: str, func):
                 try:

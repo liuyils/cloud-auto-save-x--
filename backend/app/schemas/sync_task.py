@@ -32,6 +32,7 @@ class SyncTaskBase(BaseModel):
     mode: SyncMode = "one_way"
     strategy: SyncStrategy = Field(default_factory=SyncStrategy)
     drama_task_uids: list[str] = Field(default_factory=list)
+    addition: dict[str, Any] = Field(default_factory=dict)
 
 
 class SyncTaskCreateIn(SyncTaskBase):
@@ -46,6 +47,7 @@ class SyncTaskUpdateIn(BaseModel):
     mode: SyncMode | None = None
     strategy: SyncStrategy | None = None
     drama_task_uids: list[str] | None = None
+    addition: dict[str, Any] | None = None
 
 
 class SyncExecutionOut(BaseModel):
@@ -73,6 +75,7 @@ class SyncTaskOut(BaseModel):
     mode: SyncMode
     strategy: SyncStrategy
     drama_task_uids: list[str] = Field(default_factory=list)
+    addition: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
