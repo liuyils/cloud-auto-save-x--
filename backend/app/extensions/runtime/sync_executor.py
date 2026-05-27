@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import posixpath
 import secrets
@@ -25,6 +26,8 @@ from app.models.sync_file_snapshot import SyncFileSnapshot
 from app.models.sync_task import SyncTask
 from app.services.notifications.sync_notify import send_sync_execution_notification
 from app.services.openlist_client_factory import get_openlist_client
+
+logger = logging.getLogger(__name__)
 
 
 EndpointType = Literal["local", "openlist"]
@@ -214,6 +217,28 @@ class SyncExecutor:
             self._get_openlist_client()
 
         strategy = self._load_strategy(task, override=strategy_override)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "sync start sync_task_id=%s mode=%s source=%s:%s target=%s:%s strategy=%s override=%s",
+                int(getattr(task, "id", 0) or 0),
+                mode,
+                source.type,
+                source.path,
+                target.type,
+                target.path,
+                json.dumps(
+                    {
+                        "overwrite": bool(strategy.overwrite),
+                        "one_way_delete_extras": bool(strategy.one_way_delete_extras),
+                        "force_refresh": bool(strategy.force_refresh),
+                        "concurrency": int(strategy.concurrency),
+                        "request_interval_seconds": float(strategy.request_interval_seconds),
+                        "openlist_copy_batch_size": int(strategy.openlist_copy_batch_size),
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(strategy_override or {}, ensure_ascii=False) if strategy_override else None,
+            )
 
         now = datetime.now()
         execution = SyncExecution(
@@ -239,6 +264,8 @@ class SyncExecutor:
         self.db.add(execution)
         self.db.flush()
         self.db.commit()
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("sync execution created sync_task_id=%s sync_execution_id=%s", int(task.id), int(execution.id))
 
         cancel_checker = _CancelChecker(int(execution.id))
 
@@ -292,6 +319,31 @@ class SyncExecutor:
             )
 
             log.line(f"动作数: {len(actions)}")
+            if logger.isEnabledFor(logging.DEBUG):
+                head = []
+                for a in actions[:10]:
+                    try:
+                        src: Endpoint | None = a.get("src") if isinstance(a.get("src"), Endpoint) else None
+                        dst: Endpoint | None = a.get("dst") if isinstance(a.get("dst"), Endpoint) else None
+                        head.append(
+                            {
+                                "kind": str(a.get("kind") or ""),
+                                "src": f"{src.type}:{src.path}" if src else None,
+                                "dst": f"{dst.type}:{dst.path}" if dst else None,
+                                "src_rel": str(a.get("src_rel") or ""),
+                                "dst_rel": str(a.get("dst_rel") or ""),
+                                "dst_exists": bool(a.get("dst_exists")) if a.get("dst_exists") is not None else None,
+                                "conflict": bool(a.get("conflict")) if a.get("conflict") is not None else None,
+                            }
+                        )
+                    except Exception:
+                        continue
+                logger.debug(
+                    "sync actions built sync_execution_id=%s total=%s head=%s",
+                    int(execution.id),
+                    len(actions),
+                    json.dumps(head, ensure_ascii=False),
+                )
 
             log.set_stage("apply")
             log.section("执行同步")
@@ -622,6 +674,17 @@ class SyncExecutor:
                     total = data.get("total") if total is None else total
                 if not isinstance(content, list):
                     content = []
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "sync scan(openlist) dir=%s rel=%s page=%s per_page=%s refresh=%s items=%s total=%s",
+                        abs_dir,
+                        rel_dir,
+                        page,
+                        per_page,
+                        bool(refresh),
+                        len(content),
+                        total,
+                    )
                 for item in content:
                     if not isinstance(item, dict):
                         continue
@@ -1173,6 +1236,7 @@ class SyncExecutor:
         start_ts = _now_ts()
         fail_counts: dict[str, int] = {tid: 0 for tid in tids}
         progresses: dict[str, float | None] = {tid: None for tid in tids}
+        states: dict[str, str] = {tid: "" for tid in tids}
         while pending:
             if cancel_checker is not None and cancel_checker.is_cancelled():
                 try:
@@ -1194,10 +1258,30 @@ class SyncExecutor:
                         state_raw = data.get("state") if "state" in data else data.get("State")
                         state = str(state_raw or "").strip().lower()
                         progress = data.get("progress")
+                    prev_state = states.get(tid) or ""
+                    prev_progress = progresses.get(tid)
                     try:
                         progresses[tid] = float(progress) if progress is not None and str(progress).strip() != "" else None
                     except Exception:
                         progresses[tid] = None
+                    if logger.isEnabledFor(logging.DEBUG):
+                        states[tid] = state
+                        cur_progress = progresses.get(tid)
+                        changed = (state != prev_state) or (
+                            (cur_progress is not None and prev_progress is not None and abs(float(cur_progress) - float(prev_progress)) >= 5.0)
+                            or (cur_progress is not None and prev_progress is None)
+                            or (cur_progress is None and prev_progress is not None)
+                        )
+                        if changed:
+                            logger.debug(
+                                "sync openlist task progress type=%s tid=%s state=%s raw_state=%s progress=%s pending=%s",
+                                task_type,
+                                tid,
+                                state,
+                                state_raw,
+                                progress,
+                                len(pending),
+                            )
 
                     terminal = False
                     if state in {"succeeded", "success", "finished", "done", "completed", "failed", "error", "canceled", "cancelled"}:
@@ -1225,6 +1309,17 @@ class SyncExecutor:
                             flush_now()
                 except Exception as e:
                     fail_counts[tid] = int(fail_counts.get(tid) or 0) + 1
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "sync openlist task_info failed type=%s tid=%s fail_count=%s err=%s http_status=%s api_code=%s api_message=%s",
+                            task_type,
+                            tid,
+                            fail_counts[tid],
+                            str(e).strip() or type(e).__name__,
+                            getattr(e, "http_status", None),
+                            getattr(e, "api_code", None),
+                            getattr(e, "api_message", None),
+                        )
                     if fail_counts[tid] >= 3:
                         try:
                             d = client.task_done(task_type)

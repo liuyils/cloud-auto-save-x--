@@ -21,6 +21,12 @@ def trigger_linked_sync_tasks_async(task_uids: list[str], *, source: str) -> Non
     uids = _normalize_task_uids(task_uids)
     if not uids:
         return
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "submit linked sync tasks source=%s drama_task_uids=%s",
+            str(source or ""),
+            uids[:20],
+        )
     _executor.submit(_run_linked_sync_tasks, uids, str(source or ""))
 
 
@@ -65,6 +71,13 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
             sync_uids = _normalize_task_uids([str(x) for x in links if x])
             if not sync_uids:
                 return
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "linked sync tasks resolved source=%s drama_tasks=%s sync_task_uids=%s",
+                    source,
+                    len(task_uids),
+                    sync_uids[:30],
+                )
 
             tasks = (
                 db.execute(
@@ -76,6 +89,13 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
             )
             if not tasks:
                 return
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "linked sync tasks to run source=%s count=%s head=%s",
+                    source,
+                    len(tasks),
+                    [{"id": int(t[0]), "uid": str(t[1] or ""), "name": str(t[2] or "")} for t in tasks[:10]],
+                )
 
         logger.info("触发关联同步任务 source=%s drama_tasks=%s sync_tasks=%s", source, len(task_uids), len(tasks))
         skipped = 0
@@ -110,7 +130,24 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
                     if task is None:
                         skipped += 1
                         continue
-                    SyncExecutor(tdb).run_sync_task(task)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "linked sync task start source=%s sync_task_id=%s uid=%s name=%s",
+                            source,
+                            task_id,
+                            task_uid,
+                            task_name,
+                        )
+                    execution = SyncExecutor(tdb).run_sync_task(task)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "linked sync task done source=%s sync_task_id=%s execution_id=%s status=%s stage=%s",
+                            source,
+                            task_id,
+                            int(getattr(execution, "id", 0) or 0),
+                            str(getattr(execution, "status", "") or ""),
+                            str(getattr(execution, "stage", "") or ""),
+                        )
                     success += 1
                 except Exception as e:
                     failed += 1
