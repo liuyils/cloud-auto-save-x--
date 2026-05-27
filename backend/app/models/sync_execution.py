@@ -23,6 +23,10 @@ class SyncExecution(Base):
     stats_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cancel_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     sync_task = relationship("SyncTask", back_populates="executions", lazy="selectin")

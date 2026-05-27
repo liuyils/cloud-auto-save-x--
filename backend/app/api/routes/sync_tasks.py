@@ -20,7 +20,7 @@ from app.models.sync_execution import SyncExecution
 from app.models.sync_task import SyncTask
 from app.models.sync_task_drama_link import SyncTaskDramaLink
 from app.schemas.sync_execution_files import SyncExecutionFileOut
-from app.schemas.sync_task import SyncExecutionOut, SyncRunIn, SyncTaskCreateIn, SyncTaskOut, SyncTaskUpdateIn
+from app.schemas.sync_task import SyncCancelIn, SyncExecutionOut, SyncRunIn, SyncTaskCreateIn, SyncTaskOut, SyncTaskUpdateIn
 from app.schemas.path_browse import PathBrowseIn, PathBrowseItemOut, PathBrowseOut, PathBrowsePathOut
 from app.services import audit
 from app.services.sync_tasks import (
@@ -79,7 +79,59 @@ def _execution_out(item: SyncExecution) -> SyncExecutionOut:
         run_log=item.run_log,
         stats=stats,
         message=item.message,
+        cancel_requested_at=getattr(item, "cancel_requested_at", None),
+        cancel_requested_by=getattr(item, "cancel_requested_by", None),
+        cancel_message=getattr(item, "cancel_message", None),
     )
+
+
+@router.post(
+    "/{sync_task_id:int}/executions/{sync_execution_id:int}/cancel",
+    response_model=SyncExecutionOut,
+    dependencies=[Depends(require_permissions(SYNC_RUN))],
+)
+def post_cancel_sync_execution(
+    request: Request,
+    sync_task_id: int,
+    sync_execution_id: int,
+    payload: SyncCancelIn | None = None,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    execution = (
+        db.execute(select(SyncExecution).where(SyncExecution.id == sync_execution_id, SyncExecution.sync_task_id == sync_task_id))
+        .scalars()
+        .first()
+    )
+    if execution is None:
+        raise ApiError(code="SYNC_EXECUTION_NOT_FOUND", message="同步执行不存在", http_status=404)
+    if str(execution.status or "") != "running" or execution.finished_at is not None:
+        raise ApiError(code="SYNC_EXECUTION_NOT_RUNNING", message="同步执行不在运行中", http_status=409)
+
+    if execution.cancel_requested_at is None:
+        now = datetime.now()
+        execution.cancel_requested_at = now
+        execution.cancel_requested_by = int(current.user.id)
+        execution.cancel_message = str(payload.message) if payload and payload.message else None
+        execution.stage = "aborting"
+        execution.message = "cancel requested"
+        execution.heartbeat_at = now
+
+        audit.write_audit_log(
+            db,
+            actor_user_id=current.user.id,
+            action="sync_task.execution.cancel",
+            target_type="sync_execution",
+            target_id=str(sync_execution_id),
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            success=True,
+            detail=execution.cancel_message,
+        )
+        db.commit()
+        db.refresh(execution)
+
+    return _execution_out(execution)
 
 
 @router.get("", response_model=list[SyncTaskOut], dependencies=[Depends(require_permissions(SYNC_READ))])

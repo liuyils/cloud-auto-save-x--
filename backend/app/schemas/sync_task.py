@@ -58,6 +58,9 @@ class SyncExecutionOut(BaseModel):
     run_log: str | None = None
     stats: dict[str, Any] = {}
     message: str | None = None
+    cancel_requested_at: datetime | None = None
+    cancel_requested_by: int | None = None
+    cancel_message: str | None = None
 
 
 class SyncTaskOut(BaseModel):
@@ -76,3 +79,7 @@ class SyncTaskOut(BaseModel):
 
 class SyncRunIn(BaseModel):
     strategy: SyncStrategy | None = None
+
+
+class SyncCancelIn(BaseModel):
+    message: str | None = Field(default=None, max_length=2000)

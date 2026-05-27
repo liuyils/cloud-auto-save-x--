@@ -66,6 +66,11 @@ export async function runSyncTask(syncTaskId: number, payload?: { strategy?: Rec
   return data
 }
 
+export async function cancelSyncExecution(syncTaskId: number, executionId: number, payload?: { message?: string | null } | null) {
+  const { data } = await http.post<SyncExecutionItem>(`/sync-tasks/${syncTaskId}/executions/${executionId}/cancel`, payload || {})
+  return data
+}
+
 export async function browseLocalSync(payload: { path: string; max_items?: number }) {
   const { data } = await http.post<PathBrowseResponse>('/sync-tasks/local/browse', payload)
   return data

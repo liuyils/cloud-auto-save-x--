@@ -7,7 +7,7 @@ import secrets
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +51,51 @@ class Strategy:
     concurrency: int
     request_interval_seconds: float
     openlist_copy_batch_size: int
+
+
+class SyncCancelled(Exception):
+    def __init__(self, message: str = "cancelled"):
+        super().__init__(message)
+        self.message = message
+
+
+class _CancelChecker:
+    def __init__(self, sync_execution_id: int):
+        self.sync_execution_id = int(sync_execution_id)
+        self._cancelled = False
+        self._message: str | None = None
+        self._last_check_ts = 0.0
+
+    @property
+    def message(self) -> str | None:
+        return self._message
+
+    def is_cancelled(self) -> bool:
+        if self._cancelled:
+            return True
+        now_ts = _now_ts()
+        if now_ts - self._last_check_ts < 0.8:
+            return False
+        self._last_check_ts = now_ts
+        with SessionLocal() as rdb:
+            row = (
+                rdb.execute(
+                    select(SyncExecution.cancel_requested_at, SyncExecution.cancel_message).where(SyncExecution.id == self.sync_execution_id)
+                )
+                .first()
+            )
+        if not row:
+            return False
+        cancel_requested_at, cancel_message = row
+        if cancel_requested_at is None:
+            return False
+        self._cancelled = True
+        self._message = str(cancel_message).strip() if cancel_message else None
+        return True
+
+    def raise_if_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise SyncCancelled(self._message or "cancelled")
 
 
 def _now_ts() -> float:
@@ -195,7 +240,10 @@ class SyncExecutor:
         self.db.flush()
         self.db.commit()
 
+        cancel_checker = _CancelChecker(int(execution.id))
+
         try:
+            cancel_checker.raise_if_cancelled()
             log.set_stage("scan")
             log.section("扫描文件")
 
@@ -216,13 +264,13 @@ class SyncExecutor:
 
             try:
                 log.line(f"扫描源端: type={source.type} path={source.path}")
-                source_map = self._scan_endpoint(source, strategy=strategy)
+                source_map = self._scan_endpoint(source, strategy=strategy, cancel_checker=cancel_checker)
             except Exception as e:
                 log.line(f"扫描源端失败: type={source.type} path={source.path} err={str(e).strip() or type(e).__name__}")
                 raise
             try:
                 log.line(f"扫描目标端: type={target.type} path={target.path}")
-                target_map = self._scan_endpoint(target, strategy=strategy)
+                target_map = self._scan_endpoint(target, strategy=strategy, cancel_checker=cancel_checker)
             except Exception as e:
                 log.line(f"扫描目标端失败: type={target.type} path={target.path} err={str(e).strip() or type(e).__name__}")
                 raise
@@ -417,13 +465,15 @@ class SyncExecutor:
                 stats=stats,
                 display_path=display_path,
                 on_file_update=update_file_row,
+                cancel_checker=cancel_checker,
             )
 
             if mode == "two_way":
                 log.set_stage("rescan")
                 log.section("刷新快照")
-                source_map = self._scan_endpoint(source, strategy=strategy)
-                target_map = self._scan_endpoint(target, strategy=strategy)
+                cancel_checker.raise_if_cancelled()
+                source_map = self._scan_endpoint(source, strategy=strategy, cancel_checker=cancel_checker)
+                target_map = self._scan_endpoint(target, strategy=strategy, cancel_checker=cancel_checker)
 
             self._persist_snapshots(int(task.id), source_map, target_map)
 
@@ -437,6 +487,31 @@ class SyncExecutor:
             self.db.commit()
             send_sync_execution_notification(self.db, task, execution)
             log.section("同步完成")
+            return execution
+        except SyncCancelled as exc:
+            message = str(getattr(exc, "message", None) or str(exc) or "cancelled").strip() or "cancelled"
+            log.set_stage("aborted")
+            log.section("已停止")
+            log.line(message)
+
+            with SessionLocal() as w:
+                w.execute(
+                    update(SyncExecutionFile)
+                    .where(
+                        SyncExecutionFile.sync_execution_id == int(execution.id),
+                        SyncExecutionFile.status.in_(["pending", "syncing"]),
+                    )
+                    .values(status="aborted", message="aborted", updated_at=datetime.now())
+                )
+                w.commit()
+
+            execution.status = "aborted"
+            execution.finished_at = datetime.now()
+            execution.stage = log.stage
+            execution.run_log = log.render()
+            execution.message = f"aborted: {message}"
+            execution.heartbeat_at = datetime.now()
+            self.db.commit()
             return execution
         except Exception as exc:
             message = getattr(exc, "message", None) or str(exc).strip() or type(exc).__name__
@@ -493,15 +568,23 @@ class SyncExecutor:
             openlist_copy_batch_size=_i("openlist_copy_batch_size", 200, 1, 5000),
         )
 
-    def _scan_endpoint(self, endpoint: Endpoint, *, strategy: Strategy) -> dict[str, FileMeta]:
+    def _scan_endpoint(self, endpoint: Endpoint, *, strategy: Strategy, cancel_checker: _CancelChecker | None = None) -> dict[str, FileMeta]:
+        if cancel_checker is not None:
+            cancel_checker.raise_if_cancelled()
         if endpoint.type == "openlist":
             client = self._get_openlist_client()
-            return self._scan_openlist(client, endpoint.path, refresh=strategy.force_refresh, interval=strategy.request_interval_seconds)
+            return self._scan_openlist(
+                client,
+                endpoint.path,
+                refresh=strategy.force_refresh,
+                interval=strategy.request_interval_seconds,
+                cancel_checker=cancel_checker,
+            )
         if endpoint.type == "local":
             root = _local_sync_root()
             root.mkdir(parents=True, exist_ok=True)
             base = _resolve_local_path(root, endpoint.path)
-            return self._scan_local(base)
+            return self._scan_local(base, cancel_checker=cancel_checker)
         raise bad_request("SYNC_ENDPOINT_INVALID", "无效的同步端点类型")
 
     def _scan_openlist(
@@ -511,6 +594,7 @@ class SyncExecutor:
         *,
         refresh: bool,
         interval: float,
+        cancel_checker: _CancelChecker | None,
     ) -> dict[str, FileMeta]:
         root_path = str(root_path or "").strip() or "/"
         root_path = "/" + root_path.lstrip("/")
@@ -519,11 +603,15 @@ class SyncExecutor:
         out: dict[str, FileMeta] = {"": FileMeta(is_dir=True, size=0, modified_at=0.0)}
         stack: list[tuple[str, str]] = [(root_path, "")]
         while stack:
+            if cancel_checker is not None:
+                cancel_checker.raise_if_cancelled()
             abs_dir, rel_dir = stack.pop()
             page = 1
             per_page = 100
             total = None
             while True:
+                if cancel_checker is not None:
+                    cancel_checker.raise_if_cancelled()
                 if interval > 0:
                     time.sleep(interval)
                 resp = client.fs_list(abs_dir, refresh=refresh, page=page, per_page=per_page)
@@ -565,13 +653,15 @@ class SyncExecutor:
                 page += 1
         return out
 
-    def _scan_local(self, base: Path) -> dict[str, FileMeta]:
+    def _scan_local(self, base: Path, *, cancel_checker: _CancelChecker | None) -> dict[str, FileMeta]:
         if not base.exists():
             return {"": FileMeta(is_dir=True, size=0, modified_at=0.0)}
         if not base.is_dir():
             raise bad_request("SYNC_LOCAL_PATH_INVALID", "本地路径必须是目录")
         out: dict[str, FileMeta] = {"": FileMeta(is_dir=True, size=0, modified_at=base.stat().st_mtime)}
         for root, dirs, files in os.walk(base):
+            if cancel_checker is not None:
+                cancel_checker.raise_if_cancelled()
             root_p = Path(root)
             rel_root = _norm_rel(root_p.relative_to(base).as_posix())
             for d in dirs:
@@ -821,6 +911,7 @@ class SyncExecutor:
         on_persist: Callable[[bool], None],
         display_path: Callable[[Endpoint, str], str],
         on_file_update: Callable[..., None],
+        cancel_checker: _CancelChecker | None,
     ) -> None:
         if not actions:
             return
@@ -906,7 +997,14 @@ class SyncExecutor:
             on_persist(True)
 
         if server_actions:
-            self._apply_server_actions(server_actions, strategy=strategy, log=log, push_event=_append_event, flush_now=flush_now)
+            self._apply_server_actions(
+                server_actions,
+                strategy=strategy,
+                log=log,
+                push_event=_append_event,
+                flush_now=flush_now,
+                cancel_checker=cancel_checker,
+            )
 
         if local_actions:
             self._apply_local_actions(
@@ -916,6 +1014,7 @@ class SyncExecutor:
                 push_event=_append_event,
                 display_path=display_path,
                 flush_now=flush_now,
+                cancel_checker=cancel_checker,
             )
 
         on_persist(True)
@@ -928,6 +1027,7 @@ class SyncExecutor:
         log: ExecutionLog,
         push_event: Callable[[str, str, str], dict[str, Any]],
         flush_now: Callable[[], None],
+        cancel_checker: _CancelChecker | None,
     ) -> None:
         client = self._get_openlist_client()
 
@@ -963,6 +1063,8 @@ class SyncExecutor:
         for group in copy_groups.values():
             names: list[str] = list(group["names"])
             for i in range(0, len(names), strategy.openlist_copy_batch_size):
+                if cancel_checker is not None:
+                    cancel_checker.raise_if_cancelled()
                 batch = names[i : i + strategy.openlist_copy_batch_size]
                 batch_paths = [posixpath.normpath(posixpath.join(group["dst_dir"], str(name))) for name in batch]
                 if strategy.request_interval_seconds > 0:
@@ -1006,7 +1108,15 @@ class SyncExecutor:
                             last_emit_ts = now
                             last_emit_val = float(p)
 
-                        self._wait_openlist_tasks(client, "copy", tasks, log=log, flush_now=flush_now, on_progress=_emit_batch_progress)
+                        self._wait_openlist_tasks(
+                            client,
+                            "copy",
+                            tasks,
+                            log=log,
+                            flush_now=flush_now,
+                            on_progress=_emit_batch_progress,
+                            cancel_checker=cancel_checker,
+                        )
                     for p in batch_paths:
                         push_event("copy", "success", p)
                 except Exception as e:
@@ -1022,6 +1132,8 @@ class SyncExecutor:
 
         for dst_dir, names in delete_groups.items():
             for i in range(0, len(names), 200):
+                if cancel_checker is not None:
+                    cancel_checker.raise_if_cancelled()
                 batch = names[i : i + 200]
                 try:
                     if strategy.request_interval_seconds > 0:
@@ -1046,6 +1158,7 @@ class SyncExecutor:
         log: ExecutionLog,
         flush_now: Callable[[], None] | None = None,
         on_progress: Callable[[float | None], None] | None = None,
+        cancel_checker: _CancelChecker | None,
     ) -> None:
         tids: list[str] = []
         for t in tasks:
@@ -1061,6 +1174,14 @@ class SyncExecutor:
         fail_counts: dict[str, int] = {tid: 0 for tid in tids}
         progresses: dict[str, float | None] = {tid: None for tid in tids}
         while pending:
+            if cancel_checker is not None and cancel_checker.is_cancelled():
+                try:
+                    client.task_cancel_some(task_type, list(pending))
+                except Exception:
+                    pass
+                if flush_now is not None:
+                    flush_now()
+                raise SyncCancelled(cancel_checker.message or "cancelled")
             done: set[str] = set()
             for tid in list(pending):
                 try:
@@ -1151,7 +1272,11 @@ class SyncExecutor:
         push_event: Callable[..., dict[str, Any]],
         display_path: Callable[[Endpoint, str], str],
         flush_now: Callable[[], None],
+        cancel_checker: _CancelChecker | None,
     ) -> None:
+        if cancel_checker is not None:
+            cancel_checker.raise_if_cancelled()
+
         def run_one(a: dict[str, Any]) -> dict[str, Any]:
             kind = str(a.get("kind") or "")
             if kind == "copy":
@@ -1234,17 +1359,51 @@ class SyncExecutor:
             else:
                 normalized.append(a)
 
+        cancelled = False
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(run_one, a) for a in normalized]
-            for fut in as_completed(futs):
-                r = fut.result()
-                push_event(
-                    r.get("action") or "",
-                    r.get("status") or "",
-                    r.get("path") or "",
-                    size=r.get("size"),
-                    message=r.get("message"),
-                )
+            it = iter(normalized)
+            inflight: set[Any] = set()
+
+            def submit_next() -> bool:
+                nonlocal cancelled
+                if cancelled:
+                    return False
+                if cancel_checker is not None and cancel_checker.is_cancelled():
+                    cancelled = True
+                    return False
+                try:
+                    a = next(it)
+                except StopIteration:
+                    return False
+                inflight.add(ex.submit(run_one, a))
+                return True
+
+            for _ in range(max(0, int(workers))):
+                if not submit_next():
+                    break
+
+            while inflight:
+                done, pending = wait(inflight, return_when=FIRST_COMPLETED)
+                inflight = pending
+                for fut in done:
+                    r = fut.result()
+                    push_event(
+                        r.get("action") or "",
+                        r.get("status") or "",
+                        r.get("path") or "",
+                        size=r.get("size"),
+                        message=r.get("message"),
+                    )
+                while len(inflight) < int(workers):
+                    if not submit_next():
+                        break
+
+            if cancel_checker is not None and cancel_checker.is_cancelled():
+                cancelled = True
+
+        if cancelled:
+            flush_now()
+            raise SyncCancelled(cancel_checker.message if cancel_checker is not None else "cancelled")
         return
 
     def _copy_between(
