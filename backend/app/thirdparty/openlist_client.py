@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable, Literal, Mapping
 import requests
+import logging
 
+logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class OpenListError(Exception):
@@ -161,6 +163,7 @@ class OpenListClient:
         code = payload.get("code")
         if str(code) == "200":
             return
+        logger.error(f"OpenList API returned non-success code: {code} with message: {payload.get('message') or ''}")
         raise OpenListError(
             "OpenList API returned non-success code",
             http_status=http_status,
