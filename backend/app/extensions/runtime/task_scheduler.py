@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import logging
 from typing import Any
 
@@ -297,6 +298,11 @@ def run_tmdb_cache_refresh() -> None:
 
 
 def run_drive_account_probe() -> None:
+    def _is_sqlite_locked(exc: Exception) -> bool:
+        if not isinstance(exc, OperationalError):
+            return False
+        return "database is locked" in str(exc).lower()
+
     with SessionLocal() as db:
         setting = get_or_create_drive_account_probe_scheduler_setting(db)
         db.commit()
@@ -307,44 +313,106 @@ def run_drive_account_probe() -> None:
             .scalars()
             .all()
         )
-        logger.info("开始执行驱动账号自动探测 enabled_only=%s accounts=%s", enabled_only, len(accounts))
-        ok = 0
+        account_ids = []
         skipped = 0
-        failed = 0
         for account in accounts:
             if enabled_only and not bool(getattr(account, "enabled", False)):
                 skipped += 1
                 continue
-            try:
-                probed = probe_drive_account(db, int(account.id))
-                ok += 1
-                if getattr(probed, "runtime_status", None) != "active":
-                    continue
+            account_id = int(getattr(account, "id", 0) or 0)
+            if account_id > 0:
+                account_ids.append(account_id)
+
+    logger.info("开始执行驱动账号自动探测 enabled_only=%s accounts=%s", enabled_only, len(account_ids) + skipped)
+    ok = 0
+    failed = 0
+
+    for account_id in account_ids:
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            with SessionLocal() as db:
                 try:
-                    sign_in_drive_account(db, int(account.id))
-                except ApiError as exc:
-                    if exc.code in {"DRIVE_SIGNIN_UNSUPPORTED"}:
-                        logger.info("驱动账号自动签到不支持 account_id=%s", getattr(account, "id", None))
-                    else:
-                        logger.warning(
-                            "驱动账号自动签到失败 account_id=%s code=%s msg=%s",
-                            getattr(account, "id", None),
-                            exc.code,
-                            exc.message,
-                        )
+                    account = db.get(DriveAccount, account_id)
+                    prev_status = getattr(account, "runtime_status", None) if account is not None else None
+                    prev_enabled = bool(getattr(account, "enabled", True)) if account is not None else True
+                    probed = probe_drive_account(db, account_id)
+                    new_status = getattr(probed, "runtime_status", None)
+                    new_enabled = bool(getattr(probed, "enabled", True))
+                    last_error = str(getattr(probed, "last_error", "") or "").strip()
+                    notify_content = None
+                    if (prev_enabled and not new_enabled) or (
+                        prev_status == "active" and new_status in {"inactive", "error"} and new_status != prev_status
+                    ):
+                        lines = [
+                            "驱动账号状态异常",
+                            f"触发: 自动探测",
+                            f"账号: {getattr(probed, 'name', '')} (id={account_id})",
+                            f"类型: {getattr(probed, 'drive_type', '')}",
+                            f"状态: {prev_status or '-'} -> {new_status or '-'}",
+                            f"启用: {prev_enabled} -> {new_enabled}",
+                        ]
+                        if last_error:
+                            lines.append(f"错误: {last_error}")
+                        notify_content = "\n".join(lines)
+                    if getattr(probed, "runtime_status", None) == "active":
+                        try:
+                            sign_in_drive_account(db, account_id)
+                        except ApiError as exc:
+                            if exc.code in {"DRIVE_SIGNIN_UNSUPPORTED"}:
+                                logger.info("驱动账号自动签到不支持 account_id=%s", account_id)
+                            else:
+                                logger.warning(
+                                    "驱动账号自动签到失败 account_id=%s code=%s msg=%s",
+                                    account_id,
+                                    exc.code,
+                                    exc.message,
+                                )
+                        except Exception as exc:
+                            logger.warning("驱动账号自动签到异常 account_id=%s err=%s", account_id, str(exc))
+                    db.commit()
+                    if notify_content:
+                        send_runtime(db, DRAMA_NOTIFY_TITLE, notify_content)
+                    ok += 1
+                    break
+                except OperationalError as exc:
+                    db.rollback()
+                    if attempt < max_attempts and _is_sqlite_locked(exc):
+                        time.sleep(0.2 * attempt)
+                        continue
+                    logger.warning("驱动账号自动探测异常 account_id=%s err=%s", account_id, str(exc))
+                    failed += 1
+                    break
                 except Exception as exc:
-                    logger.warning("驱动账号自动签到异常 account_id=%s err=%s", getattr(account, "id", None), str(exc))
-            except Exception as exc:
-                failed += 1
-                try:
-                    account.runtime_status = "inactive"
-                    account.last_error = str(exc)
-                except Exception:
-                    pass
-                logger.warning("驱动账号自动探测失败 account_id=%s err=%s", getattr(account, "id", None), str(exc))
-                continue
-        db.commit()
-        logger.info("驱动账号自动探测完成 ok=%s skipped=%s failed=%s", ok, skipped, failed)
+                    db.rollback()
+                    try:
+                        account = db.get(DriveAccount, account_id)
+                        prev_status = getattr(account, "runtime_status", None) if account is not None else None
+                        prev_enabled = bool(getattr(account, "enabled", True)) if account is not None else True
+                        if account is not None:
+                            account.runtime_status = "inactive"
+                            account.last_error = str(exc)
+                            db.commit()
+                            notify_content = None
+                            if prev_enabled or prev_status == "active":
+                                lines = [
+                                    "驱动账号状态异常",
+                                    "触发: 自动探测",
+                                    f"账号: {getattr(account, 'name', '')} (id={account_id})",
+                                    f"类型: {getattr(account, 'drive_type', '')}",
+                                    f"状态: {prev_status or '-'} -> inactive",
+                                    f"启用: {prev_enabled} -> {bool(getattr(account, 'enabled', True))}",
+                                    f"错误: {str(exc)}",
+                                ]
+                                notify_content = "\n".join(lines)
+                            if notify_content:
+                                send_runtime(db, DRAMA_NOTIFY_TITLE, notify_content)
+                    except Exception:
+                        db.rollback()
+                    logger.warning("驱动账号自动探测失败 account_id=%s err=%s", account_id, str(exc))
+                    failed += 1
+                    break
+
+    logger.info("驱动账号自动探测完成 ok=%s skipped=%s failed=%s", ok, skipped, failed)
 
 
 task_scheduler_manager = TaskSchedulerManager()
