@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -23,6 +24,30 @@ _lock_timeout = timedelta(minutes=10)
 
 def _now() -> datetime:
     return datetime.now()
+
+
+def _touch_last_accessed_at_best_effort(*, row_id: int, accessed_at: datetime) -> None:
+    if row_id <= 0:
+        return
+    for attempt in range(1, 4):
+        try:
+            with SessionLocal() as db:
+                db.execute(
+                    update(TMDBMediaCache)
+                    .where(TMDBMediaCache.id == int(row_id))
+                    .values(last_accessed_at=accessed_at)
+                )
+                db.commit()
+            return
+        except OperationalError as exc:
+            if "database is locked" in str(exc).lower() and attempt < 3:
+                import time
+
+                time.sleep(0.05 * attempt)
+                continue
+            return
+        except Exception:
+            return
 
 
 def _load_json(payload: str | None) -> Any:
@@ -499,8 +524,11 @@ def get_tmdb_detail_cached(
     now = _now()
     row = _get_cache_row(db, media_type=media_type, tmdb_id=tmdb_id, language=language, poster_language=poster_language)
     if row is not None:
-        row.last_accessed_at = now
-        db.flush()
+        try:
+            row.last_accessed_at = now
+        except Exception:
+            pass
+        _touch_last_accessed_at_best_effort(row_id=int(getattr(row, "id", 0) or 0), accessed_at=now)
         if force_refresh:
             row2, details, update_weekdays, episode_weekdays = refresh_tmdb_detail_sync(
                 db,

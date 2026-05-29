@@ -200,6 +200,8 @@ class TaskSchedulerManager:
 
 
 def run_drama_tasks() -> None:
+    task_ids: list[int] = []
+    task_payloads: list[dict[str, Any]] = []
     with SessionLocal() as db:
         try:
             from app.extensions.runtime.plugin_loader import sync_plugin_definitions
@@ -208,57 +210,80 @@ def run_drama_tasks() -> None:
             db.commit()
         except Exception:
             db.rollback()
-        tasks = (
-            db.execute(select(Task).where(Task.enabled.is_(True), Task.task_type == "drama").order_by(Task.id.asc()))
-            .scalars()
+        rows = (
+            db.execute(select(Task.id, Task.task_uid, Task.account_name, Task.shareurl).where(Task.enabled.is_(True), Task.task_type == "drama").order_by(Task.id.asc()))
             .all()
         )
-        executor = TaskExecutor(db)
-        account_manager = None
-        if tasks:
-            account_manager = DatabaseAccountManager(db)
-            account_manager.init_for_tasks(
-                [
-                    {
-                        "account_name": getattr(task, "account_name", None),
-                        "shareurl": getattr(task, "shareurl", None),
-                    }
-                    for task in tasks
-                ]
-            )
-        sections: list[str] = []
-        success_task_uids: list[str] = []
-        plugin_candidates: list[object] = []
-        for task in tasks:
-            execution = executor.run_task(
-                task,
-                account_manager=account_manager,
-                init_account_for_task=False,
-                defer_plugins=True,
-                keep_runtime_tree=True,
-            )
-            try:
-                section, should_notify = build_task_section(task, execution)
-                if should_notify and section:
-                    sections.append(section)
-            except Exception:
-                pass
-            try:
-                if should_trigger_linked_sync_for_drama_execution(execution):
-                    uid = str(getattr(task, "task_uid", "") or "").strip()
-                    if uid:
-                        success_task_uids.append(uid)
-            except Exception:
-                pass
-            try:
-                if getattr(execution, "status", None) == "success" and bool(getattr(execution, "_has_new_files", False)):
-                    plugin_candidates.append(execution)
-            except Exception:
-                pass
-            try:
-                db.commit()
-            except Exception:
-                db.rollback()
+        for tid, uid, account_name, shareurl in rows:
+            if tid is None:
+                continue
+            task_ids.append(int(tid))
+            task_payloads.append({"task_uid": uid, "account_name": account_name, "shareurl": shareurl})
+
+    account_manager = None
+    if task_payloads:
+        try:
+            with SessionLocal() as adb:
+                account_manager = DatabaseAccountManager(adb)
+            if account_manager is not None:
+                account_manager.init_for_tasks(task_payloads)
+        except Exception:
+            account_manager = None
+
+    sections: list[str] = []
+    success_task_uids: list[str] = []
+    plugin_candidates: list[object] = []
+
+    for task_id in task_ids:
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            with SessionLocal() as db:
+                try:
+                    task = db.get(Task, int(task_id))
+                    if task is None:
+                        break
+                    executor = TaskExecutor(db)
+                    execution = executor.run_task(
+                        task,
+                        account_manager=account_manager,
+                        init_account_for_task=False,
+                        defer_plugins=True,
+                        keep_runtime_tree=True,
+                    )
+                    should_notify = False
+                    try:
+                        section, should_notify = build_task_section(task, execution)
+                        if should_notify and section:
+                            sections.append(section)
+                    except Exception:
+                        pass
+                    try:
+                        if should_trigger_linked_sync_for_drama_execution(execution):
+                            uid = str(getattr(task, "task_uid", "") or "").strip()
+                            if uid:
+                                success_task_uids.append(uid)
+                    except Exception:
+                        pass
+                    try:
+                        if getattr(execution, "status", None) == "success" and bool(getattr(execution, "_has_new_files", False)):
+                            plugin_candidates.append(execution)
+                    except Exception:
+                        pass
+                    db.commit()
+                    break
+                except OperationalError as exc:
+                    db.rollback()
+                    if attempt < max_attempts and "database is locked" in str(exc).lower():
+                        time.sleep(0.2 * attempt)
+                        continue
+                    logger.warning("追剧任务调度执行异常 task_id=%s err=%s", task_id, str(exc))
+                    break
+                except Exception as exc:
+                    db.rollback()
+                    logger.warning("追剧任务调度执行失败 task_id=%s err=%s", task_id, str(exc))
+                    break
+
+    with SessionLocal() as db:
         if sections:
             try:
                 send_runtime(db, DRAMA_NOTIFY_TITLE, "\n\n".join(sections))
@@ -270,8 +295,8 @@ def run_drama_tasks() -> None:
             db.commit()
         except Exception:
             db.rollback()
-        if success_task_uids:
-            trigger_linked_sync_tasks_async(success_task_uids, source="scheduler.run_drama_tasks")
+    if success_task_uids:
+        trigger_linked_sync_tasks_async(success_task_uids, source="scheduler.run_drama_tasks")
     if not plugin_candidates:
         return
     try:
@@ -420,6 +445,7 @@ def run_drive_account_probe() -> None:
     failed = 0
 
     for account_id in account_ids:
+        probed_status: str | None = None
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             with SessionLocal() as db:
@@ -437,7 +463,7 @@ def run_drive_account_probe() -> None:
                     ):
                         lines = [
                             "驱动账号状态异常",
-                            f"触发: 自动探测",
+                            "触发: 自动探测",
                             f"账号: {getattr(probed, 'name', '')} (id={account_id})",
                             f"类型: {getattr(probed, 'drive_type', '')}",
                             f"状态: {prev_status or '-'} -> {new_status or '-'}",
@@ -446,24 +472,10 @@ def run_drive_account_probe() -> None:
                         if last_error:
                             lines.append(f"错误: {last_error}")
                         notify_content = "\n".join(lines)
-                    if getattr(probed, "runtime_status", None) == "active":
-                        try:
-                            sign_in_drive_account(db, account_id)
-                        except ApiError as exc:
-                            if exc.code in {"DRIVE_SIGNIN_UNSUPPORTED"}:
-                                logger.info("驱动账号自动签到不支持 account_id=%s", account_id)
-                            else:
-                                logger.warning(
-                                    "驱动账号自动签到失败 account_id=%s code=%s msg=%s",
-                                    account_id,
-                                    exc.code,
-                                    exc.message,
-                                )
-                        except Exception as exc:
-                            logger.warning("驱动账号自动签到异常 account_id=%s err=%s", account_id, str(exc))
                     db.commit()
                     if notify_content:
                         send_runtime(db, DRAMA_NOTIFY_TITLE, notify_content)
+                    probed_status = str(new_status or "").strip() or None
                     ok += 1
                     break
                 except OperationalError as exc:
@@ -484,7 +496,6 @@ def run_drive_account_probe() -> None:
                             account.runtime_status = "inactive"
                             account.last_error = str(exc)
                             db.commit()
-                            notify_content = None
                             if prev_enabled or prev_status == "active":
                                 lines = [
                                     "驱动账号状态异常",
@@ -495,13 +506,45 @@ def run_drive_account_probe() -> None:
                                     f"启用: {prev_enabled} -> {bool(getattr(account, 'enabled', True))}",
                                     f"错误: {str(exc)}",
                                 ]
-                                notify_content = "\n".join(lines)
-                            if notify_content:
-                                send_runtime(db, DRAMA_NOTIFY_TITLE, notify_content)
+                                send_runtime(db, DRAMA_NOTIFY_TITLE, "\n".join(lines))
                     except Exception:
                         db.rollback()
                     logger.warning("驱动账号自动探测失败 account_id=%s err=%s", account_id, str(exc))
                     failed += 1
+                    break
+
+        if probed_status != "active":
+            continue
+
+        max_signin_attempts = 3
+        for attempt in range(1, max_signin_attempts + 1):
+            with SessionLocal() as sdb:
+                try:
+                    sign_in_drive_account(sdb, account_id)
+                    sdb.commit()
+                    break
+                except ApiError as exc:
+                    sdb.rollback()
+                    if exc.code in {"DRIVE_SIGNIN_UNSUPPORTED"}:
+                        logger.info("驱动账号自动签到不支持 account_id=%s", account_id)
+                    else:
+                        logger.warning(
+                            "驱动账号自动签到失败 account_id=%s code=%s msg=%s",
+                            account_id,
+                            exc.code,
+                            exc.message,
+                        )
+                    break
+                except OperationalError as exc:
+                    sdb.rollback()
+                    if attempt < max_signin_attempts and _is_sqlite_locked(exc):
+                        time.sleep(0.2 * attempt)
+                        continue
+                    logger.warning("驱动账号自动签到异常 account_id=%s err=%s", account_id, str(exc))
+                    break
+                except Exception as exc:
+                    sdb.rollback()
+                    logger.warning("驱动账号自动签到异常 account_id=%s err=%s", account_id, str(exc))
                     break
 
     logger.info("驱动账号自动探测完成 ok=%s skipped=%s failed=%s", ok, skipped, failed)
