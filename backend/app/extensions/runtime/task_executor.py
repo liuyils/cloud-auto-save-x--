@@ -468,11 +468,7 @@ class TaskExecutor:
                     self.db.flush()
             log.section("异常")
             log.line(f"阶段={stage}: {message}")
-            tb = _truncate(traceback.format_exc().rstrip(), 8000)
-            if tb.strip():
-                log.section("Traceback")
-                for line in tb.splitlines():
-                    log.line(line)
+
             log.set_stage(stage)
             log.section("程序结束")
             finished_at_local = datetime.now()

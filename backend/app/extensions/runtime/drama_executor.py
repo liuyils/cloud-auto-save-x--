@@ -354,12 +354,18 @@ class DramaTaskExecutor:
                 stoken=str(stoken),
                 file_names=batch_names,
             ) or {}
-            if (save_ret.get("code") not in (0, "0", None)) and (save_ret.get("status") not in (200, "200", None)):
+            if (save_ret.get("code") not in (0, "0", None)) or (save_ret.get("status") not in (200, "200", None)):
                 err_msg = str(save_ret.get("message") or "转存失败")
                 break
 
             qret = None
-            job_id = ((save_ret.get("data") or {}).get("task_id") or (save_ret.get("data") or {}).get("taskId") or "").strip()
+            job_id = (
+                (save_ret.get("data") or {}).get("task_id")
+                or (save_ret.get("data") or {}).get("taskId")
+                or save_ret.get("task_id")
+                or save_ret.get("taskId")
+                or ""
+            ).strip()
             if job_id:
                 self._line(f"转存任务 id: {job_id}")
                 qret = self._query_task(str(job_id))

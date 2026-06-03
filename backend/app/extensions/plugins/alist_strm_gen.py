@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class Alist_strm_gen:
 
-    video_exts = ["mp4", "mkv", "flv", "mov", "m4v", "avi", "webm", "wmv"]
+    video_exts = ["mp4", "mkv", "flv", "mov", "m4v", "avi", "webm", "wmv", "cas"]
     default_config = {
         "tips_alist_refresh": "该插件需与 alist 刷新插件配合使用，否则可能出现 alist 未刷新导致无法生成 strm 的问题！",
         "url": "",  # OpenList/Alist 服务器 URL

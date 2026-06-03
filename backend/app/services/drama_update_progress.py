@@ -22,6 +22,7 @@ _VIDEO_EXTS = {
     ".flv",
     ".webm",
     ".m4v",
+    ".cas",
 }
 
 

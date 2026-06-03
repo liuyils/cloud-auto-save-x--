@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class Alist_strm_gen:
 
-    video_exts = ["mp4", "mkv", "flv", "mov", "m4v", "avi", "webm", "wmv"]
+    video_exts = ["mp4", "mkv", "flv", "mov", "m4v", "avi", "webm", "wmv", "cas"]
     default_config = {
         "url": "",  # Alist服务器URL
         "token": "",  # Alist服务器Token

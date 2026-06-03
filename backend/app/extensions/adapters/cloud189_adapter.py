@@ -2025,6 +2025,12 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             data["shareId"] = str(share_id)
         resp = self._request("POST", url, data=data, timeout=15)
         task_id = (resp.text or "").strip().strip('"').strip("'")
+        try:
+            j = json.loads(task_id)
+        except Exception:
+            j = None
+        if isinstance(j, dict) and "taskId" in j:
+            task_id = j["taskId"]
         if not task_id:
             raise RuntimeError("创建任务失败")
         if self._debug:
@@ -2041,6 +2047,8 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         self._ensure_login()
         url = f"{self.HOST_URL}/checkBatchTask.action"
         j = self._request_json("POST", url, data={"type": task_type, "taskId": task_id}, timeout=15)
+        if self._debug:
+            logger.info(f"checkBatchTask resp: {j}")
         if not isinstance(j, dict):
             raise RuntimeError("查询任务失败")
         return j
@@ -2106,10 +2114,16 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             if not fid_list:
                 return {"code": 0, "message": "success", "data": {"task_id": ""}}
             access_code = ""
+            st_share_id = ""
+            st_share_mode = ""
+            st_root_file_id = ""
             try:
                 st = json.loads(stoken) if stoken and stoken.strip().startswith("{") else {}
                 if isinstance(st, dict):
                     access_code = str(st.get("accessCode") or "")
+                    st_share_id = str(st.get("shareId") or "")
+                    st_share_mode = str(st.get("shareMode") or "")
+                    st_root_file_id = str(st.get("rootFileId") or "")
             except Exception:
                 access_code = ""
             if not access_code:
@@ -2118,11 +2132,26 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             share_id = ""
             share_mode = "3"
             root_file_id = ""
-            meta2 = self._get_share_info_by_code_v2(pwd_id)
-            if meta2:
-                share_id = str(meta2.get("shareId") or "")
-                share_mode = str(meta2.get("shareMode") or "3")
-                root_file_id = str(meta2.get("fileId") or "")
+            if st_share_id:
+                share_id = st_share_id
+            if st_share_mode:
+                share_mode = st_share_mode
+            if st_root_file_id:
+                root_file_id = st_root_file_id
+
+            meta2 = None
+            if not share_mode or not root_file_id:
+                meta2 = self._get_share_info_by_code_v2(pwd_id)
+                if meta2:
+                    share_mode = str(meta2.get("shareMode") or share_mode or "3")
+                    root_file_id = str(meta2.get("fileId") or root_file_id or "")
+                    if not share_id:
+                        share_id = str(meta2.get("shareId") or "")
+
+            if share_mode == "1" and access_code and not share_id:
+                checked = self._check_access_code(pwd_id, access_code)
+                if checked:
+                    share_id = checked
             if not share_id:
                 html = self._fetch_share_page(pwd_id)
                 meta = self._parse_share_page(html)
@@ -2265,6 +2294,16 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
 
             while True:
                 j = self._check_batch_task("SHARE_SAVE", task_id)
+                if isinstance(j, dict) and (j.get("success") is False):
+                    err = str(j.get("errorMsg") or j.get("error_msg") or j.get("res_message") or "任务失败")
+                    code = str(j.get("errorCode") or j.get("error_code") or "").strip()
+                    if code.lower() == "invalidargument" or "无法识别的任务" in err:
+                        try:
+                            j = self._open_batch_check_task("SHARE_SAVE", task_id)
+                        except Exception:
+                            raise RuntimeError(err)
+                    else:
+                        raise RuntimeError(err)
                 status = j.get("taskStatus")
                 last_status = status
                 last_j = j
