@@ -680,6 +680,7 @@ class OpenListClient:
                 "skip_existing": bool(skip_existing),
                 "merge": bool(merge),
             },
+            allow_retry=False,
         )
 
     def fs_remove(self, dir_path: str, names: Iterable[str]) -> dict[str, Any]:

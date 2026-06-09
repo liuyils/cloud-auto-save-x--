@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.sync_execution import SyncExecution
+from app.models.sync_task_lock import SyncTaskLock
 
 
 def abort_running_sync_executions_on_startup(db: Session) -> int:
@@ -47,3 +48,10 @@ def abort_stale_running_sync_executions(db: Session, *, threshold_seconds: int) 
         n += 1
     return n
 
+
+def release_all_sync_task_locks_on_startup(db: Session) -> int:
+    ids = db.execute(select(SyncTaskLock.sync_task_id)).scalars().all()
+    if not ids:
+        return 0
+    db.execute(delete(SyncTaskLock))
+    return len(ids)

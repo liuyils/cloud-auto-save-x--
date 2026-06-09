@@ -15,10 +15,11 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from treelib import Tree
 
-from app.core.errors import bad_request
+from app.core.errors import ApiError, bad_request
 from app.db.session import SessionLocal
 from app.extensions.runtime.execution_log import ExecutionLog
 from app.extensions.runtime.plugin_hooks import PluginHookRunner
@@ -28,6 +29,7 @@ from app.models.sync_execution import SyncExecution
 from app.models.sync_execution_file import SyncExecutionFile
 from app.models.sync_file_snapshot import SyncFileSnapshot
 from app.models.sync_task import SyncTask
+from app.models.sync_task_lock import SyncTaskLock
 from app.services.notifications.sync_notify import send_sync_execution_notification
 from app.services.openlist_client_factory import get_openlist_client
 
@@ -244,9 +246,27 @@ class SyncExecutor:
                 json.dumps(strategy_override or {}, ensure_ascii=False) if strategy_override else None,
             )
 
+        task_id = int(getattr(task, "id", 0) or 0)
+        lock_owner = f"{os.getpid()}:{threading.get_ident()}"
+        try:
+            lock_now = datetime.now()
+            self.db.add(SyncTaskLock(sync_task_id=task_id, locked_at=lock_now, owner=lock_owner))
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            raise ApiError(code="SYNC_TASK_RUNNING", message="同步任务正在执行", http_status=409, detail=str(task_id))
+
+        def _release_lock() -> None:
+            try:
+                with SessionLocal() as ldb:
+                    ldb.execute(delete(SyncTaskLock).where(SyncTaskLock.sync_task_id == task_id))
+                    ldb.commit()
+            except Exception:
+                pass
+
         now = datetime.now()
         execution = SyncExecution(
-            sync_task_id=int(task.id),
+            sync_task_id=task_id,
             status="running",
             stage=log.stage,
             started_at=now,
@@ -265,9 +285,14 @@ class SyncExecutor:
             },
             ensure_ascii=False,
         )
-        self.db.add(execution)
-        self.db.flush()
-        self.db.commit()
+        try:
+            self.db.add(execution)
+            self.db.flush()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            _release_lock()
+            raise
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("sync execution created sync_task_id=%s sync_execution_id=%s", int(task.id), int(execution.id))
 
@@ -659,6 +684,7 @@ class SyncExecutor:
             execution.message = "success"
             execution.heartbeat_at = datetime.now()
             self.db.commit()
+            _release_lock()
             send_sync_execution_notification(self.db, task, execution)
             log.section("同步完成")
             return execution
@@ -686,6 +712,7 @@ class SyncExecutor:
             execution.message = f"aborted: {message}"
             execution.heartbeat_at = datetime.now()
             self.db.commit()
+            _release_lock()
             return execution
         except Exception as exc:
             message = getattr(exc, "message", None) or str(exc).strip() or type(exc).__name__
@@ -701,6 +728,7 @@ class SyncExecutor:
             execution.message = message
             execution.heartbeat_at = datetime.now()
             self.db.commit()
+            _release_lock()
             send_sync_execution_notification(self.db, task, execution)
             raise
 

@@ -25,6 +25,7 @@ from app.models.user import User
 from app.models.resource_search_source import ResourceSearchSource
 from app.models.sync_task import SyncTask
 from app.models.sync_task_drama_link import SyncTaskDramaLink
+from app.models.sync_task_lock import SyncTaskLock
 from app.models.sync_execution import SyncExecution
 from app.models.sync_execution_file import SyncExecutionFile
 from app.models.sync_file_snapshot import SyncFileSnapshot
@@ -56,6 +57,7 @@ __all__ = [
     "user_roles",
     "SyncTask",
     "SyncTaskDramaLink",
+    "SyncTaskLock",
     "SyncExecution",
     "SyncExecutionFile",
     "SyncFileSnapshot",

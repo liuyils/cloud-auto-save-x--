@@ -28,6 +28,7 @@ from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama
 from app.models.drive_account import DriveAccount
 from app.extensions.runtime.account_manager import DatabaseAccountManager
 from app.extensions.runtime.task_executor import TaskExecutor
+from app.extensions.runtime.plugin_loader import sync_plugin_definitions
 from app.extensions.runtime.plugin_registry import PluginRegistry
 from app.core.errors import ApiError
 
@@ -301,6 +302,11 @@ def run_drama_tasks() -> None:
         return
     try:
         with SessionLocal() as pdb:
+            try:
+                sync_plugin_definitions(pdb)
+                pdb.commit()
+            except Exception:
+                pdb.rollback()
             plugins = PluginRegistry(pdb).load_active_plugins()
             pdb.rollback()
     except Exception:
