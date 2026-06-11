@@ -68,7 +68,7 @@ def _pansou_cloud_type(value: str | None) -> str | None:
     if not dt:
         return None
     mapping = {
-        "115": "pan115",
+        "115": "115",
         "123pan": "pan123",
         "cloud189": "tianyi",
         "baidu": "baiduPan",
