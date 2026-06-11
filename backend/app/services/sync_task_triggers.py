@@ -71,13 +71,6 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
             sync_uids = _normalize_task_uids([str(x) for x in links if x])
             if not sync_uids:
                 return
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "linked sync tasks resolved source=%s drama_tasks=%s sync_task_uids=%s",
-                    source,
-                    len(task_uids),
-                    sync_uids[:30],
-                )
 
             tasks = (
                 db.execute(
@@ -89,13 +82,6 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
             )
             if not tasks:
                 return
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "linked sync tasks to run source=%s count=%s head=%s",
-                    source,
-                    len(tasks),
-                    [{"id": int(t[0]), "uid": str(t[1] or ""), "name": str(t[2] or "")} for t in tasks[:10]],
-                )
 
         logger.info("触发关联同步任务 source=%s drama_tasks=%s sync_tasks=%s", source, len(task_uids), len(tasks))
         skipped = 0
@@ -130,24 +116,7 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
                     if task is None:
                         skipped += 1
                         continue
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "linked sync task start source=%s sync_task_id=%s uid=%s name=%s",
-                            source,
-                            task_id,
-                            task_uid,
-                            task_name,
-                        )
                     execution = SyncExecutor(tdb).run_sync_task(task)
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "linked sync task done source=%s sync_task_id=%s execution_id=%s status=%s stage=%s",
-                            source,
-                            task_id,
-                            int(getattr(execution, "id", 0) or 0),
-                            str(getattr(execution, "status", "") or ""),
-                            str(getattr(execution, "stage", "") or ""),
-                        )
                     success += 1
                 except Exception as e:
                     failed += 1
@@ -171,3 +140,59 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
         )
     except Exception as e:
         logger.exception("关联同步任务触发异常 source=%s err=%s", source, str(e).strip() or type(e).__name__)
+
+
+def trigger_sync_tasks_by_sync_uids(sync_task_uids: list[str], *, source: str) -> None:
+    """直接按同步任务 uid 触发同步任务，不依赖 SyncTaskDramaLink 关联表。"""
+    if not sync_task_uids:
+        return
+    _executor.submit(_run_sync_tasks_by_uids, list(sync_task_uids), str(source or ""))
+
+
+def _run_sync_tasks_by_uids(sync_uids: list[str], source: str) -> None:
+    try:
+        with SessionLocal() as db:
+            tasks = (
+                db.execute(
+                    select(SyncTask.id, SyncTask.uid, SyncTask.name)
+                    .where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True))
+                    .order_by(SyncTask.id.asc())
+                )
+                .all()
+            )
+            if not tasks:
+                return
+
+        logger.info("直接触发同步任务 source=%s sync_tasks=%s", source, len(tasks))
+        for task_id, task_uid, task_name in tasks:
+            with SessionLocal() as tdb:
+                running = (
+                    tdb.execute(
+                        select(SyncExecution.id).where(
+                            SyncExecution.sync_task_id == int(task_id),
+                            SyncExecution.status == "running",
+                            SyncExecution.finished_at.is_(None),
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if running is not None:
+                    logger.info("跳过同步任务（正在运行） uid=%s name=%s", task_uid, task_name)
+                    continue
+                try:
+                    task = tdb.get(SyncTask, int(task_id))
+                    if task is None:
+                        continue
+                    execution = SyncExecutor(tdb).run_sync_task(task)
+                    logger.info(
+                        "同步任务执行完成 uid=%s status=%s",
+                        task_uid,
+                        str(getattr(execution, "status", "") or ""),
+                    )
+                except Exception as e:
+                    tdb.rollback()
+                    logger.warning("同步任务执行失败 uid=%s name=%s err=%s", task_uid, task_name, str(e).strip() or type(e).__name__)
+    except Exception as e:
+        logger.exception("直接触发同步任务异常 sync_uids=%s source=%s err=%s", sync_uids, source, str(e).strip() or type(e).__name__)
+

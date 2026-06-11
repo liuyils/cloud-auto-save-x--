@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
 from sqlalchemy import func, select
@@ -13,6 +14,8 @@ from app.models.sync_task import SyncTask
 from app.models.sync_task_drama_link import SyncTaskDramaLink
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_uids(value: list[str] | None) -> list[str]:

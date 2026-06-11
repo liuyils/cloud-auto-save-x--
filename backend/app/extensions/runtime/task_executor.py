@@ -335,6 +335,7 @@ class TaskExecutor:
                                 instance = item.get("instance")
                                 key = getattr(definition, "plugin_key", None) or ""
                                 if not bool(getattr(instance, "is_active", False)):
+                                    log.line(f"SKIP: {key}（is_active=false）")
                                     continue
                                 if not hasattr(instance, "run"):
                                     log.line(f"SKIP: {key}（缺少 run）")
@@ -350,6 +351,7 @@ class TaskExecutor:
                                 instance = item.get("instance")
                                 key = getattr(definition, "plugin_key", None) or ""
                                 if not bool(getattr(instance, "is_active", False)):
+                                    log.line(f"SKIP: {key}（is_active=false）")
                                     continue
                                 if not hasattr(instance, "task_after"):
                                     log.line(f"INFO: {key}（无 task_after）")

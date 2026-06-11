@@ -298,30 +298,51 @@ def run_drama_tasks() -> None:
             db.rollback()
     if success_task_uids:
         trigger_linked_sync_tasks_async(success_task_uids, source="scheduler.run_drama_tasks")
+    plugin_candidates_count = len(plugin_candidates)
+    logger.info(
+        "追剧任务调度后置插件阶段: 候选任务数=%d success_task_uids=%s",
+        plugin_candidates_count,
+        success_task_uids,
+    )
     if not plugin_candidates:
         return
     try:
         with SessionLocal() as pdb:
             try:
+                logger.debug("追剧调度后置插件: 同步插件定义")
                 sync_plugin_definitions(pdb)
                 pdb.commit()
+                logger.debug("追剧调度后置插件: 插件定义同步完成")
             except Exception:
                 pdb.rollback()
-            plugins = PluginRegistry(pdb).load_active_plugins()
-            pdb.rollback()
+                logger.exception("追剧调度后置插件: 插件定义同步失败")
+            try:
+                plugins = PluginRegistry(pdb).load_active_plugins()
+                logger.info(
+                    "追剧调度后置插件: 加载到插件数=%d",
+                    len(plugins),
+                )
+                pdb.rollback()
+            except Exception:
+                plugins = []
+                logger.exception("追剧调度后置插件: 加载插件失败")
     except Exception:
         plugins = []
+        logger.exception("追剧调度后置插件: 创建插件注册表失败")
     if not plugins:
+        logger.warning("追剧调度后置插件: 无可用插件（可能尚未安装或全部禁用）")
         return
     deduped: dict[str, tuple[object, dict[str, Any], object, object]] = {}
     for item in plugins:
         plugin = item.get("instance")
-        if not bool(getattr(plugin, "is_active", False)):
-            continue
-        if not hasattr(plugin, "run"):
-            continue
         definition = item.get("definition")
         plugin_key = str(getattr(plugin, "plugin_name", "") or getattr(definition, "plugin_key", "") or "").strip()
+        if not bool(getattr(plugin, "is_active", False)):
+            logger.debug("追剧调度后置插件: 跳过（is_active=false） plugin=%s", plugin_key)
+            continue
+        if not hasattr(plugin, "run"):
+            logger.debug("追剧调度后置插件: 跳过（缺少 run 方法） plugin=%s", plugin_key)
+            continue
         if not plugin_key:
             continue
         base_task_cfg = getattr(plugin, "default_task_config", None)
@@ -332,6 +353,7 @@ def run_drama_tasks() -> None:
             adapter = getattr(execution, "_runtime_adapter", None)
             tree = getattr(execution, "_runtime_tree", None)
             if not isinstance(task_data, dict) or adapter is None or tree is None:
+                logger.debug("追剧调度后置插件: 跳过（执行结果缺少必要数据） plugin=%s", plugin_key)
                 continue
             merged_cfg = dict(base_task_cfg)
             addition_cfg = (task_data.get("addition") or {}).get(plugin_key)
@@ -351,12 +373,19 @@ def run_drama_tasks() -> None:
             dedupe_key = f"{plugin_key}|{account_key}|{cfg_key}|{context_key}"
             if dedupe_key not in deduped:
                 deduped[dedupe_key] = (plugin, task_data, adapter, tree)
+    logger.info(
+        "追剧调度后置插件: 去重后待执行插件任务数=%d",
+        len(deduped),
+    )
     for _k, payload in deduped.items():
         plugin, task_data, adapter, tree = payload
+        plugin_key = str(getattr(plugin, "plugin_name", "") or getattr(plugin, "__class__", type(plugin)).__name__ or "").strip()
         try:
+            logger.info("追剧调度后置插件: 执行 plugin=%s taskname=%s", plugin_key, str(task_data.get("taskname") or ""))
             plugin.run(task_data, account=adapter, tree=tree)
+            logger.info("追剧调度后置插件: 成功 plugin=%s", plugin_key)
         except Exception:
-            logger.exception("调度后置插件执行失败: %s", getattr(plugin, "__class__", type(plugin)).__name__)
+            logger.exception("追剧调度后置插件: 执行失败 plugin=%s", plugin_key)
 
 
 def run_sync_execution_recovery() -> None:

@@ -15,6 +15,7 @@ class TMDBMediaCache(Base):
         Index("ix_tmdb_media_cache_expires_at", "expires_at"),
         Index("ix_tmdb_media_cache_last_accessed_at", "last_accessed_at"),
         Index("ix_tmdb_media_cache_tmdb", "media_type", "tmdb_id"),
+        Index("ix_tmdb_media_cache_lookup", "media_type", "tmdb_id", "language", "poster_language", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

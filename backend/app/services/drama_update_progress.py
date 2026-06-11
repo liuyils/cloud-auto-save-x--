@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -8,6 +9,8 @@ from zoneinfo import ZoneInfo
 from app.extensions.runtime.guessit_fallback import guessit_episode_numbers
 from app.models.task_savepath_snapshot import TaskSavepathSnapshot
 from app.schemas.task import DramaUpdateProgressOut
+
+logger = logging.getLogger(__name__)
 
 
 _SH_TZ = ZoneInfo("Asia/Shanghai")

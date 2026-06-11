@@ -5,12 +5,14 @@ import { Search } from '@element-plus/icons-vue'
 import { fetchDoubanCategories, fetchDoubanList, fetchTMDBDetail, searchTMDB } from '@/api/media'
 import DramaTaskDrawer from '@/components/tasks/DramaTaskDrawer.vue'
 import { createTask, fetchTasks, updateTask } from '@/api/tasks'
+import { fetchSyncTasks } from '@/api/syncTasks'
 import { fetchDriveAccounts, fetchPlugins } from '@/api/extensions'
 import { TASK_WRITE } from '@/constants/permissions'
 import { useAuthStore } from '@/stores/auth'
 import { useIsMobile } from '@/composables/useIsMobile'
 import type { DriveAccountItem, PluginItem } from '@/types/extensions'
 import type { DoubanCategory, DoubanListItem, TMDBBrief } from '@/types/media'
+import type { SyncTaskItem } from '@/types/syncTasks'
 import type { TaskItem } from '@/types/tasks'
 
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w342'
@@ -60,6 +62,19 @@ const accounts = ref<DriveAccountItem[]>([])
 const plugins = ref<PluginItem[]>([])
 const tasksCache = ref<TaskItem[]>([])
 const tasksLoading = ref(false)
+const syncTasks = ref<SyncTaskItem[]>([])
+const syncTasksLoading = ref(false)
+
+const runLogDialog = reactive({
+  visible: false,
+  title: '执行日志',
+  content: '',
+  status: '',
+  stage: '',
+  message: '',
+  taskId: 0,
+})
+let runLogController: AbortController | null = null
 
 const taskDrawer = reactive({
   visible: false,
@@ -156,14 +171,30 @@ function findExistingDramaTasks(tmdb_id: number, tmdb_media_type: 'movie' | 'tv'
   })
 }
 
-function openNewDramaTask(presetTaskname: string, tmdb_id: number, tmdb_media_type: 'movie' | 'tv') {
+async function openNewDramaTask(presetTaskname: string, tmdb_id: number, tmdb_media_type: 'movie' | 'tv') {
+  syncTasksLoading.value = true
+  try {
+    await fetchSyncTasks()
+      .then((data) => { syncTasks.value = data || [] })
+      .catch(() => { syncTasks.value = [] })
+  } finally {
+    syncTasksLoading.value = false
+  }
   taskDrawer.currentTask = null
   taskDrawer.presetTaskname = String(presetTaskname || '').trim()
   taskDrawer.presetTmdb = { tmdb_id, tmdb_media_type }
   taskDrawer.visible = true
 }
 
-function openEditDramaTask(task: TaskItem) {
+async function openEditDramaTask(task: TaskItem) {
+  syncTasksLoading.value = true
+  try {
+    await fetchSyncTasks()
+      .then((data) => { syncTasks.value = data || [] })
+      .catch(() => { syncTasks.value = [] })
+  } finally {
+    syncTasksLoading.value = false
+  }
   taskDrawer.currentTask = task
   taskDrawer.presetTaskname = ''
   taskDrawer.presetTmdb = null
@@ -300,6 +331,126 @@ async function handleTaskSave(payload: any) {
     tasksCache.value = await fetchTasks()
   } finally {
     taskDrawer.submitting = false
+  }
+}
+
+function stopRunLogStream() {
+  if (!runLogController) return
+  runLogController.abort()
+  runLogController = null
+}
+
+async function handleRunOnce(payload: any) {
+  runLogDialog.visible = true
+  runLogDialog.title = `运行一次：${String(payload?.taskname || '').trim() || '未命名任务'}`
+  runLogDialog.content = ''
+  runLogDialog.status = ''
+  runLogDialog.stage = ''
+  runLogDialog.message = ''
+  runLogDialog.taskId = 0
+  runLogController = new AbortController()
+
+  function parseSseBlock(block: string) {
+    const lines = block.split('\n')
+    let eventType = ''
+    const dataLines: string[] = []
+    for (const line of lines) {
+      if (line.startsWith('event:')) eventType = line.slice(6).trim()
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+    }
+    return { eventType, dataStr: dataLines.join('\n') }
+  }
+
+  try {
+    const headers: Record<string, string> = {}
+    if (auth.accessToken) headers.Authorization = `Bearer ${auth.accessToken}`
+    headers['Content-Type'] = 'application/json'
+    const response = await fetch('/api/tasks/run/stream', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: runLogController.signal,
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      runLogDialog.status = 'failed'
+      runLogDialog.message = text || `HTTP ${response.status}`
+      ElMessage.error(runLogDialog.message || '任务执行失败')
+      return
+    }
+    const reader = response.body?.getReader()
+    if (!reader) {
+      runLogDialog.status = 'failed'
+      runLogDialog.message = '响应不支持流式读取'
+      ElMessage.error(runLogDialog.message)
+      return
+    }
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || ''
+      for (const part of parts) {
+        if (!part.trim()) continue
+        const parsed = parseSseBlock(part)
+        if (!parsed.eventType) continue
+        let data: any = null
+        try {
+          data = parsed.dataStr ? JSON.parse(parsed.dataStr) : null
+        } catch {
+          data = null
+        }
+        if (parsed.eventType === 'init') {
+          runLogDialog.status = 'running'
+          continue
+        }
+        if (parsed.eventType === 'stage') {
+          runLogDialog.stage = String(data?.stage || '')
+          continue
+        }
+        if (parsed.eventType === 'log') {
+          const line = String(data?.line ?? '')
+          runLogDialog.content = runLogDialog.content
+            ? runLogDialog.content + '\n' + line
+            : line
+          continue
+        }
+        if (parsed.eventType === 'done') {
+          runLogDialog.status = String(data?.status || '')
+          runLogDialog.message = String(data?.message || '')
+          if (!runLogDialog.stage) {
+            const s = String(data?.execution?.stage || '')
+            if (s) runLogDialog.stage = s
+          }
+          if (!String(runLogDialog.content || '').trim()) {
+            const full = String(data?.execution?.run_log || '')
+            if (full) runLogDialog.content = full
+          }
+          const stageTip =
+            runLogDialog.stage && !String(runLogDialog.message || '').includes('阶段=')
+              ? `（阶段：${runLogDialog.stage}）`
+              : ''
+          if (runLogDialog.status === 'success') {
+            ElMessage.success('任务已执行')
+          } else if (runLogDialog.status === 'skipped') {
+            ElMessage.info(`${runLogDialog.message || '任务已跳过'}${stageTip}`)
+          } else {
+            ElMessage.error(`${runLogDialog.message || '任务执行失败'}${stageTip}`)
+          }
+          return
+        }
+      }
+    }
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      return
+    }
+    runLogDialog.status = 'failed'
+    runLogDialog.message = String(e?.message || e || '未知错误')
+    ElMessage.error(runLogDialog.message || '任务执行失败')
   }
 }
 
@@ -781,12 +932,30 @@ onMounted(async () => {
       :task="taskDrawer.currentTask"
       :accounts="accounts"
       :plugins="plugins"
+      :sync-tasks="syncTasks"
       :submitting="taskDrawer.submitting"
       :preset-taskname="taskDrawer.presetTaskname"
       :preset-tmdb="taskDrawer.presetTmdb"
       :auto-deep-suggest="!taskDrawer.currentTask"
       @save="handleTaskSave"
+      @run-once="handleRunOnce"
     />
+
+    <el-dialog
+      v-model="runLogDialog.visible"
+      :title="runLogDialog.title"
+      :width="isMobile ? '92vw' : '720px'"
+      :close-on-click-modal="runLogDialog.status !== 'running'"
+      :close-on-press-escape="runLogDialog.status !== 'running'"
+      :show-close="runLogDialog.status !== 'running'"
+    >
+      <div v-if="runLogDialog.status === 'running'" style="color: var(--el-color-primary); margin-bottom: 8px">执行中...</div>
+      <div v-if="runLogDialog.stage" style="color: var(--el-color-info); margin-bottom: 8px">阶段：{{ runLogDialog.stage }}</div>
+      <pre v-if="runLogDialog.content" style="white-space: pre-wrap; font-size: 12px; line-height: 1.5; background: var(--el-fill-color-blank); border: 1px solid var(--el-border-color-lighter); border-radius: 4px; padding: 12px; max-height: 480px; overflow: auto; color: var(--el-text-color-primary)">{{ runLogDialog.content }}</pre>
+      <template #footer>
+        <el-button @click="runLogDialog.visible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

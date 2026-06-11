@@ -1188,6 +1188,7 @@ function runOnce() {
     taskname: state.taskname.trim(),
     shareurl,
     savepath: state.savepath.trim(),
+    sync_task_uids: [...(state.sync_task_uids || [])],
     pattern: state.pattern ? String(state.pattern).trim() : null,
     replace: state.replace ? String(state.replace).trim() : null,
     enddate: state.enddate ? String(state.enddate).trim() : null,

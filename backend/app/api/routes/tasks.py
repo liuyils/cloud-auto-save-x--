@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import queue
 import threading
@@ -59,7 +60,7 @@ from app.schemas.task_repair import RepairBannedTasksOut
 from app.services import audit
 from app.services.notifications.sender import send_runtime
 from app.services.notifications.task_notify import DRAMA_NOTIFY_TITLE, build_task_section
-from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution, trigger_linked_sync_tasks_async
+from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution, trigger_linked_sync_tasks_async, trigger_sync_tasks_by_sync_uids
 from app.services.share_preview_batch import cache_clear as _preview_batch_cache_clear
 from app.services.share_preview_batch import preview_share_batch
 from app.services.drama_update_progress import build_drama_update_progress
@@ -70,6 +71,9 @@ from app.services.tasks import create_task, delete_task, get_task, list_tasks_re
 from app.services.tmdb_settings import get_or_create_tmdb_setting, get_tmdb_runtime_config
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
 def _share_preview_batch_cache_clear() -> None:
     _preview_batch_cache_clear()
 
@@ -273,10 +277,12 @@ def _task_out(
             and isinstance(tmdb_payload_map, dict)
             and isinstance(snapshot_map, dict)
         ):
-            drama_update_progress = build_drama_update_progress(
-                tmdb_details=tmdb_payload_map.get(key),
-                snapshot=snapshot_map.get(str(getattr(item, "task_uid", "") or "").strip()),
-            )
+            snapshot = snapshot_map.get(str(getattr(item, "task_uid", "") or "").strip())
+            if snapshot:
+                drama_update_progress = build_drama_update_progress(
+                    tmdb_details=tmdb_payload_map.get(key),
+                    snapshot=snapshot,
+                )
 
     return TaskOut(
         id=item.id,
@@ -755,8 +761,23 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
                             send_runtime(wdb, DRAMA_NOTIFY_TITLE, section)
                     except Exception:
                         pass
+                    tree_sum = str(getattr(execution, "tree_summary", "") or "")
+                    logger.info(
+                        "追剧任务流式执行完成，准备同步判定: execution.status=%s tree_summary=%s",
+                        str(getattr(execution, "status", "") or ""),
+                        tree_sum[:100],
+                    )
                     if should_trigger_linked_sync_for_drama_execution(execution):
-                        trigger_linked_sync_tasks_async([str(getattr(wtask, "task_uid", "") or "")], source="api.tasks.run.stream")
+                        uid = str(getattr(wtask, "task_uid", "") or "").strip()
+                        logger.info("追剧同步判定为 True，准备触发同步任务 uid=%s", uid)
+                        trigger_linked_sync_tasks_async([uid], source="api.tasks.run.stream")
+                    else:
+                        logger.warning(
+                            "追剧同步判定为 False，不触发同步任务 execution.status=%s tree_summary=%s run_log 前100=%s",
+                            str(getattr(execution, "status", "") or ""),
+                            tree_sum[:100],
+                            str(getattr(execution, "run_log", "") or "")[:100],
+                        )
                 q.put(
                     (
                         "done",
@@ -894,6 +915,20 @@ def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, cur
                 )
                 wtask.id = 0
                 execution = TaskExecutor(wdb).run_task(wtask, log=log, persist_execution=False)
+                if str(getattr(wtask, "task_type", "") or "") == "drama":
+                    task_uid_for_sync = str(getattr(wtask, "task_uid", "") or "").strip()
+                    if should_trigger_linked_sync_for_drama_execution(execution):
+                        # 优先用 payload.sync_task_uids（前端透传，未保存时 DB 无关联记录）
+                        payload_sync_uids = getattr(payload, "sync_task_uids", None) or []
+                        if payload_sync_uids:
+                            trigger_sync_tasks_by_sync_uids(list(payload_sync_uids), source="api.tasks.run.stream.preview")
+                        # 已保存任务走关联链路：根据 shareurl 查找真实 uid
+                        elif task_uid_for_sync.startswith("preview-"):
+                            existing = wdb.execute(select(Task.task_uid).where(Task.shareurl == str(payload.shareurl or "").strip())).scalars().first()
+                            if existing:
+                                trigger_linked_sync_tasks_async([str(existing)], source="api.tasks.run.stream.preview")
+                        elif task_uid_for_sync:
+                            trigger_linked_sync_tasks_async([task_uid_for_sync], source="api.tasks.run.stream.preview")
                 q.put(
                     (
                         "done",

@@ -38,6 +38,7 @@ const schedulerSaving = ref(false)
 const repairSaving = ref(false)
 const stopCompletedSaving = ref(false)
 const syncSnapshotsSaving = ref(false)
+const syncTasksLoading = ref(false)
 
 const drawerVisible = ref(false)
 const currentTask = ref<TaskItem | null>(null)
@@ -257,12 +258,24 @@ async function refreshSyncTasksIfNeeded() {
   }
 }
 
-function openCreateDrawer() {
+async function openCreateDrawer() {
+  syncTasksLoading.value = true
+  try {
+    await refreshSyncTasksIfNeeded()
+  } finally {
+    syncTasksLoading.value = false
+  }
   currentTask.value = null
   drawerVisible.value = true
 }
 
-function openEditDrawer(row: TaskItem) {
+async function openEditDrawer(row: TaskItem) {
+  syncTasksLoading.value = true
+  try {
+    await refreshSyncTasksIfNeeded()
+  } finally {
+    syncTasksLoading.value = false
+  }
   currentTask.value = row
   drawerVisible.value = true
 }
@@ -943,7 +956,7 @@ onBeforeUnmount(() => {
         <el-button v-if="canRun" :loading="runAllDialog.running" :disabled="runAllDialog.running" @click="confirmRunAll">执行全部</el-button>
         <el-button v-if="canWrite" :loading="stopCompletedSaving" @click="confirmStopCompleted">停止已完结任务</el-button>
         <el-button v-if="canWrite" :loading="repairSaving" @click="confirmRepairBanned">修复失效任务</el-button>
-        <el-button v-if="canWrite" type="success" @click="openCreateDrawer">新增任务</el-button>
+        <el-button v-if="canWrite" type="success" :loading="syncTasksLoading" @click="openCreateDrawer">新增任务</el-button>
       </div>
     </div>
 
@@ -1056,7 +1069,7 @@ onBeforeUnmount(() => {
               >
                 执行
               </el-button>
-              <el-button v-if="canWrite" text bg  @click="openEditDrawer(row)">编辑</el-button>
+              <el-button v-if="canWrite" text bg :loading="syncTasksLoading" @click="openEditDrawer(row)">编辑</el-button>
               <el-button v-if="canWrite" text bg type="danger"  @click="openDeleteDialog(row)">删除</el-button>
             </div>
             <div v-else class="task-actions">
@@ -1142,7 +1155,7 @@ onBeforeUnmount(() => {
               >
                 执行
               </el-button>
-              <el-button v-if="canWrite" text bg  @click="openEditDrawer(row)">编辑</el-button>
+              <el-button v-if="canWrite" text bg :loading="syncTasksLoading" @click="openEditDrawer(row)">编辑</el-button>
               <el-button v-if="canWrite" text bg type="danger" @click="openDeleteDialog(row)">删除</el-button>
             </div>
           </div>
