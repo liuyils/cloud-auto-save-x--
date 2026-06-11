@@ -948,6 +948,7 @@ onMounted(async () => {
       :close-on-click-modal="runLogDialog.status !== 'running'"
       :close-on-press-escape="runLogDialog.status !== 'running'"
       :show-close="runLogDialog.status !== 'running'"
+      @closed="stopRunLogStream"
     >
       <div v-if="runLogDialog.status === 'running'" style="color: var(--el-color-primary); margin-bottom: 8px">执行中...</div>
       <div v-if="runLogDialog.stage" style="color: var(--el-color-info); margin-bottom: 8px">阶段：{{ runLogDialog.stage }}</div>
