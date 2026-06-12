@@ -279,6 +279,7 @@ class TaskExecutor:
             return execution
 
         try:
+            autoupdate_db_changed = False
             if getattr(task, "shareurl_ban", None):
                 log.set_stage("shareurl_ban")
                 log.section("任务封禁")
@@ -398,6 +399,7 @@ class TaskExecutor:
                 log.section("自动换链")
                 try:
                     update_result = resolve_drama_shareurl_update(self.db, task, respect_toggle=True)
+                    autoupdate_db_changed = bool(update_result.get("db_changed"))
                     if bool(update_result.get("updated")):
                         season = update_result.get("season")
                         episode = update_result.get("episode")
@@ -430,6 +432,12 @@ class TaskExecutor:
                 try:
                     from app.services.task_savepath_snapshot import capture_and_upsert_snapshot
 
+                    if autoupdate_db_changed:
+                        self.db.commit()
+                        try:
+                            self.db.refresh(task)
+                        except Exception:
+                            pass
                     account_name = str(getattr(adapter, "account_name", "") or getattr(task, "account_name", "") or "").strip()
                     snapshot_row = capture_and_upsert_snapshot(
                         self.db,
