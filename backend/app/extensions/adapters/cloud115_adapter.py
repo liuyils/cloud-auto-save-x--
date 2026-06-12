@@ -63,8 +63,8 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
     ):
         super().__init__(cookie, index, config=config, no_login=no_login)
         # 115 对请求频率更敏感，单独放慢节流区间以降低风控概率。
-        self._rate_limit_min_interval = 0.5
-        self._rate_limit_max_interval = 0.8
+        self._rate_limit_min_interval = 0.25
+        self._rate_limit_max_interval = 0.6
 
         # ---- 带用户 cookie 的 session（用于操作自己的网盘）----
         self.auth_session = requests.Session()
