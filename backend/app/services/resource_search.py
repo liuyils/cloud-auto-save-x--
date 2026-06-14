@@ -76,6 +76,8 @@ def _pansou_cloud_type(value: str | None) -> str | None:
         "uc": "uc",
         "aliyun": "aliyun",
         "xunlei": "xunlei",
+        "cloud139" : "mobile",
+        "guangya": "guangya"
     }
     return mapping.get(dt)
 

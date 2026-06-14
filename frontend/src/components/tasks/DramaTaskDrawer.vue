@@ -754,6 +754,8 @@ async function browseDriveDir(dir_path: string) {
 }
 
 function extractShareFid(url: string) {
+  const mq = url.match(/(?:\?|&)fid=([^&#]+)/)
+  if (mq?.[1] && !['0', 'root'].includes(String(mq[1]).trim())) return String(mq[1]).trim()
   const m1 = url.match(/#\/list\/share\/([a-zA-Z0-9]{6,64})/)
   if (m1?.[1]) return m1[1]
   const m2 = url.match(/\/([a-fA-F0-9]{32})-?[^/]*$/)
@@ -761,20 +763,42 @@ function extractShareFid(url: string) {
   return null
 }
 
+function isCloud139HashShareurl(shareurl: string) {
+  return /^https?:\/\/(?:yun|caiyun)\.139\.com/i.test(String(shareurl || '').trim())
+}
+
 function getShareurl(shareurl: string, dir?: { fid?: string; name?: string }) {
+  const raw = String(shareurl || '').trim()
   const fid = String(dir?.fid || '').trim()
-  if (!fid || fid === '0') {
-    const match = shareurl.match(/.*s\/[a-zA-Z0-9\-_]+(\?[^#]*)?/)
-    return (match ? match[0] : shareurl.split('#')[0]).trim()
+  if (isCloud139HashShareurl(raw)) {
+    const [head, fragment = ''] = raw.split('#', 2)
+    if (fragment) {
+      const [fragPath, fragQuery = ''] = fragment.split('?', 2)
+      const parts = fragQuery
+        .split('&')
+        .map((x) => String(x || '').trim())
+        .filter((x) => x && !x.startsWith('fid='))
+      if (fid && !['0', 'root'].includes(fid)) parts.push(`fid=${encodeURIComponent(fid)}`)
+      return `${head}#${parts.length ? `${fragPath}?${parts.join('&')}` : fragPath}`
+    }
+    let nextHead = head.replace(/([?&])fid=[^&#]*/g, '$1').replace(/[?&]+$/, '').replace('?&', '?')
+    if (fid && !['0', 'root'].includes(fid)) {
+      nextHead = `${nextHead}${nextHead.includes('?') ? '&' : '?'}fid=${encodeURIComponent(fid)}`
+    }
+    return nextHead
   }
-  if (shareurl.includes(fid)) {
-    const m = shareurl.match(new RegExp(`.*/${fid}[^/]*`))
+  if (!fid || fid === '0') {
+    const match = raw.match(/.*s\/[a-zA-Z0-9\-_]+(\?[^#]*)?/)
+    return (match ? match[0] : raw.split('#')[0]).trim()
+  }
+  if (raw.includes(fid)) {
+    const m = raw.match(new RegExp(`.*/${fid}[^/]*`))
     if (m?.[0]) return m[0]
   }
-  if (shareurl.includes('#/list/share')) {
-    return `${shareurl.split('#')[0]}#/list/share/${fid}`
+  if (raw.includes('#/list/share')) {
+    return `${raw.split('#')[0]}#/list/share/${fid}`
   }
-  return `${shareurl.split('#')[0]}#/list/share/${fid}`
+  return `${raw.split('#')[0]}#/list/share/${fid}`
 }
 
 function sortByUpdatedAtDesc(items: SharePreviewItem[]) {

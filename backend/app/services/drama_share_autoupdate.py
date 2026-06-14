@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -160,6 +161,19 @@ def _load_tmdb_context(db: Session, task: Any) -> _TMDBContext | None:
 def _rewrite_shareurl_with_fid(shareurl: str, fid: str | None) -> str:
     url = str(shareurl or "").strip()
     f = str(fid or "").strip()
+    if "yun.139.com" in url or "caiyun.139.com" in url:
+        parsed = urlsplit(url)
+        if parsed.fragment:
+            frag_path, frag_query = (parsed.fragment.split("?", 1) + [""])[:2]
+            frag_pairs = [(k, v) for k, v in parse_qsl(frag_query, keep_blank_values=True) if str(k).lower() != "fid"]
+            if f and f not in ("0", "root"):
+                frag_pairs.append(("fid", f))
+            rebuilt_fragment = frag_path if not frag_pairs else f"{frag_path}?{urlencode(frag_pairs)}"
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, rebuilt_fragment)).strip()
+        query_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if str(k).lower() != "fid"]
+        if f and f not in ("0", "root"):
+            query_pairs.append(("fid", f))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query_pairs), parsed.fragment)).strip()
     if not f or f == "0":
         return url.split("#")[0].strip()
     if f in url:

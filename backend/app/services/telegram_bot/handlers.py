@@ -437,6 +437,21 @@ def _task_shareurl(shareurl: str, fid: str | None = None) -> str:
     target_fid = str(fid or "").strip()
     if not raw:
         return raw
+    if "yun.139.com" in raw or "caiyun.139.com" in raw:
+        head, sep, frag = raw.partition("#")
+        if sep:
+            frag_path, frag_query = (frag.split("?", 1) + [""])[:2]
+            pairs = [p for p in frag_query.split("&") if p and not p.startswith("fid=")]
+            if target_fid and target_fid not in ("0", "root"):
+                pairs.append(f"fid={target_fid}")
+            next_frag = frag_path if not pairs else f"{frag_path}?{'&'.join(pairs)}"
+            return f"{head}#{next_frag}".strip()
+        head = re.sub(r"([?&])fid=[^&#]*", r"\1", head)
+        head = re.sub(r"[?&]+$", "", head)
+        head = re.sub(r"\?&", "?", head)
+        if target_fid and target_fid not in ("0", "root"):
+            head = f"{head}{'&' if '?' in head else '?'}fid={target_fid}"
+        return head.strip()
     if not target_fid or target_fid == "0":
         match = re.search(r".*s/[a-zA-Z0-9\-_]+(\?[^#]*)?", raw)
         return str(match.group(0) if match else raw.split("#")[0]).strip()
@@ -451,6 +466,11 @@ def _extract_task_share_fid(shareurl: str) -> str | None:
     raw = str(shareurl or "").strip()
     if not raw:
         return None
+    match_query = re.search(r"(?:\?|&)fid=([^&#]+)", raw)
+    if match_query:
+        fid = str(match_query.group(1) or "").strip()
+        if fid and fid not in ("0", "root"):
+            return fid
     match_hash = re.search(r"#/list/share/([a-zA-Z0-9]{6,64})", raw)
     if match_hash:
         return str(match_hash.group(1) or "").strip() or None

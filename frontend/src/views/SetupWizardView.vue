@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import axios, { type AxiosError } from 'axios'
 import { ElMessage } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -99,6 +100,43 @@ const driveLoading = ref(false)
 const driveDrawerVisible = ref(false)
 const driveSubmitting = ref(false)
 
+type ApiErrorBody = {
+  code?: string
+  message?: string
+  detail?: string
+}
+
+type AuthChallenge = {
+  account_id: number
+  drive_type: string
+  method: string
+  session_id: string
+}
+
+function parseAuthChallenge(error: unknown): AuthChallenge | null {
+  if (!axios.isAxiosError(error)) return null
+  const err = error as AxiosError<ApiErrorBody>
+  if (err.response?.status !== 409) return null
+  if (err.response?.data?.code !== 'DRIVE_ACCOUNT_AUTH_REQUIRED' && err.response?.data?.code !== 'DRIVE_ACCOUNT_AUTH_PENDING') return null
+  const detail = err.response?.data?.detail
+  if (!detail || typeof detail !== 'string') return null
+  try {
+    const parsed = JSON.parse(detail)
+    if (!parsed?.session_id || !parsed?.method) return null
+    return parsed as AuthChallenge
+  } catch {
+    return null
+  }
+}
+
+async function gotoAuth(challenge: AuthChallenge) {
+  await router.push({
+    name: 'DriveAccountAuth',
+    params: { accountId: String(challenge.account_id) },
+    query: { session_id: challenge.session_id, method: challenge.method, drive_type: challenge.drive_type },
+  })
+}
+
 async function loadDriveData() {
   if (!auth.isAuthenticated) return
   driveLoading.value = true
@@ -128,7 +166,19 @@ async function handleCreateDrive(payload: {
       enabled: false,
       is_default: false,
     })
-    await probeDriveAccount(created.id)
+    try {
+      await probeDriveAccount(created.id)
+    } catch (error) {
+      const challenge = parseAuthChallenge(error)
+      if (challenge) {
+        driveDrawerVisible.value = false
+        await loadDriveData()
+        ElMessage.info('该账号需要二次认证，请继续完成验证')
+        await gotoAuth(challenge)
+        return
+      }
+      throw error
+    }
     if (wantDefault) {
       await setDriveAccountDefault(created.id)
     }

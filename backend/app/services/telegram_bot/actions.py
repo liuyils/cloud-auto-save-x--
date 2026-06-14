@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -276,6 +277,11 @@ def _extract_share_fid(shareurl: str) -> str | None:
     url = str(shareurl or "").strip()
     if not url:
         return None
+    match_query = re.search(r"(?:\?|&)fid=([^&#]+)", url)
+    if match_query:
+        fid = str(match_query.group(1) or "").strip()
+        if fid and fid not in ("0", "root"):
+            return fid
     match_hash = re.search(r"#/list/share/([a-zA-Z0-9]{6,64})", url)
     if match_hash:
         return str(match_hash.group(1) or "").strip() or None
@@ -290,6 +296,19 @@ def _rewrite_shareurl_with_fid(shareurl: str, fid: str | None) -> str:
     target_fid = str(fid or "").strip()
     if not raw:
         return raw
+    if "yun.139.com" in raw or "caiyun.139.com" in raw:
+        parsed = urlsplit(raw)
+        if parsed.fragment:
+            frag_path, frag_query = (parsed.fragment.split("?", 1) + [""])[:2]
+            frag_pairs = [(k, v) for k, v in parse_qsl(frag_query, keep_blank_values=True) if str(k).lower() != "fid"]
+            if target_fid and target_fid not in ("0", "root"):
+                frag_pairs.append(("fid", target_fid))
+            rebuilt_fragment = frag_path if not frag_pairs else f"{frag_path}?{urlencode(frag_pairs)}"
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, rebuilt_fragment)).strip()
+        query_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if str(k).lower() != "fid"]
+        if target_fid and target_fid not in ("0", "root"):
+            query_pairs.append(("fid", target_fid))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query_pairs), parsed.fragment)).strip()
     if not target_fid or target_fid == "0":
         match = re.search(r".*s/[a-zA-Z0-9\-_]+(\?[^#]*)?", raw)
         return str(match.group(0) if match else raw.split("#")[0]).strip()

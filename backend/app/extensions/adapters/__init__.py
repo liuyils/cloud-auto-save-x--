@@ -13,6 +13,7 @@ from app.extensions.adapters.aliyun_adapter import AliyunAdapter
 from app.extensions.adapters.uc_adapter import UCAdapter
 from app.extensions.adapters.pan123_adapter import Pan123Adapter
 from app.extensions.adapters.cloud189_adapter import Cloud189Adapter
+from app.extensions.adapters.cloud139_adapter import Cloud139Adapter
 from app.extensions.adapters.adapter_factory import AdapterFactory, AccountManager
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "UCAdapter",
     "Pan123Adapter",
     "Cloud189Adapter",
+    "Cloud139Adapter",
     "AdapterFactory",
     "AccountManager",
 ]

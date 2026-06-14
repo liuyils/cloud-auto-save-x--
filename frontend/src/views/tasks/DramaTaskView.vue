@@ -22,6 +22,7 @@ import type { DriveAccountItem, PluginItem } from '@/types/extensions'
 import type { SyncTaskItem } from '@/types/syncTasks'
 import type { TaskItem, TaskSchedulerSetting } from '@/types/tasks'
 import { validateCrontab5, validateTimezone } from '@/utils/cron'
+import { detectDriveTypeByUrl } from '@/utils/driveType'
 
 const auth = useAuthStore()
 const canWrite = computed(() => auth.permissions.includes(TASK_WRITE))
@@ -124,19 +125,6 @@ const filters = reactive({
 
 const accountByName = computed(() => new Map(accounts.value.map((item) => [item.name, item])))
 
-function detectDriveTypeFromUrl(url: string) {
-  if (!url) return null
-  if (/pan\.quark\.cn/.test(url)) return 'quark'
-  if (/(?:115|anxia|115cdn)\.com/.test(url)) return '115'
-  if (/pan\.baidu\.com/.test(url)) return 'baidu'
-  if (/pan\.xunlei\.com/.test(url)) return 'xunlei'
-  if (/(?:alipan|aliyundrive)\.com/.test(url)) return 'aliyun'
-  if (/drive\.uc\.cn/.test(url)) return 'uc'
-  if (/(?:123pan|123865|123684|123952|123912)\.com/.test(url)) return '123pan'
-  if (/(?:cloud|m\.cloud)\.189\.cn/.test(url)) return 'cloud189'
-  return null
-}
-
 function pickDefaultAccountByType(driveType: string) {
   return (
     accounts.value.find((acc) => acc.enabled && acc.drive_type === driveType && acc.is_default) ||
@@ -149,10 +137,10 @@ function formatAccountLabel(task: TaskItem) {
   const name = String(task.account_name || '').trim()
   if (name) {
     const acc = accountByName.value.get(name)
-    const driveType = acc?.drive_type || detectDriveTypeFromUrl(task.shareurl)
+    const driveType = acc?.drive_type || detectDriveTypeByUrl(task.shareurl)
     return driveType ? `${name}（${driveType}）` : name
   }
-  const driveType = detectDriveTypeFromUrl(task.shareurl)
+  const driveType = detectDriveTypeByUrl(task.shareurl)
   const auto = driveType ? pickDefaultAccountByType(driveType) : null
   if (auto && driveType) return `自动：${auto.name}（${driveType}）`
   if (driveType) return `自动（${driveType}）`

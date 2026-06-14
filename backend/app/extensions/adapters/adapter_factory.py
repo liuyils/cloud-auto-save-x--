@@ -18,6 +18,8 @@ from app.extensions.adapters.aliyun_adapter import AliyunAdapter
 from app.extensions.adapters.uc_adapter import UCAdapter
 from app.extensions.adapters.pan123_adapter import Pan123Adapter
 from app.extensions.adapters.cloud189_adapter import Cloud189Adapter
+from app.extensions.adapters.cloud139_adapter import Cloud139Adapter
+from app.extensions.adapters.guangya_adapter import GuangyaAdapter
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,8 @@ class AdapterFactory:
         "uc": UCAdapter,
         "123pan": Pan123Adapter,
         "cloud189": Cloud189Adapter,
+        "cloud139": Cloud139Adapter,
+        "guangya": GuangyaAdapter,
     }
 
     # URL 模式映射
@@ -48,6 +52,8 @@ class AdapterFactory:
         r"drive\.uc\.cn": "uc",
         r"(?:123pan|123865|123684|123952|123912)\.com": "123pan",
         r"(?:cloud|m\.cloud)\.189\.cn": "cloud189",
+        r"(?:yun|caiyun)\.139\.com": "cloud139",
+        r"(?:www\.|app\.)?guangyapan\.com": "guangya",
     }
 
     # 实例缓存: (drive_type, config_hash) -> adapter_instance

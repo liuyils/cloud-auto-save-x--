@@ -35,6 +35,8 @@ const route = useRoute()
 const router = useRouter()
 
 const accountId = computed(() => Number(route.params.accountId || 0))
+const driveType = computed(() => String(route.query.drive_type || payload.value.drive_type || '').trim().toLowerCase())
+const canStartQrcode = computed(() => driveType.value === 'aliyun')
 
 const loading = ref(false)
 const account = ref<DriveAccountItem | null>(null)
@@ -87,7 +89,7 @@ async function startFlow() {
       if (!challenge) throw e
       method.value = challenge.method
       sessionId.value = challenge.session_id
-      payload.value = challenge.payload || {}
+      payload.value = { ...(challenge.payload || {}), drive_type: challenge.drive_type }
       if (method.value === 'qrcode') startAutoPoll()
     }
   } finally {
@@ -102,7 +104,7 @@ async function startQrcodeFlow() {
     const resp = await startDriveAccountQrcodeAuth(accountId.value)
     method.value = 'qrcode'
     sessionId.value = String(resp.session_id || '')
-    payload.value = resp.payload || {}
+    payload.value = { ...(resp.payload || {}), drive_type: 'aliyun' }
     startAutoPoll()
   } finally {
     loading.value = false
@@ -122,7 +124,7 @@ async function submitCaptcha() {
     if (challenge) {
       method.value = challenge.method
       sessionId.value = challenge.session_id
-      payload.value = challenge.payload || {}
+      payload.value = { ...(challenge.payload || {}), drive_type: challenge.drive_type }
       captchaCode.value = ''
       if (method.value === 'qrcode') startAutoPoll()
       return
@@ -152,6 +154,17 @@ async function submitSms() {
     account.value = res
     ElMessage.success('短信已验证，账号已登录')
     await router.replace('/extensions/drives')
+  } catch (e) {
+    const challenge = parseChallengeFromError(e)
+    if (challenge) {
+      method.value = challenge.method
+      sessionId.value = challenge.session_id
+      payload.value = { ...(challenge.payload || {}), drive_type: challenge.drive_type }
+      smsCode.value = ''
+      if (method.value === 'qrcode') startAutoPoll()
+      return
+    }
+    throw e
   } finally {
     smsSubmitting.value = false
   }
@@ -169,7 +182,7 @@ async function pollQrcodeOnce() {
   } catch (e) {
     const challenge = parseChallengeFromError(e)
     if (challenge) {
-      payload.value = challenge.payload || payload.value
+      payload.value = { ...payload.value, ...(challenge.payload || {}), drive_type: challenge.drive_type }
       const status = String(payload.value.status || '')
       if (status === 'EXPIRED' || status === 'CANCELED') stopPoll()
       return
@@ -196,7 +209,7 @@ onMounted(() => {
     loading.value = true
     fetchDriveAccountAuthSession(qSession)
       .then((data) => {
-        payload.value = data?.payload || {}
+        payload.value = { ...(data?.payload || {}), drive_type: data?.drive_type || route.query.drive_type || '' }
         if (method.value === 'qrcode') startAutoPoll()
       })
       .finally(() => {
@@ -219,7 +232,7 @@ onBeforeUnmount(stopPoll)
       <div class="toolbar__right">
         <el-button @click="router.replace('/extensions/drives')">返回列表</el-button>
         <el-button type="primary" @click="startFlow">重新检测</el-button>
-        <el-button v-if="method !== 'qrcode'" @click="startQrcodeFlow">扫码登录</el-button>
+        <el-button v-if="method !== 'qrcode' && canStartQrcode" @click="startQrcodeFlow">扫码登录</el-button>
       </div>
     </div>
 

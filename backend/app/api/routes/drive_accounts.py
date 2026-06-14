@@ -328,8 +328,34 @@ def post_account_auth_sms_submit(request: Request, session_id: str, payload: Dri
     adapter = session.adapter
     adapter.submit_sms(payload.code)
     delete_auth_session(session_id)
-    update_drive_account(db, session.account_id, config=adapter.export_runtime_config())
-    account = probe_drive_account(db, session.account_id)
+    config_snapshot = adapter.export_runtime_config()
+    update_drive_account(db, session.account_id, config=config_snapshot)
+    try:
+        account = probe_drive_account(db, session.account_id)
+    except ApiError as exc:
+        # 光鸭当前账号信息接口不稳定，短信登录成功后可能在二次 probe 时误判为仍需短信认证。
+        if exc.code != "DRIVE_ACCOUNT_AUTH_REQUIRED" or str(session.drive_type or "") != "guangya":
+            raise
+        account = db.get(DriveAccount, session.account_id)
+        if account is None:
+            raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
+        nickname = str(getattr(adapter, "nickname", "") or config_snapshot.get("phone_number") or account.name or "").strip()
+        username = str(config_snapshot.get("phone_number") or nickname).strip()
+        account.runtime_status = "active"
+        account.last_error = None
+        account.probe_fail_count = 0
+        account.profile_json = json.dumps(
+            {
+                "drive_type": str(session.drive_type or ""),
+                "drive_name": str(getattr(adapter, "DRIVE_NAME", session.drive_type) or session.drive_type or ""),
+                "nickname": nickname,
+                "username": username,
+                "used_space": None,
+                "total_space": None,
+                "raw": {"auth_completed": True, "probe_fallback": True},
+            },
+            ensure_ascii=False,
+        )
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_sms_submit', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
