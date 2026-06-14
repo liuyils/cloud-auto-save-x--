@@ -179,6 +179,20 @@ services:
 
 本项目参考 [Cp0204/quark-auto-save](https://github.com/Cp0204/quark-auto-save/releases/tag/v0.8.4) 思路进行整体重构，感谢 [Cp0204](https://github.com/Cp0204) 的开源贡献。
 
+## ❤️ 支持项目
+
+如果觉得这个项目对你有帮助，你可以通过以下方式支持我：
+
+1. ⭐ 给项目点个 Star，让更多的人看到
+2. 📢 分享给更多有需要的朋友
+3. ☕ 请作者喝杯冰阔乐~
+
+<div align="center">
+<img src="img/wechat.jpg" alt="微信" height="300">
+    <img src="img/ali.jpg" alt="支付宝" height="300" style="margin-right: 20px">
+</div>
+
+
 ## Sponsor
 
 CDN acceleration and security protection for this project are sponsored by Tencent EdgeOne.

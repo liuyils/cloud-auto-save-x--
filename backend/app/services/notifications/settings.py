@@ -34,6 +34,11 @@ def load_notification_config(item: NotificationSetting) -> dict[str, Any]:
     return payload
 
 
+def get_runtime_notification_config(db: Session) -> dict[str, Any]:
+    item = get_or_create_notification_setting(db)
+    return load_notification_config(item)
+
+
 def update_notification_setting(
     db: Session,
     *,

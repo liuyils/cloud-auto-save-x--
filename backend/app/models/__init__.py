@@ -29,6 +29,8 @@ from app.models.sync_task_lock import SyncTaskLock
 from app.models.sync_execution import SyncExecution
 from app.models.sync_execution_file import SyncExecutionFile
 from app.models.sync_file_snapshot import SyncFileSnapshot
+from app.models.telegram_bot_session import TelegramBotSession
+from app.models.telegram_bot_state import TelegramBotState
 
 __all__ = [
     "AuditLog",
@@ -63,4 +65,6 @@ __all__ = [
     "SyncFileSnapshot",
     "SyncPluginConfig",
     "SyncPluginDefinition",
+    "TelegramBotSession",
+    "TelegramBotState",
 ]
