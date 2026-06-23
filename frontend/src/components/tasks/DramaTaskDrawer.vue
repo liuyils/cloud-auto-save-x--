@@ -809,6 +809,112 @@ function sortByUpdatedAtDesc(items: SharePreviewItem[]) {
   })
 }
 
+function normalizeAutoPickName(input: any) {
+  let s = String(input || '').trim()
+  if (!s) return ''
+  try {
+    s = s.normalize('NFKC')
+  } catch {
+    return s.toLowerCase()
+  }
+  s = s
+    .replace(/[\[\(（【].*?[\]\)）】]/g, ' ')
+    .replace(/[._\-+|/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+  s = s
+    .replace(
+      /\b(2160p|1080p|720p|4k|8k|x264|x265|h\.?264|h\.?265|hevc|avc|10bit|8bit|hdr|dv|dolby|aac|flac|dts|truehd|bluray|bdrip|web[- ]?dl|webrip|remux|bdmv|mp4|mkv)\b/g,
+      ' ',
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+  return s
+}
+
+function tokenizeAutoPickName(input: any) {
+  const s = normalizeAutoPickName(input)
+  if (!s) return []
+  return s
+    .split(' ')
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 2)
+}
+
+function parseSeasonFromName(input: any) {
+  const s = String(input || '').trim()
+  if (!s) return null
+  const m1 = s.match(/\bS(?:eason)?\s*0?(\d{1,2})\b/i)
+  if (m1?.[1]) return Number(m1[1]) || null
+  const m2 = s.match(/第\s*0?(\d{1,3})\s*季/i)
+  if (m2?.[1]) return Number(m2[1]) || null
+  const m3 = s.match(/\b0?(\d{1,2})(st|nd|rd|th)\s*Season\b/i)
+  if (m3?.[1]) return Number(m3[1]) || null
+  const m4 = s.match(/\b0?(\d{1,2})\s*期\b/i)
+  if (m4?.[1]) return Number(m4[1]) || null
+  return null
+}
+
+function autoPickNameSimilarity(candidate: any, targetTokens: string[]) {
+  if (!targetTokens.length) return 0
+  const tokens = tokenizeAutoPickName(candidate)
+  if (!tokens.length) return 0
+  const set = new Set(tokens)
+  let hit = 0
+  for (const t of targetTokens) if (set.has(t)) hit += 1
+  return hit / targetTokens.length
+}
+
+function autoPickDirNameScore(payload: { dirName: any; targetTokens: string[]; targetSeason: number | null; targetKind: 'tv' | 'movie' }) {
+  const nameRaw = String(payload.dirName || '').trim()
+  const n = normalizeAutoPickName(nameRaw)
+  const similarity = autoPickNameSimilarity(n, payload.targetTokens)
+  const extras = /(剧场版|电影|movie|ova|oad|sp|特典|花絮|ncop|nced|pv|cm|extras|bonus|特别篇|映像特典)/i.test(nameRaw)
+  const collection = /(全集|合集|complete|all\s*seasons)/i.test(nameRaw)
+  const seasonNo = parseSeasonFromName(nameRaw)
+  const hasSeason = seasonNo !== null
+
+  let score = similarity * 100
+
+  if (payload.targetKind === 'tv') {
+    if (extras) score -= 55
+    if (collection) score += 18
+    if (payload.targetSeason !== null) {
+      if (seasonNo === payload.targetSeason) score += 55
+      else if (hasSeason) score -= 12
+    } else {
+      if (hasSeason) score += 12
+    }
+  } else {
+    if (extras) score += 18
+    if (collection) score -= 8
+    if (payload.targetSeason !== null && seasonNo === payload.targetSeason) score -= 12
+  }
+
+  return score
+}
+
+function autoPickProbeScore(payload: { latestVideo?: any | null; targetSeason: number | null; targetKind: 'tv' | 'movie' }) {
+  const lv = payload.latestVideo || null
+  if (!lv) return 0
+  const season = Number(lv.season)
+  const episode = Number(lv.episode)
+  const hasSeason = Number.isFinite(season) && season > 0
+  const hasEpisode = Number.isFinite(episode) && episode > 0
+
+  let score = 0
+  if (payload.targetKind === 'tv') {
+    if (hasEpisode) score += 65
+    if (hasSeason && payload.targetSeason !== null) score += season === payload.targetSeason ? 45 : -10
+    if (hasSeason && payload.targetSeason === null) score += 10
+  } else {
+    if (hasEpisode) score -= 35
+    if (hasSeason && payload.targetSeason !== null) score += season === payload.targetSeason ? 10 : 0
+  }
+  return score
+}
+
 function normalizeSavepath(value: string) {
   const s = String(value || '').trim()
   if (!s) return ''
@@ -1526,6 +1632,9 @@ async function autoResolveShareFolder(shareurl: string, runId: number) {
   let current = input
   let lastItems: SharePreviewItem[] = []
   let sawVideo = false
+  const targetKind = String(state.tmdb_media_type || '').toLowerCase() === 'movie' ? 'movie' : 'tv'
+  const targetSeason = parseSeasonFromName(state.taskname)
+  const targetTokens = tokenizeAutoPickName(state.taskname)
 
   const toTs = (v: any) => {
     const n = Number(v)
@@ -1562,7 +1671,54 @@ async function autoResolveShareFolder(shareurl: string, runId: number) {
     }
 
     if (dirs.length > 1 && files.length === 0) {
-      const picked = [...dirs].sort((a, b) => toTs(b.updated_at) - toTs(a.updated_at))[0]
+      const scored = dirs
+        .map((d) => ({
+          d,
+          name: d?.name || d?.file_name || '',
+          nameScore: autoPickDirNameScore({
+            dirName: d?.name || d?.file_name,
+            targetTokens,
+            targetSeason,
+            targetKind,
+          }),
+        }))
+        .sort((a, b) => b.nameScore - a.nameScore)
+
+      const top = scored.slice(0, 3)
+      const topUrls = top.map((x) => getShareurl(root, { fid: x.d.fid, name: x.name }))
+      const probe = new Map<string, any>()
+      if (topUrls.length) {
+        try {
+          const data = await previewShareBatch({ shareurls: topUrls, account_name })
+          if (!props.modelValue) return
+          if (runId !== shareAuto.runId) return
+          for (const it of data.items || []) {
+            const url = String((it as any)?.shareurl || '').trim()
+            if (!url) continue
+            probe.set(url, it as any)
+          }
+        } catch {
+          probe.clear()
+        }
+      }
+
+      const withTotal = scored.map((x) => {
+        const url = getShareurl(root, { fid: x.d.fid, name: x.name })
+        const row = probe.get(url)
+        const probeScore = autoPickProbeScore({ latestVideo: row?.latest_video, targetSeason, targetKind })
+        return { ...x, url, probeScore, total: x.nameScore + probeScore }
+      })
+
+      const threshold = 6
+      withTotal.sort((a, b) => {
+        if (a.total !== b.total) return b.total - a.total
+        return toTs(b.d.updated_at) - toTs(a.d.updated_at)
+      })
+      const best = withTotal[0]
+      const second = withTotal[1]
+      const useTime = best && second && Math.abs(best.total - second.total) < threshold
+      const picked = useTime ? [...dirs].sort((a, b) => toTs(b.updated_at) - toTs(a.updated_at))[0] : best?.d
+
       if (!picked) break
       current = getShareurl(root, { fid: picked.fid, name: picked.name })
       continue
