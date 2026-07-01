@@ -752,7 +752,22 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
             try:
                 wtask = get_task(wdb, task_id)
                 execution = TaskExecutor(wdb).run_task(wtask, log=log)
+                snapshot_row_id = int(getattr(execution, "_snapshot_row_id", 0) or 0) or None
                 wdb.commit()
+                if snapshot_row_id and int(getattr(execution, "id", 0) or 0) > 0:
+                    try:
+                        TaskExecutor(wdb)._attach_snapshot_execution(
+                            snapshot_id=snapshot_row_id,
+                            execution_id=int(getattr(execution, "id", 0) or 0),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "快照执行关联回填失败 task_id=%s execution_id=%s snapshot_id=%s err=%s",
+                            task_id,
+                            int(getattr(execution, "id", 0) or 0),
+                            snapshot_row_id,
+                            str(exc).strip() or type(exc).__name__,
+                        )
                 wdb.refresh(execution)
                 if str(getattr(wtask, "task_type", "") or "") == "drama":
                     try:

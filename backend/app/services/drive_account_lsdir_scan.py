@@ -40,6 +40,15 @@ class ScanStats:
     cached_items: int = 0
 
 
+@dataclass
+class ScanAccountContext:
+    account_id: int
+    account_name: str
+    drive_type: str
+    runtime_config: dict[str, Any]
+    runtime_cookie: str
+
+
 class DirectoryScanError(RuntimeError):
     def __init__(self, fid: str, message: str):
         super().__init__(message)
@@ -127,59 +136,48 @@ def _scan_drive_account_worker(account_id: int, source: str) -> None:
     failed_fid: str | None = None
     stats = ScanStats()
     try:
-        with SessionLocal() as db:
-            account = db.get(DriveAccount, int(account_id))
-            if account is None:
-                logger.warning("drive account lsdir scan aborted: account not found account_id=%s source=%s", account_id, source)
-                return
-            if str(getattr(account, "runtime_status", "") or "") != "active":
-                logger.info(
-                    "drive account lsdir scan skipped: inactive account_id=%s account_name=%s source=%s runtime_status=%s",
-                    account_id,
-                    account.name,
-                    source,
-                    getattr(account, "runtime_status", None),
-                )
-                return
-
-            runtime_config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
-            runtime_cookie = AdapterRegistry.serialize_config(account.drive_type, runtime_config)
-            adapter = AdapterFactory.create_adapter(
-                account.drive_type,
-                runtime_cookie,
-                config=runtime_config,
-                account_name=account.name,
+        context = _load_scan_account_context(account_id=account_id, source=source, scan_label="scan")
+        if context is None:
+            return
+        adapter = AdapterFactory.create_adapter(
+            context.drive_type,
+            context.runtime_cookie,
+            config=context.runtime_config,
+            account_name=context.account_name,
+        )
+        if adapter is None:
+            logger.warning(
+                "drive account lsdir scan aborted: adapter unavailable account_id=%s account_name=%s drive_type=%s source=%s",
+                account_id,
+                context.account_name,
+                context.drive_type,
+                source,
             )
-            if adapter is None:
+            return
+        if not getattr(adapter, "is_active", False):
+            ok = adapter.init()
+            if not ok:
                 logger.warning(
-                    "drive account lsdir scan aborted: adapter unavailable account_id=%s account_name=%s drive_type=%s source=%s",
+                    "drive account lsdir scan aborted: adapter init failed account_id=%s account_name=%s drive_type=%s source=%s",
                     account_id,
-                    account.name,
-                    account.drive_type,
+                    context.account_name,
+                    context.drive_type,
                     source,
                 )
                 return
-            if not getattr(adapter, "is_active", False):
-                ok = adapter.init()
-                if not ok:
-                    logger.warning(
-                        "drive account lsdir scan aborted: adapter init failed account_id=%s account_name=%s drive_type=%s source=%s",
-                        account_id,
-                        account.name,
-                        account.drive_type,
-                        source,
-                    )
-                    return
-
+        with SessionLocal() as db:
             purge_expired_drive_account_lsdir_cache(db)
             db.commit()
-            stats = _walk_account_tree(db=db, account=account, adapter=adapter)
+        stats = _walk_account_tree(account_id=context.account_id, drive_type=context.drive_type, adapter=adapter)
+        with SessionLocal() as db:
             purge_old_drive_account_lsdir_cache(
                 db,
                 retention_seconds=int(getattr(settings, "drive_account_lsdir_cache_retention_seconds", 7 * 24 * 60 * 60) or 7 * 24 * 60 * 60),
             )
             db.commit()
+        with SessionLocal() as db:
             _trigger_dl302_strm_after_scan(db=db, source=f"{source}.full")
+            db.commit()
     except Exception as exc:
         failed_fid = getattr(exc, "fid", None) or failed_fid
         logger.exception(
@@ -207,55 +205,42 @@ def _scan_drive_account_targeted_worker(account_id: int, source: str, target_pat
     failed_fid: str | None = None
     stats = ScanStats()
     try:
-        with SessionLocal() as db:
-            account = db.get(DriveAccount, int(account_id))
-            if account is None:
-                logger.warning("drive account lsdir targeted scan aborted: account not found account_id=%s source=%s", account_id, source)
-                return
-            if str(getattr(account, "runtime_status", "") or "") != "active":
-                logger.info(
-                    "drive account lsdir targeted scan skipped: inactive account_id=%s account_name=%s source=%s runtime_status=%s",
-                    account_id,
-                    account.name,
-                    source,
-                    getattr(account, "runtime_status", None),
-                )
-                return
-
-            runtime_config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
-            runtime_cookie = AdapterRegistry.serialize_config(account.drive_type, runtime_config)
-            adapter = AdapterFactory.create_adapter(
-                account.drive_type,
-                runtime_cookie,
-                config=runtime_config,
-                account_name=account.name,
+        context = _load_scan_account_context(account_id=account_id, source=source, scan_label="targeted scan")
+        if context is None:
+            return
+        adapter = AdapterFactory.create_adapter(
+            context.drive_type,
+            context.runtime_cookie,
+            config=context.runtime_config,
+            account_name=context.account_name,
+        )
+        if adapter is None:
+            logger.warning(
+                "drive account lsdir targeted scan aborted: adapter unavailable account_id=%s account_name=%s drive_type=%s source=%s",
+                account_id,
+                context.account_name,
+                context.drive_type,
+                source,
             )
-            if adapter is None:
+            return
+        if not getattr(adapter, "is_active", False):
+            ok = adapter.init()
+            if not ok:
                 logger.warning(
-                    "drive account lsdir targeted scan aborted: adapter unavailable account_id=%s account_name=%s drive_type=%s source=%s",
+                    "drive account lsdir targeted scan aborted: adapter init failed account_id=%s account_name=%s drive_type=%s source=%s",
                     account_id,
-                    account.name,
-                    account.drive_type,
+                    context.account_name,
+                    context.drive_type,
                     source,
                 )
                 return
-            if not getattr(adapter, "is_active", False):
-                ok = adapter.init()
-                if not ok:
-                    logger.warning(
-                        "drive account lsdir targeted scan aborted: adapter init failed account_id=%s account_name=%s drive_type=%s source=%s",
-                        account_id,
-                        account.name,
-                        account.drive_type,
-                        source,
-                    )
-                    return
-
+        with SessionLocal() as db:
             purge_expired_drive_account_lsdir_cache(db)
             db.commit()
-            stats = _refresh_account_paths(db=db, account=account, adapter=adapter, target_paths=target_paths)
-            db.commit()
+        stats = _refresh_account_paths(account_id=context.account_id, drive_type=context.drive_type, adapter=adapter, target_paths=target_paths)
+        with SessionLocal() as db:
             _trigger_dl302_strm_after_scan(db=db, source=f"{source}.targeted")
+            db.commit()
     except Exception as exc:
         failed_fid = getattr(exc, "fid", None) or failed_fid
         logger.exception(
@@ -280,7 +265,34 @@ def _scan_drive_account_targeted_worker(account_id: int, source: str, target_pat
         )
 
 
-def _walk_account_tree(*, db, account: DriveAccount, adapter) -> ScanStats:
+def _load_scan_account_context(*, account_id: int, source: str, scan_label: str) -> ScanAccountContext | None:
+    with SessionLocal() as db:
+        account = db.get(DriveAccount, int(account_id))
+        if account is None:
+            logger.warning("drive account lsdir %s aborted: account not found account_id=%s source=%s", scan_label, account_id, source)
+            return None
+        if str(getattr(account, "runtime_status", "") or "") != "active":
+            logger.info(
+                "drive account lsdir %s skipped: inactive account_id=%s account_name=%s source=%s runtime_status=%s",
+                scan_label,
+                account_id,
+                account.name,
+                source,
+                getattr(account, "runtime_status", None),
+            )
+            return None
+        runtime_config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
+        runtime_cookie = AdapterRegistry.serialize_config(account.drive_type, runtime_config)
+        return ScanAccountContext(
+            account_id=int(account.id),
+            account_name=str(account.name or ""),
+            drive_type=str(account.drive_type or ""),
+            runtime_config=runtime_config,
+            runtime_cookie=runtime_cookie,
+        )
+
+
+def _walk_account_tree(*, account_id: int, drive_type: str, adapter) -> ScanStats:
     ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 30 * 60) or 30 * 60)
     rate_limit = float(getattr(settings, "drive_account_lsdir_scan_rate_limit_per_second", 1.0) or 1.0)
     stats = ScanStats()
@@ -294,28 +306,28 @@ def _walk_account_tree(*, db, account: DriveAccount, adapter) -> ScanStats:
         visited_fids.add(parent_fid)
 
         try:
-            _wait_for_account_rate_limit(int(account.id), rate_limit)
+            _wait_for_account_rate_limit(int(account_id), rate_limit)
             listing = adapter.ls_dir(str(parent_fid), max_items=0) or {}
             raw_items = _extract_listing_items("ls_dir", listing)
-            normalized_items = upsert_drive_account_lsdir_items(
-                db,
-                account_id=int(account.id),
-                drive_type=str(account.drive_type or ""),
-                parent_fid=str(parent_fid),
-                parent_path=parent_path,
-                items=raw_items,
-                ttl_seconds=ttl_seconds,
-                scanned_at=datetime.now(),
-            )
-            if parent_path != "/" and not normalized_items:
-                delete_drive_account_lsdir_cache_by_path(
+            with SessionLocal() as db:
+                normalized_items = upsert_drive_account_lsdir_items(
                     db,
-                    account_id=int(account.id),
-                    full_path=parent_path,
+                    account_id=int(account_id),
+                    drive_type=str(drive_type or ""),
+                    parent_fid=str(parent_fid),
+                    parent_path=parent_path,
+                    items=raw_items,
+                    ttl_seconds=ttl_seconds,
+                    scanned_at=datetime.now(),
                 )
-            db.commit()
+                if parent_path != "/" and not normalized_items:
+                    delete_drive_account_lsdir_cache_by_path(
+                        db,
+                        account_id=int(account_id),
+                        full_path=parent_path,
+                    )
+                db.commit()
         except Exception as exc:
-            db.rollback()
             raise DirectoryScanError(str(parent_fid), f"scan directory failed fid={parent_fid} path={parent_path}: {exc}") from exc
 
         stats.scanned_dirs += 1
@@ -331,7 +343,7 @@ def _walk_account_tree(*, db, account: DriveAccount, adapter) -> ScanStats:
     return stats
 
 
-def _refresh_account_paths(*, db, account: DriveAccount, adapter, target_paths: list[tuple[str, bool]]) -> ScanStats:
+def _refresh_account_paths(*, account_id: int, drive_type: str, adapter, target_paths: list[tuple[str, bool]]) -> ScanStats:
     ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 30 * 60) or 30 * 60)
     rate_limit = float(getattr(settings, "drive_account_lsdir_scan_rate_limit_per_second", 1.0) or 1.0)
     stats = ScanStats()
@@ -346,12 +358,13 @@ def _refresh_account_paths(*, db, account: DriveAccount, adapter, target_paths: 
         seen_paths.add(normalized_path)
         fid = _resolve_dir_fid(adapter, normalized_path)
         if not fid:
-            delete_drive_account_lsdir_cache_subtree_by_path(
-                db,
-                account_id=int(account.id),
-                full_path=normalized_path,
-            )
-            db.commit()
+            with SessionLocal() as db:
+                delete_drive_account_lsdir_cache_subtree_by_path(
+                    db,
+                    account_id=int(account_id),
+                    full_path=normalized_path,
+                )
+                db.commit()
             continue
         queue.append((fid, normalized_path, bool(recursive)))
 
@@ -362,28 +375,28 @@ def _refresh_account_paths(*, db, account: DriveAccount, adapter, target_paths: 
         visited_fids.add(parent_fid)
 
         try:
-            _wait_for_account_rate_limit(int(account.id), rate_limit)
+            _wait_for_account_rate_limit(int(account_id), rate_limit)
             listing = adapter.ls_dir(str(parent_fid), max_items=0) or {}
             raw_items = _extract_listing_items("ls_dir", listing)
-            normalized_items = upsert_drive_account_lsdir_items(
-                db,
-                account_id=int(account.id),
-                drive_type=str(account.drive_type or ""),
-                parent_fid=str(parent_fid),
-                parent_path=parent_path,
-                items=raw_items,
-                ttl_seconds=ttl_seconds,
-                scanned_at=datetime.now(),
-            )
-            if parent_path != "/" and not normalized_items:
-                delete_drive_account_lsdir_cache_by_path(
+            with SessionLocal() as db:
+                normalized_items = upsert_drive_account_lsdir_items(
                     db,
-                    account_id=int(account.id),
-                    full_path=parent_path,
+                    account_id=int(account_id),
+                    drive_type=str(drive_type or ""),
+                    parent_fid=str(parent_fid),
+                    parent_path=parent_path,
+                    items=raw_items,
+                    ttl_seconds=ttl_seconds,
+                    scanned_at=datetime.now(),
                 )
-            db.commit()
+                if parent_path != "/" and not normalized_items:
+                    delete_drive_account_lsdir_cache_by_path(
+                        db,
+                        account_id=int(account_id),
+                        full_path=parent_path,
+                    )
+                db.commit()
         except Exception as exc:
-            db.rollback()
             raise DirectoryScanError(str(parent_fid), f"refresh directory failed fid={parent_fid} path={parent_path}: {exc}") from exc
 
         stats.scanned_dirs += 1

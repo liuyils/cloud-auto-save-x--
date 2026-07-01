@@ -31,6 +31,7 @@ class Task(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="1")
     addition_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transferred_history_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

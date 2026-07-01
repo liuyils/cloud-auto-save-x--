@@ -648,23 +648,23 @@ def run_drive_account_lsdir_cache_refresh() -> None:
     skipped_fresh = 0
     skipped_running = 0
     checked = 0
-    with SessionLocal() as db:
-        for account_id, base_path in targets:
-            checked += 1
+    for account_id, base_path in targets:
+        checked += 1
+        with SessionLocal() as db:
             freshness = get_drive_account_lsdir_cache_subtree_freshness(db, account_id=account_id, full_path=base_path)
-            if bool(freshness.get("is_fresh")):
-                skipped_fresh += 1
-                continue
-            if trigger_drive_account_lsdir_targeted_scan(
-                account_id,
-                savepath=base_path,
-                relative_dir_paths=None,
-                recursive_savepath=True,
-                source="scheduler.drive_account_lsdir_cache_refresh.302_path",
-            ):
-                triggered += 1
-            else:
-                skipped_running += 1
+        if bool(freshness.get("is_fresh")):
+            skipped_fresh += 1
+            continue
+        if trigger_drive_account_lsdir_targeted_scan(
+            account_id,
+            savepath=base_path,
+            relative_dir_paths=None,
+            recursive_savepath=True,
+            source="scheduler.drive_account_lsdir_cache_refresh.302_path",
+        ):
+            triggered += 1
+        else:
+            skipped_running += 1
 
     logger.info(
         "驱动账号 ls_dir 缓存巡检完成 accounts=%s checked=%s triggered=%s skipped_fresh=%s skipped_running=%s unsupported=%s missing_302_path=%s",

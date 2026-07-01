@@ -16,6 +16,7 @@ from app.models.sync_plugin_definition import SyncPluginDefinition
 from app.models.refresh_token import RefreshToken
 from app.models.share_preview_batch_cache import SharePreviewBatchCache
 from app.models.role import Role
+from app.models.system_config import SystemConfig
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
 from app.models.task_scheduler_setting import TaskSchedulerSetting
@@ -51,6 +52,7 @@ __all__ = [
     "ResourceSearchSource",
     "Role",
     "SharePreviewBatchCache",
+    "SystemConfig",
     "Task",
     "TaskExecution",
     "TaskSchedulerSetting",

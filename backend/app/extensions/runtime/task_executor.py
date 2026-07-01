@@ -23,8 +23,10 @@ from app.extensions.runtime.plugin_registry import PluginRegistry
 from app.models.drive_account import DriveAccount
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
+from app.models.task_savepath_snapshot import TaskSavepathSnapshot
 from app.services.drama_share_autoupdate import is_115_auto_update_task, resolve_drama_shareurl_update
 from app.services.drive_account_lsdir_scan import trigger_drive_account_lsdir_targeted_scan
+from app.services.system_settings import get_save_rule_runtime_config
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,59 @@ def _truncate(s: str, max_len: int) -> str:
     if len(s) <= max_len:
         return s
     return f"{s[:max_len]}...(truncated,len={len(s)})"
+
+
+def _safe_json_list(payload: str | None) -> list[Any]:
+    if not payload:
+        return []
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _normalize_transferred_history(entries: list[Any] | None) -> list[dict[str, str | None]]:
+    result: list[dict[str, str | None]] = []
+    for raw in entries or []:
+        if not isinstance(raw, dict):
+            continue
+        origin_name = str(raw.get("origin_name") or "").strip()
+        target_name = str(raw.get("target_name") or "").strip()
+        saved_fid = str(raw.get("saved_fid") or "").strip() or None
+        saved_at = str(raw.get("saved_at") or "").strip() or None
+        if not origin_name and not target_name:
+            continue
+        result.append(
+            {
+                "origin_name": origin_name or None,
+                "target_name": target_name or None,
+                "saved_fid": saved_fid,
+                "saved_at": saved_at,
+            }
+        )
+    return result
+
+
+def _merge_transferred_history(
+    existing: list[dict[str, str | None]] | None,
+    new_entries: list[dict[str, str | None]] | None,
+) -> list[dict[str, str | None]]:
+    merged: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in (existing or []) + (new_entries or []):
+        item = _normalize_transferred_history([raw])
+        if not item:
+            continue
+        current = item[0]
+        origin_name = str(current.get("origin_name") or "").strip()
+        target_name = str(current.get("target_name") or "").strip()
+        key = (origin_name, target_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(current)
+    return merged
 
 
 @dataclass(slots=True)
@@ -107,7 +162,56 @@ class TaskExecutor:
             'enabled': task.enabled,
             'addition': json.loads(task.addition_json) if task.addition_json else {},
             'extra': json.loads(task.extra_json) if task.extra_json else {},
+            'transferred_history': _safe_json_list(getattr(task, "transferred_history_json", None)),
         }
+
+    def _persist_transferred_history(self, *, task: Task, tree: Tree) -> None:
+        task_id = int(getattr(task, "id", 0) or 0)
+        if task_id <= 0:
+            return
+        new_entries = getattr(tree, "_transferred_history_entries", None)
+        if not isinstance(new_entries, list) or not new_entries:
+            return
+        existing = _normalize_transferred_history(_safe_json_list(getattr(task, "transferred_history_json", None)))
+        merged = _merge_transferred_history(existing, _normalize_transferred_history(new_entries))
+        task.transferred_history_json = json.dumps(merged, ensure_ascii=False)
+        self.db.flush()
+
+    def _capture_snapshot_outside_main_session(
+        self,
+        *,
+        task: Task,
+        task_data: dict[str, Any],
+        adapter: Any,
+        log: ExecutionLog,
+    ) -> int | None:
+        from app.services.task_savepath_snapshot import capture_and_upsert_snapshot
+
+        account_name = str(getattr(adapter, "account_name", "") or getattr(task, "account_name", "") or "").strip()
+        with SessionLocal() as snapshot_db:
+            snapshot_row = capture_and_upsert_snapshot(
+                snapshot_db,
+                task_uid=str(getattr(task, "task_uid", "") or "").strip(),
+                savepath=task_data.get("savepath"),
+                adapter=adapter,
+                account_name=account_name,
+                emit_line=log.line,
+            )
+            snapshot_db.commit()
+            if snapshot_row is None:
+                return None
+            snapshot_db.refresh(snapshot_row)
+            return int(getattr(snapshot_row, "id", 0) or 0) or None
+
+    def _attach_snapshot_execution(self, *, snapshot_id: int | None, execution_id: int) -> None:
+        if not snapshot_id or execution_id <= 0:
+            return
+        with SessionLocal() as link_db:
+            row = link_db.get(TaskSavepathSnapshot, int(snapshot_id))
+            if row is None:
+                return
+            row.task_execution_id = int(execution_id)
+            link_db.commit()
 
     def _execute_with_adapter(self, adapter: Any, task_data: dict[str, Any]) -> Tree:
         pwd_id, passcode, pdir_fid, _ = adapter.extract_url(task_data['shareurl'])
@@ -195,6 +299,13 @@ class TaskExecutor:
             task_data["disable_guessit_tmdb_fallback_rename"] = False
             task_data["guessit_tmdb_tv_rename_template"] = ""
             task_data["guessit_tmdb_movie_rename_template"] = ""
+
+        try:
+            save_rule_config = get_save_rule_runtime_config(self.db)
+            task_data["skip_transferred_history_enabled"] = bool(save_rule_config.get("enable_skip_transferred_history") or False)
+        except Exception:
+            task_data["skip_transferred_history_enabled"] = False
+        task_data["transferred_history"] = _normalize_transferred_history(task_data.get("transferred_history"))
 
         if str(getattr(task, "task_type", "") or "") == "drama":
             extra = task_data.get("extra") or {}
@@ -288,7 +399,7 @@ class TaskExecutor:
                 adapter = None
         started_at = datetime.now()
         task_id = int(getattr(task, "id", 0) or 0)
-        snapshot_row = None
+        snapshot_row_id: int | None = None
 
         if adapter is None:
             log.set_stage("select_account")
@@ -314,7 +425,6 @@ class TaskExecutor:
             return execution
 
         try:
-            autoupdate_db_changed = False
             if getattr(task, "shareurl_ban", None):
                 log.set_stage("shareurl_ban")
                 log.section("任务封禁")
@@ -329,6 +439,7 @@ class TaskExecutor:
                 log.set_stage("execute_drama")
                 log.section("转存任务")
                 tree = self._execute_drama_task(adapter, task_data, log)
+                self._persist_transferred_history(task=task, tree=tree)
             else:
                 log.set_stage("execute_generic")
                 log.section("转存任务")
@@ -434,7 +545,6 @@ class TaskExecutor:
                 log.section("自动换链")
                 try:
                     update_result = resolve_drama_shareurl_update(self.db, task, respect_toggle=True)
-                    autoupdate_db_changed = bool(update_result.get("db_changed"))
                     if bool(update_result.get("updated")):
                         season = update_result.get("season")
                         episode = update_result.get("episode")
@@ -465,25 +575,19 @@ class TaskExecutor:
                     log.line(f"WARN: 自动换链失败 err={str(exc).strip() or type(exc).__name__}")
             if persist_execution and task_id > 0:
                 try:
-                    from app.services.task_savepath_snapshot import capture_and_upsert_snapshot
-
-                    if autoupdate_db_changed:
-                        self.db.commit()
-                        try:
-                            self.db.refresh(task)
-                        except Exception:
-                            pass
-                    account_name = str(getattr(adapter, "account_name", "") or getattr(task, "account_name", "") or "").strip()
-                    snapshot_row = capture_and_upsert_snapshot(
-                        self.db,
-                        task_uid=str(getattr(task, "task_uid", "") or "").strip(),
-                        savepath=task_data.get("savepath"),
+                    self.db.commit()
+                    try:
+                        self.db.refresh(task)
+                    except Exception:
+                        pass
+                    snapshot_row_id = self._capture_snapshot_outside_main_session(
+                        task=task,
+                        task_data=task_data,
                         adapter=adapter,
-                        account_name=account_name,
-                        emit_line=log.line,
+                        log=log,
                     )
                 except Exception:
-                    snapshot_row = None
+                    snapshot_row_id = None
             if has_new_files:
                 try:
                     self._trigger_targeted_lsdir_refresh(task=task, task_data=task_data, adapter=adapter, tree=tree, log=log)
@@ -608,9 +712,7 @@ class TaskExecutor:
             return execution
         self.db.add(execution)
         self.db.flush()
-        if snapshot_row is not None:
-            snapshot_row.task_execution_id = execution.id
-            self.db.flush()
+        setattr(execution, "_snapshot_row_id", snapshot_row_id)
         setattr(execution, "_has_new_files", bool(getattr(task, "_runtime_has_new_files", False)))
         if keep_runtime_tree:
             setattr(execution, "_runtime_tree", getattr(task, "_runtime_tree", None))

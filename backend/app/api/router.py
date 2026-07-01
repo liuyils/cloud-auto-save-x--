@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import audit_logs, auth, cache_management, dashboard, dl302_settings, drive_accounts, health, magic_regex, media_discovery, metrics, notifications, openlist_settings, permissions, plugins, resource_search, roles, setup, sync_plugins, sync_tasks, tasks, tmdb_cache, tmdb_settings, users
+from app.api.routes import audit_logs, auth, cache_management, dashboard, dl302_settings, drive_accounts, health, magic_regex, media_discovery, metrics, notifications, openlist_settings, permissions, plugins, resource_search, roles, setup, sync_plugins, sync_tasks, system_settings, tasks, tmdb_cache, tmdb_settings, users
 
 
 api_router = APIRouter()
@@ -24,6 +24,7 @@ api_router.include_router(cache_management.router, prefix="/cache", tags=["cache
 api_router.include_router(openlist_settings.router, prefix="/openlist", tags=["openlist"])
 api_router.include_router(tmdb_settings.router, prefix="/tmdb", tags=["tmdb"])
 api_router.include_router(tmdb_cache.router, prefix="/tmdb", tags=["tmdb"])
+api_router.include_router(system_settings.router, prefix="/system-settings", tags=["system-settings"])
 api_router.include_router(media_discovery.router, prefix="/media", tags=["media"])
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(metrics.router, tags=["metrics"])

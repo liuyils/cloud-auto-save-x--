@@ -4,12 +4,14 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { deleteMagicRegexRule, fetchMagicRegexRules, upsertMagicRegexRule } from '@/api/magicRegex'
 import { fetchOpenListConfig, patchOpenListConfig } from '@/api/openlist'
 import { fetchResourceSearchSources, patchResourceSearchSource } from '@/api/resourceSearch'
+import { fetchSaveRuleConfig, patchSaveRuleConfig } from '@/api/systemSettings'
 import { fetchTMDBConfig, patchTMDBConfig } from '@/api/tmdb'
 import { TASK_WRITE } from '@/constants/permissions'
 import { useAuthStore } from '@/stores/auth'
 import type { MagicRegexRuleSetting } from '@/types/magicRegex'
 import type { OpenListConfig } from '@/types/openlist'
 import type { ResourceSearchSourceItem } from '@/types/resourceSearch'
+import type { SaveRuleConfig } from '@/types/systemSettings'
 import type { TMDBConfig } from '@/types/tmdb'
 
 const auth = useAuthStore()
@@ -54,6 +56,12 @@ const openlist = reactive({
   url: '',
   hasToken: false,
   tokenInput: '',
+})
+
+const saveRuleConfig = reactive({
+  loading: false,
+  saving: false,
+  enableSkipTransferredHistory: false,
 })
 
 const builtinKeySet = computed(() => new Set(rules.value.filter((r) => r.built_in).map((r) => r.key)))
@@ -149,6 +157,20 @@ function applyOpenListConfig(data: OpenListConfig) {
   openlist.hasToken = Boolean(data.has_token)
 }
 
+function applySaveRuleConfig(data: SaveRuleConfig) {
+  saveRuleConfig.enableSkipTransferredHistory = Boolean(data.enable_skip_transferred_history)
+}
+
+async function refreshSaveRuleConfig() {
+  saveRuleConfig.loading = true
+  try {
+    const data = await fetchSaveRuleConfig()
+    applySaveRuleConfig(data)
+  } finally {
+    saveRuleConfig.loading = false
+  }
+}
+
 async function refreshOpenList() {
   openlist.loading = true
   try {
@@ -174,6 +196,20 @@ async function saveOpenList() {
     ElMessage.success('已保存')
   } finally {
     openlist.saving = false
+  }
+}
+
+async function saveSaveRuleConfig() {
+  if (!canWrite.value) return
+  saveRuleConfig.saving = true
+  try {
+    const data = await patchSaveRuleConfig({
+      enable_skip_transferred_history: Boolean(saveRuleConfig.enableSkipTransferredHistory),
+    })
+    applySaveRuleConfig(data)
+    ElMessage.success('已保存')
+  } finally {
+    saveRuleConfig.saving = false
   }
 }
 
@@ -325,6 +361,7 @@ const customRules = computed(() => rules.value.filter((r) => !r.built_in))
 
 onMounted(() => {
   refresh()
+  refreshSaveRuleConfig()
   refreshSources()
   refreshTMDB()
   refreshOpenList()
@@ -346,6 +383,26 @@ onMounted(() => {
           <div>新增的规则 key 需要以 $ 开头（例如：$MY_RULE）。在追剧任务里将 pattern 设置为该 key，即可使用系统保存规则。</div>
           <div>replace 为默认模板；任务里 replace 留空时，会自动使用该默认值。</div>
         </div>
+
+        <el-card class="page__card" shadow="never">
+          <template #header>
+            <div class="card__header">
+              <div>转存策略</div>
+              <div>
+                <el-button text :loading="saveRuleConfig.loading" @click="refreshSaveRuleConfig">刷新</el-button>
+                <el-button type="primary" :loading="saveRuleConfig.saving" :disabled="!canWrite" @click="saveSaveRuleConfig">保存</el-button>
+              </div>
+            </div>
+          </template>
+          <el-form label-position="top" :disabled="saveRuleConfig.loading">
+            <el-form-item label="不重复转存">
+              <el-switch v-model="saveRuleConfig.enableSkipTransferredHistory" :disabled="!canWrite" />
+              <div class="page__hint">
+                <div>开启后，追剧任务会记录历史已转存文件；下次命中原文件名或重命名结果时将自动跳过。</div>
+              </div>
+            </el-form-item>
+          </el-form>
+        </el-card>
 
         <el-card class="page__card" shadow="never">
           <template #header>

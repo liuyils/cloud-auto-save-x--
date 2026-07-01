@@ -400,6 +400,28 @@ def _remote_parent_path(path: str) -> str:
     return "/" + "/".join(parts[:-1])
 
 
+def _normalize_task_save_subdir(value: str, *, strict: bool = True) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("子目录名不能为空")
+    if strict and ("/" in raw or "\\" in raw):
+        raise ValueError("子目录名只支持单级目录，不要包含 / 或 \\")
+    cleaned = raw.replace("\\", " ").replace("/", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    if not cleaned:
+        raise ValueError("子目录名不能为空")
+    if cleaned in {".", ".."}:
+        raise ValueError("子目录名不合法")
+    return cleaned[:120]
+
+
+def _join_remote_subdir(path: str, subdir: str) -> str:
+    base = str(path or "").strip() or "/"
+    base = "/" + "/".join([p for p in base.split("/") if p])
+    name = _normalize_task_save_subdir(subdir, strict=False)
+    return f"{base.rstrip('/')}/{name}" if base != "/" else f"/{name}"
+
+
 def _suggest_taskname_from_share_text(text: str, shareurl: str, latest_video_name: str | None = None) -> str:
     candidate = str(text or "").strip()
     if shareurl:
@@ -855,6 +877,47 @@ class TelegramBotHandler:
             ),
         )
 
+    def _show_task_save_subdir_prompt(self, db: Session, chat_id: int, *, message_id: int | None = None) -> None:
+        session = load_session_data(db, chat_id=chat_id, user_id=self.config.user_id)
+        ctx = dict(session.context or {})
+        current_path = str(ctx.get("browse_path") or "/")
+        lines = [
+            "请输入自定义子目录名。",
+            f"当前目录: {current_path}",
+            "保存后会写成“当前目录/你输入的子目录”。",
+            "仅支持单级目录名，不要输入 / 或 \\。",
+        ]
+        save_session_data(
+            db,
+            chat_id=chat_id,
+            user_id=self.config.user_id,
+            scene="task_browser",
+            step="await_task_save_subdir",
+            context=ctx,
+            last_message_id=message_id or session.last_message_id,
+        )
+        db.commit()
+        self._show_back_cancel_home(chat_id, "\n".join(lines), message_id=message_id or session.last_message_id)
+
+    def _apply_task_savepath_browser_selection(self, db: Session, chat_id: int, *, ctx: dict[str, Any], savepath: str, message_id: int) -> None:
+        draft = dict(ctx.get("draft") or {})
+        _set_nested(draft, "savepath", savepath)
+        ctx["draft"] = draft
+        ctx.pop("browse_path", None)
+        save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, scene="task_editor", step="idle", context=ctx, last_message_id=message_id)
+        db.commit()
+        self._start_editor(
+            db,
+            chat_id,
+            kind="task",
+            title=_editor_title("task", int(ctx.get("target_id") or 0) or None),
+            fields=TASK_FIELDS,
+            draft=draft,
+            target_id=int(ctx.get("target_id") or 0) or None,
+            message_id=message_id,
+            extras={k: v for k, v in ctx.items() if k != "draft"},
+        )
+
     def _resume_editor(self, db: Session, chat_id: int, *, kind: str, ctx: dict[str, Any], message_id: int | None = None) -> None:
         draft = dict(ctx.get("draft") or {})
         fields = TASK_FIELDS if kind == "task" else SYNC_FIELDS if kind == "sync" else ACCOUNT_FIELDS
@@ -931,7 +994,19 @@ class TelegramBotHandler:
         rows: list[list[dict[str, str]]] = []
         if payload.get("dir_path") not in {"", "/"}:
             rows.append([button("⬆️ 上一级", "brw", "task", "up")])
-        rows.append([button("✅ 选择当前目录", "brw", "task", "sel"), button("🔄 刷新", "brw", "task", "refresh")])
+        taskname = str(_get_nested(draft, "taskname") or "").strip()
+        rows.append([button("✅ 选择当前目录", "brw", "task", "sel"), button("⌨️ 自定义子目录", "brw", "task", "custom")])
+        if taskname:
+            try:
+                taskname_subdir = _normalize_task_save_subdir(taskname, strict=False)
+            except Exception:
+                taskname_subdir = ""
+            if taskname_subdir:
+                rows.append([button(f"📁 当前目录/{taskname_subdir[:18]}", "brw", "task", "seltaskname"), button("🔄 刷新", "brw", "task", "refresh")])
+            else:
+                rows.append([button("🔄 刷新", "brw", "task", "refresh")])
+        else:
+            rows.append([button("🔄 刷新", "brw", "task", "refresh")])
         for idx, item in enumerate(payload.get("items") or []):
             prefix = "[DIR] " if item.get("is_dir") else "[FILE] "
             rows.append([button(f"{prefix}{str(item.get('name') or '')[:26]}", "brw", "task", "open", idx)])
@@ -941,6 +1016,10 @@ class TelegramBotHandler:
             f"账号: {payload.get('account_name') or '-'}",
             f"路径: {payload.get('dir_path') or '/'}",
         ]
+        if taskname:
+            text_lines.append(f"可快捷保存到: {_join_remote_subdir(str(payload.get('dir_path') or '/'), taskname)}")
+        else:
+            text_lines.append("提示: 先填写任务名称后，可直接使用“当前目录/{taskname}”。")
         if not payload.get("exists"):
             text_lines.append("当前路径不存在，可先返回后手动输入。")
         mid = self._edit_or_send(chat_id, "\n".join(text_lines), message_id=message_id or session.last_message_id, reply_markup=keyboard(rows))
@@ -1640,6 +1719,9 @@ class TelegramBotHandler:
             if session.step == "await_field_input":
                 self._handle_field_input(db, chat_id, user_id, text, session)
                 return
+            if session.step == "await_task_save_subdir":
+                self._handle_task_save_subdir_input(db, chat_id, user_id, text, session)
+                return
             if session.step == "await_auth_code":
                 self._handle_auth_code_input(db, chat_id, text, session)
                 return
@@ -2200,23 +2282,17 @@ class TelegramBotHandler:
                 self._show_task_drive_browser(db, chat_id, message_id=message_id)
                 return
             if action == "sel":
-                draft = dict(ctx.get("draft") or {})
-                _set_nested(draft, "savepath", current_path if current_path != "/" else "/")
-                ctx["draft"] = draft
-                ctx.pop("browse_path", None)
-                save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, scene="task_editor", step="idle", context=ctx, last_message_id=message_id)
-                db.commit()
-                self._start_editor(
-                    db,
-                    chat_id,
-                    kind="task",
-                    title=_editor_title("task", int(ctx.get("target_id") or 0) or None),
-                    fields=TASK_FIELDS,
-                    draft=draft,
-                    target_id=int(ctx.get("target_id") or 0) or None,
-                    message_id=message_id,
-                    extras={k: v for k, v in ctx.items() if k != "draft"},
-                )
+                self._apply_task_savepath_browser_selection(db, chat_id, ctx=ctx, savepath=current_path if current_path != "/" else "/", message_id=message_id)
+                return
+            if action == "seltaskname":
+                taskname = str(_get_nested(ctx.get("draft") or {}, "taskname") or "").strip()
+                if not taskname:
+                    raise ValueError("请先填写任务名称")
+                savepath = _join_remote_subdir(current_path, taskname)
+                self._apply_task_savepath_browser_selection(db, chat_id, ctx=ctx, savepath=savepath, message_id=message_id)
+                return
+            if action == "custom":
+                self._show_task_save_subdir_prompt(db, chat_id, message_id=message_id)
                 return
             if action in {"refresh", "back"}:
                 if action == "back":
@@ -2593,6 +2669,11 @@ class TelegramBotHandler:
                 db.commit()
                 self._resume_editor(db, chat_id, kind=kind, ctx=ctx, message_id=message_id)
                 return
+        if step == "await_task_save_subdir":
+            save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, scene="task_browser", step="idle", context=ctx, last_message_id=message_id)
+            db.commit()
+            self._show_task_drive_browser(db, chat_id, message_id=message_id)
+            return
         if step == "await_keyword" and scene == "search":
             replace_task_id = int(ctx.get("replace_task_id") or 0) or None
             if replace_task_id:
@@ -2908,6 +2989,17 @@ class TelegramBotHandler:
             message_id=session.last_message_id,
             extras={k: v for k, v in ctx.items() if k != "draft"},
         )
+
+    def _handle_task_save_subdir_input(self, db: Session, chat_id: int, user_id: int, text: str, session) -> None:
+        ctx = dict(session.context or {})
+        current_path = str(ctx.get("browse_path") or "/")
+        try:
+            subdir = _normalize_task_save_subdir(text)
+            savepath = _join_remote_subdir(current_path, subdir)
+        except Exception as exc:
+            self._send(chat_id, f"输入无效: {exc}")
+            return
+        self._apply_task_savepath_browser_selection(db, chat_id, ctx=ctx, savepath=savepath, message_id=session.last_message_id)
 
     def _handle_auth_code_input(self, db: Session, chat_id: int, text: str, session) -> None:
         ctx = dict(session.context or {})

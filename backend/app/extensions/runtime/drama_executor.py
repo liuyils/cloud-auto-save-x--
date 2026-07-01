@@ -6,7 +6,7 @@ import re
 import os
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -136,6 +136,8 @@ class DramaTaskExecutor:
         self.log = log
         self.transfer_count = 0
         self.changed_relative_dirs: set[str] = set()
+        self.saved_history_entries: list[dict[str, str | None]] = []
+        self.history_name_set = self._build_history_name_set(self._load_transfer_history())
 
     def _set_stage(self, stage: str | None) -> None:
         if self.log:
@@ -164,6 +166,81 @@ class DramaTaskExecutor:
 
     def _mark_changed_dir(self, relative_path: str | None) -> None:
         self.changed_relative_dirs.add(self._normalize_relative_dir(relative_path))
+
+    def _load_transfer_history(self) -> list[dict[str, str | None]]:
+        raw = self.task_data.get("transferred_history")
+        if not isinstance(raw, list):
+            return []
+        result: list[dict[str, str | None]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            origin_name = str(item.get("origin_name") or "").strip() or None
+            target_name = str(item.get("target_name") or "").strip() or None
+            saved_fid = str(item.get("saved_fid") or "").strip() or None
+            saved_at = str(item.get("saved_at") or "").strip() or None
+            if not origin_name and not target_name:
+                continue
+            result.append(
+                {
+                    "origin_name": origin_name,
+                    "target_name": target_name,
+                    "saved_fid": saved_fid,
+                    "saved_at": saved_at,
+                }
+            )
+        return result
+
+    def _history_name_key(self, name: str | None) -> str:
+        text = str(name or "").strip()
+        if not text:
+            return ""
+        return _normalize_name(text, bool(self.task_data.get("ignore_extension")))
+
+    def _build_history_name_set(self, entries: list[dict[str, str | None]]) -> set[str]:
+        names: set[str] = set()
+        for item in entries:
+            for key in ("origin_name", "target_name"):
+                normalized = self._history_name_key(item.get(key))
+                if normalized:
+                    names.add(normalized)
+        return names
+
+    def _is_history_transferred(self, *, origin_name: str, target_name: str) -> bool:
+        if not bool(self.task_data.get("skip_transferred_history_enabled")):
+            return False
+        candidates = {
+            self._history_name_key(origin_name),
+            self._history_name_key(target_name),
+        }
+        candidates.discard("")
+        if not candidates:
+            return False
+        return any(item in self.history_name_set for item in candidates)
+
+    def _remember_saved_history(self, *, saved_fids: list[str], plan: list[DramaPlanItem]) -> None:
+        if not saved_fids or not plan:
+            return
+        saved_at = datetime.now(timezone.utc).isoformat()
+        limit = min(len(saved_fids), len(plan))
+        for idx in range(limit):
+            saved_fid = str(saved_fids[idx] or "").strip() or None
+            item = plan[idx]
+            origin_name = str(item.origin_name or "").strip() or None
+            target_name = str(item.target_name or "").strip() or None
+            if not origin_name and not target_name:
+                continue
+            entry = {
+                "origin_name": origin_name,
+                "target_name": target_name,
+                "saved_fid": saved_fid,
+                "saved_at": saved_at,
+            }
+            self.saved_history_entries.append(entry)
+            for value in (origin_name, target_name):
+                normalized = self._history_name_key(value)
+                if normalized:
+                    self.history_name_set.add(normalized)
 
     def _retry(
         self,
@@ -290,7 +367,8 @@ class DramaTaskExecutor:
             )
         if not plan:
             return
-        self._save_with_saved_fids(pwd_id=pwd_id, stoken=stoken, dest_root_fid=to_pdir_fid, plan=plan)
+        saved_fids = self._save_with_saved_fids(pwd_id=pwd_id, stoken=stoken, dest_root_fid=to_pdir_fid, plan=plan)
+        self._remember_saved_history(saved_fids=saved_fids, plan=plan)
 
     def _call_save_file(
         self,
@@ -466,6 +544,9 @@ class DramaTaskExecutor:
                 continue
             if _normalize_name(name, ignore_extension) in dest_file_names:
                 continue
+            if self._is_history_transferred(origin_name=name, target_name=name):
+                self._line(f"跳过: 历史已转存 origin={name} target={name}")
+                continue
             self._mark_changed_dir(dest_relative_path)
             self._save_items(pwd_id=pwd_id, stoken=stoken, to_pdir_fid=dest_dir_fid, items=[raw])
             tree.create_node(f"{name} -> {name}", f"file-{dest_dir_name}-{fid}", parent=parent_node)
@@ -574,6 +655,9 @@ class DramaTaskExecutor:
                         file_name_re = mr.sub(pattern, replace, origin_name)
                 else:
                     file_name_re = mr.sub(pattern, replace, origin_name)
+            if self._is_history_transferred(origin_name=origin_name, target_name=file_name_re):
+                self._line(f"跳过: 历史已转存 origin={origin_name} target={file_name_re}")
+                continue
             if mr.is_exists(file_name_re, dest_filename_list, ignore_extension and not _is_dir(raw)):
                 continue
             candidates.append(
@@ -857,6 +941,7 @@ class DramaTaskExecutor:
             self._set_stage("save_file")
             self._section("执行转存")
             saved_fids = self._save_with_saved_fids(pwd_id=str(pwd_id), stoken=str(stoken), dest_root_fid=dest_root_fid, plan=plan)
+            self._remember_saved_history(saved_fids=saved_fids, plan=plan)
             self._set_stage("rename")
             self._section("重命名")
             self._rename_by_fids(saved_fids=saved_fids, plan=plan, dest_root_fid=dest_root_fid)
@@ -949,5 +1034,6 @@ class DramaTaskExecutor:
             tree.create_node("无可转存文件", "empty", parent="root")
             self._line("无可转存文件")
         setattr(tree, "_changed_relative_dirs", sorted(self.changed_relative_dirs))
+        setattr(tree, "_transferred_history_entries", list(self.saved_history_entries))
         self._set_stage("end")
         return tree
