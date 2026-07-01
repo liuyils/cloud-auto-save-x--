@@ -9,6 +9,7 @@ python-jose[cryptography]==3.5.0
 bcrypt==4.3.0
 python-multipart==0.0.20
 requests==2.32.3
+PySocks==1.7.1
 treelib==1.7.1
 natsort==8.4.0
 cachetools==5.5.2
@@ -16,3 +17,5 @@ rsa==4.9.1
 APScheduler==3.10.4
 guessit==3.8.0
 emoji==2.12.1
+grpcio==1.81.0
+protobuf==6.33.5

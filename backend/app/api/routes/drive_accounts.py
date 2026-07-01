@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+import logging
 import json
 
 from app.core.errors import ApiError, bad_request, not_found
@@ -22,6 +23,7 @@ from app.services.drive_accounts import (
     create_drive_account,
     delete_drive_account,
     list_drive_accounts,
+    merge_runtime_account_config,
     probe_drive_account,
     refresh_drive_account_profiles,
     serialize_drive_account,
@@ -31,12 +33,32 @@ from app.services.drive_accounts import (
     supported_drive_types,
     update_drive_account,
 )
+from app.services.drive_account_lsdir_scan import trigger_drive_account_lsdir_scan_if_stale
+from app.thirdparty.dl302_grpc_client import reload_dl302
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
+
+def _reload_dl302_if_needed(drive_type: str | None) -> None:
+    if str(drive_type or "") not in {"115", "cloud189", "cloud139"}:
+        return
+    ok, msg = reload_dl302()
+    if not ok:
+        logger.warning("dl302 reload failed: %s", msg)
 
 def _out(item) -> DriveAccountOut:
     return DriveAccountOut(**serialize_drive_account(item))
+
+
+def _trigger_lsdir_scan_if_active(account: DriveAccount, *, source: str) -> None:
+    if getattr(account, "id", None) is None:
+        return
+    if str(getattr(account, "runtime_status", "") or "") != "active":
+        return
+    trigger_drive_account_lsdir_scan_if_stale(int(account.id), source=source)
+
 
 
 @router.get('/auth/{session_id}', dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_READ))])
@@ -90,6 +112,7 @@ def post_account(request: Request, payload: DriveAccountCreateIn, current: Curre
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.create', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _reload_dl302_if_needed(account.drive_type)
     return _out(account)
 
 
@@ -99,6 +122,7 @@ def patch_account(request: Request, account_id: int, payload: DriveAccountUpdate
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.update', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _reload_dl302_if_needed(account.drive_type)
     return _out(account)
 
 
@@ -137,6 +161,8 @@ def patch_account_status(request: Request, account_id: int, payload: DriveAccoun
         )
         db.commit()
         db.refresh(account)
+        _reload_dl302_if_needed(account.drive_type)
+        _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.status_enable")
         return _out(account)
 
     account = set_drive_account_enabled(db, account_id, False)
@@ -153,6 +179,7 @@ def patch_account_status(request: Request, account_id: int, payload: DriveAccoun
     )
     db.commit()
     db.refresh(account)
+    _reload_dl302_if_needed(account.drive_type)
     return _out(account)
 
 
@@ -162,14 +189,17 @@ def post_account_default(request: Request, account_id: int, current: CurrentUser
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.default', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _reload_dl302_if_needed(account.drive_type)
     return _out(account)
 
 
 @router.delete('/{account_id}', dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_WRITE))])
 def delete_account(request: Request, account_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    account = db.get(DriveAccount, account_id)
     delete_drive_account(db, account_id)
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.delete', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
+    _reload_dl302_if_needed(getattr(account, "drive_type", None))
     return {'ok': True}
 
 
@@ -179,6 +209,7 @@ def post_account_probe(request: Request, account_id: int, current: CurrentUser =
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.probe', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.probe")
     return _out(account)
 
 
@@ -240,6 +271,7 @@ def post_account_auth_qrcode_poll(request: Request, session_id: str, current: Cu
         audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_confirm', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
         db.commit()
         db.refresh(account)
+        _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.auth_qrcode_confirm")
         return _out(account)
     session.payload.update({"status": str(data.get("status") or ""), "message": str(data.get("message") or "")})
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_poll', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
@@ -296,11 +328,15 @@ def post_account_auth_captcha_submit(request: Request, session_id: str, payload:
             ),
         )
     delete_auth_session(session_id)
-    update_drive_account(db, session.account_id, config=adapter.export_runtime_config())
+    account = db.get(DriveAccount, session.account_id)
+    if account is None:
+        raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
+    update_drive_account(db, session.account_id, config=merge_runtime_account_config(account, adapter.export_runtime_config()))
     account = probe_drive_account(db, session.account_id)
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_captcha', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.auth_captcha")
     return _out(account)
 
 
@@ -328,7 +364,10 @@ def post_account_auth_sms_submit(request: Request, session_id: str, payload: Dri
     adapter = session.adapter
     adapter.submit_sms(payload.code)
     delete_auth_session(session_id)
-    config_snapshot = adapter.export_runtime_config()
+    account = db.get(DriveAccount, session.account_id)
+    if account is None:
+        raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
+    config_snapshot = merge_runtime_account_config(account, adapter.export_runtime_config())
     update_drive_account(db, session.account_id, config=config_snapshot)
     try:
         account = probe_drive_account(db, session.account_id)
@@ -359,6 +398,7 @@ def post_account_auth_sms_submit(request: Request, session_id: str, payload: Dri
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_sms_submit', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.auth_sms_submit")
     return _out(account)
 
 

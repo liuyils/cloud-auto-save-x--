@@ -78,6 +78,12 @@ export const appRoutes: RouteRecordRaw[] = [
         meta: { title: '账号管理', icon: 'Setting', permissions: [DRIVE_ACCOUNT_READ] },
       },
       {
+        path: 'extensions/dl302',
+        name: 'DL302Proxy',
+        component: () => import('@/views/extensions/DL302ProxyView.vue'),
+        meta: { title: '302代理', icon: 'Link', permissions: [TASK_WRITE] },
+      },
+      {
         path: 'extensions/drives/auth/:accountId',
         name: 'DriveAccountAuth',
         component: () => import('@/views/extensions/DriveAccountAuthView.vue'),

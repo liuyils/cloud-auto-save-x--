@@ -21,9 +21,10 @@ class TelegramBotClient:
     def _proxies(self) -> dict[str, str] | None:
         if not (self.config.proxy_host and self.config.proxy_port):
             return None
-        proxy_url = f"http://{self.config.proxy_host}:{self.config.proxy_port}"
+        scheme = str(getattr(self.config, "proxy_scheme", "") or "").strip().lower() or "http"
+        proxy_url = f"{scheme}://{self.config.proxy_host}:{self.config.proxy_port}"
         if self.config.proxy_auth:
-            proxy_url = f"http://{self.config.proxy_auth}@{self.config.proxy_host}:{self.config.proxy_port}"
+            proxy_url = f"{scheme}://{self.config.proxy_auth}@{self.config.proxy_host}:{self.config.proxy_port}"
         return {"http": proxy_url, "https": proxy_url}
 
     def _request(

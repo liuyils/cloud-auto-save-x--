@@ -19,6 +19,7 @@ COPY backend/ /app/backend/
 
 # ---------- runtime (nginx + uvicorn) ----------
 FROM python:3.13-alpine
+ARG TARGETARCH
 ARG BUILD_SHA
 ARG BUILD_TAG
 ENV BUILD_SHA=$BUILD_SHA \
@@ -29,13 +30,22 @@ ENV BUILD_SHA=$BUILD_SHA \
 
 WORKDIR /app
 
-RUN apk add --no-cache nginx supervisor tzdata ca-certificates libffi openssl \
+RUN apk add --no-cache nginx nginx-mod-http-headers-more supervisor tzdata ca-certificates libffi openssl \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && mkdir -p /run/nginx /var/log/supervisor /app/backend/data
 
 COPY --from=backend-builder /usr/local /usr/local
 COPY --from=backend-builder /app/backend /app/backend
 COPY --from=frontend-builder /fe/dist /usr/share/nginx/html
+COPY dl302-master-linux-amd64 /tmp/dl302-linux-amd64
+COPY dl302-master-linux-arm64 /tmp/dl302-linux-arm64
+RUN case "$TARGETARCH" in \
+      amd64) cp /tmp/dl302-linux-amd64 /app/dl302 ;; \
+      arm64) cp /tmp/dl302-linux-arm64 /app/dl302 ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && chmod +x /app/dl302 \
+    && rm -f /tmp/dl302-linux-amd64 /tmp/dl302-linux-arm64
 
 COPY default /etc/nginx/http.d/default.conf
 
@@ -60,6 +70,15 @@ RUN printf '%s\n' \
     'stderr_logfile=/dev/fd/2' \
     'stderr_logfile_maxbytes=0' \
     '' \
+    '[program:dl302]' \
+    'command=/app/dl302' \
+    'autostart=true' \
+    'autorestart=true' \
+    'stdout_logfile=/dev/fd/1' \
+    'stdout_logfile_maxbytes=0' \
+    'stderr_logfile=/dev/fd/2' \
+    'stderr_logfile_maxbytes=0' \
+    '' \
     '[program:nginx]' \
     'command=/usr/sbin/nginx -g "daemon off;"' \
     'autostart=true' \
@@ -71,7 +90,8 @@ RUN printf '%s\n' \
     '' \
     '[supervisorctl]' \
     'serverurl=unix:///run/supervisor.sock' \
-    > /etc/supervisord.conf
+    > /etc/supervisord.conf \
+    && chmod +x /app/dl302
 
-EXPOSE 5115
+EXPOSE 5115 5225
 CMD ["/usr/bin/supervisord","-c","/etc/supervisord.conf"]

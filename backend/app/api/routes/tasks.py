@@ -1169,6 +1169,7 @@ def post_share_preview(payload: SharePreviewIn, db: Session = Depends(get_db)):
         ".mpeg",
         ".3gp",
         ".cas",
+        ".zip",
     }
 
     def _is_video_name(name: str) -> bool:

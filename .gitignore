@@ -23,4 +23,6 @@ docs
 backend/data/sync/*
 .dbg
 old
-
+dl302
+dl302-bin
+Dockerfiledev

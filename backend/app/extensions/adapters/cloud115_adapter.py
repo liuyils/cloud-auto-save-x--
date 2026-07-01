@@ -26,6 +26,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
     CONFIG_FORMAT = "raw"
     default_config = {
         "cookie": "",
+        "302_path": "",
     }
     config_fields = [
         {
@@ -36,6 +37,15 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
             "required": True,
             "secret": True,
             "placeholder": "UID=...; CID=...; SEID=...",
+        },
+        {
+            "key": "302_path",
+            "label": "302代理基础路径",
+            "description": "302/STRM 生成使用的媒体根目录（网盘内路径）。",
+            "input_type": "text",
+            "required": True,
+            "secret": True,
+            "placeholder": "/",
         }
     ]
     API_URL = "https://webapi.115.com"
@@ -63,8 +73,8 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
     ):
         super().__init__(cookie, index, config=config, no_login=no_login)
         # 115 对请求频率更敏感，单独放慢节流区间以降低风控概率。
-        self._rate_limit_min_interval = 0.25
-        self._rate_limit_max_interval = 0.6
+        self._rate_limit_min_interval = 0.7
+        self._rate_limit_max_interval = 1.0
 
         # ---- 带用户 cookie 的 session（用于操作自己的网盘）----
         self.auth_session = requests.Session()
@@ -120,7 +130,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         try:
             return response.json()
         except Exception as e:
-            content = response.text[:200] if response.text else "(empty)"
+            content = response.text[:400] if response.text else "(empty)"
             logger.warning(f"[115] JSON解析失败: {e}, 响应: {content}")
             return {
                 "state": False,
@@ -188,6 +198,11 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
                 "member_info": member_data,
             },
         }
+
+    def export_runtime_config(self) -> dict[str, Any]:
+        config = dict(self.config or {})
+        config["cookie"] = str(self.cookie or "")
+        return self.normalize_config(config)
 
     # ----------------------------------------------------------------
     #  分享浏览（使用空 session，不携带用户 cookie）
@@ -375,7 +390,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         """列出用户网盘目录内容"""
         list_merge = []
         offset = 0
-        limit = 50
+        limit = 1000
 
         while True:
             params = {

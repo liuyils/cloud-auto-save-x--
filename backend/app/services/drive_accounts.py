@@ -121,7 +121,7 @@ def probe_drive_account(db: Session, account_id: int) -> DriveAccount:
             account.runtime_status = 'active' if ok else 'inactive'
             account.last_error = None if ok else '驱动初始化失败'
             if ok:
-                config_snapshot = adapter.export_runtime_config()
+                config_snapshot = merge_runtime_account_config(account, adapter.export_runtime_config())
                 account.config_json = json.dumps(config_snapshot, ensure_ascii=False)
                 account.cookie = AdapterRegistry.serialize_config(account.drive_type, config_snapshot)
                 profile = _build_account_profile(adapter, account)
@@ -182,7 +182,7 @@ def sign_in_drive_account(db: Session, account_id: int) -> dict[str, Any]:
         raise bad_request("DRIVE_SIGNIN_UNSUPPORTED", "该网盘暂不支持签到")
     if not result.get("ok", True):
         raise bad_request("DRIVE_SIGNIN_FAILED", result.get("message") or "签到失败", detail=str(result.get("reward") or result.get("message") or ""))
-    config_snapshot = adapter.export_runtime_config()
+    config_snapshot = merge_runtime_account_config(account, adapter.export_runtime_config())
     if isinstance(config_snapshot, dict) and config_snapshot:
         account.config_json = json.dumps(config_snapshot, ensure_ascii=False)
         account.cookie = AdapterRegistry.serialize_config(account.drive_type, config_snapshot)
@@ -206,6 +206,19 @@ def resolve_drive_account_profile(account: DriveAccount) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return profile if isinstance(profile, dict) else {}
+
+
+def merge_runtime_account_config(account: DriveAccount, runtime_config: dict[str, Any] | None) -> dict[str, Any]:
+    current = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
+    merged = dict(current)
+    if isinstance(runtime_config, dict):
+        for key, value in runtime_config.items():
+            if value is None and key in merged:
+                continue
+            if isinstance(value, str) and not value.strip() and isinstance(merged.get(key), str) and str(merged.get(key) or "").strip():
+                continue
+            merged[key] = value
+    return AdapterRegistry.normalize_config(account.drive_type, merged)
 
 
 def extract_capacity_metrics(profile: dict[str, Any]) -> tuple[int | None, int | None, float | None]:

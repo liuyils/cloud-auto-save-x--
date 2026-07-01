@@ -48,6 +48,7 @@ _VIDEO_EXTS = {
     ".mpeg",
     ".3gp",
     ".cas",
+    ".zip"
 }
 
 

@@ -49,6 +49,7 @@ class Cloud189Adapter(BaseCloudDriveAdapter):
         "username": "",
         "password": "",
         "ssoncookie": "",
+        "302_path": "",
         "protocol": "pc",
         "name": "",
         "debug": False,
@@ -80,6 +81,15 @@ class Cloud189Adapter(BaseCloudDriveAdapter):
             "required": False,
             "secret": True,
             "placeholder": "ssoncookie",
+        },
+        {
+            "key": "302_path",
+            "label": "302代理基础路径",
+            "description": "302/STRM 生成使用的媒体根目录（网盘内路径）。",
+            "input_type": "text",
+            "required": True,
+            "secret": False,
+            "placeholder": "/",
         },
         {
             "key": "protocol",
@@ -2014,6 +2024,81 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             if ok:
                 result.append({"file_path": p_norm, "fid": str(parent_id)})
         return result
+
+    def resolve_download_by_path(self, file_path: str, user_agent: str = "") -> Dict[str, Any]:
+        self._ensure_login()
+        p_norm = re.sub(r"/{2,}", "/", f"/{file_path}".strip())
+        if p_norm == "/":
+            raise RuntimeError("路径不能为空")
+
+        parts = [x for x in p_norm.split("/") if x]
+        if not parts:
+            raise RuntimeError("路径不能为空")
+
+        parent_id = "0"
+        current: Optional[Dict[str, Any]] = None
+        for idx, name in enumerate(parts):
+            listed = self.ls_dir(parent_id)
+            if int(listed.get("code", 1) or 1) != 0:
+                raise RuntimeError(str(listed.get("message") or "获取目录失败"))
+            items = ((listed.get("data") or {}).get("list") or []) if isinstance(listed, dict) else []
+            found = None
+            for it in items:
+                if str(it.get("file_name") or "") == name:
+                    found = it
+                    break
+            if found is None:
+                lower = name.casefold()
+                for it in items:
+                    if str(it.get("file_name") or "").casefold() == lower:
+                        found = it
+                        break
+            if found is None:
+                raise RuntimeError(f"路径不存在: {name}")
+            current = found
+            is_dir = bool(found.get("dir"))
+            if idx < len(parts) - 1:
+                if not is_dir:
+                    raise RuntimeError(f"路径段是文件: {name}")
+                parent_id = str(found.get("fid") or "")
+                continue
+            if is_dir:
+                raise RuntimeError(f"目标是目录: {name}")
+
+        if not current:
+            raise RuntimeError("文件不存在")
+
+        file_id = str(current.get("fid") or "")
+        if not file_id:
+            raise RuntimeError("fileId 缺失")
+
+        headers: Dict[str, str] = {}
+        if str(user_agent or "").strip():
+            headers["User-Agent"] = str(user_agent).strip()
+
+        url = f"{self.HOST_URL}/api/open/file/getFileDownloadUrl.action"
+        j = self._request_json(
+            "GET",
+            url,
+            params={"fileId": file_id, "noCache": str(time.time())},
+            headers=headers,
+            timeout=20,
+        )
+        if not isinstance(j, dict):
+            raise RuntimeError("获取下载地址失败")
+        if j.get("errorCode") or j.get("errorMsg") or j.get("res_code") not in (None, 0, "0"):
+            raise RuntimeError(str(j.get("errorMsg") or j.get("msg") or j.get("message") or "获取下载地址失败"))
+        direct_url = str(j.get("fileDownloadUrl") or j.get("downloadUrl") or j.get("url") or "").strip()
+        if not direct_url:
+            payload = j.get("fileDownloadVO") if isinstance(j.get("fileDownloadVO"), dict) else {}
+            direct_url = str(payload.get("fileDownloadUrl") or payload.get("downloadUrl") or payload.get("url") or "").strip()
+        if not direct_url:
+            raise RuntimeError("下载地址为空")
+        return {
+            "url": direct_url,
+            "file_name": str(current.get("file_name") or ""),
+            "config": self.export_runtime_config(),
+        }
 
     def _create_batch_task(self, task_type: str, task_infos: List[Dict[str, Any]], target_folder_id: str, share_id: str = "") -> str:
         self._ensure_login()

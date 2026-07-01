@@ -27,6 +27,7 @@ _VIDEO_EXTS = {
     ".webm",
     ".m4v",
     ".cas",
+    ".zip"
 }
 
 

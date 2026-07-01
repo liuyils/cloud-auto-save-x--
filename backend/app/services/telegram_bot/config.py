@@ -12,6 +12,7 @@ class TelegramBotConfig:
     token: str
     user_id: int
     api_host: str
+    proxy_scheme: str
     proxy_host: str
     proxy_port: str
     proxy_auth: str
@@ -26,6 +27,7 @@ def load_telegram_bot_config(db: Session) -> TelegramBotConfig:
     token = str(config.get("TG_BOT_TOKEN") or "").strip()
     user_id_raw = str(config.get("TG_USER_ID") or "").strip()
     api_host = str(config.get("TG_API_HOST") or "").strip() or "https://api.telegram.org"
+    proxy_scheme = str(config.get("TG_PROXY_SCHEME") or "").strip()
     proxy_host = str(config.get("TG_PROXY_HOST") or "").strip()
     proxy_port = str(config.get("TG_PROXY_PORT") or "").strip()
     proxy_auth = str(config.get("TG_PROXY_AUTH") or "").strip()
@@ -37,6 +39,7 @@ def load_telegram_bot_config(db: Session) -> TelegramBotConfig:
         token=token,
         user_id=user_id,
         api_host=api_host.rstrip("/"),
+        proxy_scheme=proxy_scheme,
         proxy_host=proxy_host,
         proxy_port=proxy_port,
         proxy_auth=proxy_auth,

@@ -3,6 +3,16 @@ server {
     server_name _;
 
     client_max_body_size 50m;
+    more_clear_headers Server;
+    more_clear_headers X-Powered-By;
+    more_clear_headers X-AspNet-Version;
+    more_clear_headers X-AspNetMvc-Version;
+    more_clear_headers X-Runtime;
+    more_clear_headers X-Version;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy no-referrer always;
 
     root /usr/share/nginx/html;
     index index.html;
@@ -15,6 +25,33 @@ server {
     location ^~ /api/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
+
+        proxy_hide_header Server;
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header X-AspNet-Version;
+        proxy_hide_header X-AspNetMvc-Version;
+        proxy_hide_header X-Runtime;
+        proxy_hide_header X-Version;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+    }
+
+    location ^~ /dl/ {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_http_version 1.1;
+
+        proxy_hide_header Server;
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header X-AspNet-Version;
+        proxy_hide_header X-AspNetMvc-Version;
+        proxy_hide_header X-Runtime;
+        proxy_hide_header X-Version;
 
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

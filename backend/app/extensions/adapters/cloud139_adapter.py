@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -13,6 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.extensions.adapters.base_adapter import BaseCloudDriveAdapter
 
@@ -27,7 +31,9 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
     default_config = {
         "authorization": "",
         "cookie": "",
-        "phone": "",
+        "username": "",
+        "password": "",
+        "302_path": "",
         "debug": False,
     }
     config_fields = [
@@ -43,20 +49,38 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         {
             "key": "cookie",
             "label": "Cookie",
-            "description": "浏览器 Cookie 字符串；未填写 Authorization 时可作为备用登录态。",
+            "description": "mail 登录 Cookie；可选填写用于辅助账号密码登录。",
             "input_type": "textarea",
             "required": False,
             "secret": True,
-            "placeholder": "sid=...",
+            "placeholder": "RMKEY=...; Os_SSo_Sid=...",
         },
         {
-            "key": "phone",
+            "key": "username",
             "label": "手机号",
-            "description": "请求体里的账号信息，若 Authorization 内可解析出手机号可留空。",
+            "description": "139 登录手机号；账号密码登录时必填。",
             "input_type": "text",
             "required": False,
             "secret": False,
             "placeholder": "13800138000",
+        },
+        {
+            "key": "password",
+            "label": "密码",
+            "description": "139 账号密码登录使用的密码。",
+            "input_type": "password",
+            "required": False,
+            "secret": True,
+            "placeholder": "",
+        },
+        {
+            "key": "302_path",
+            "label": "302_path",
+            "description": "302/STRM 生成使用的媒体根目录（网盘内路径）。",
+            "input_type": "text",
+            "required": False,
+            "secret": False,
+            "placeholder": "/",
         },
         {
             "key": "debug",
@@ -75,6 +99,8 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
     PERSONAL_KD_NJS_URL = "https://personal-kd-njs.yun.139.com"
     CATALOG_V1 = f"{BASE_URL}/orchestration/personalCloud/catalog/v1.0"
     SIGN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    PASSWORD_LOGIN_AES_KEY_HEX = "73634235495062495331515373756c734e7253306c673d3d"
+    THIRD_LOGIN_INNER_AES_KEY_HEX = "7150714477323633586746674c337538"
     DEFAULT_HEADERS = {
         "Content-Type": "application/json",
         "x-yun-api-version": "v1",
@@ -89,6 +115,11 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         "Origin": "https://yun.139.com",
         "Referer": "https://yun.139.com/",
     }
+    MARKET_USER_AGENT = (
+        "Mozilla/5.0 (Linux; Android 11; M2012K10C Build/RP1A.200720.011; wv) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/90.0.4430.210 "
+        "Mobile Safari/537.36 MCloudApp/10.0.1"
+    )
 
     def __init__(
         self,
@@ -102,10 +133,14 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         self._cfg = dict(self.config or {})
         self._authorization = str(self._cfg.get("authorization") or "").strip()
         self._cookie_value = str(self._cfg.get("cookie") or "").strip()
-        self._phone = str(self._cfg.get("phone") or "").strip()
+        self._username = str(self._cfg.get("username") or self._cfg.get("phone") or "").strip()
+        self._password = str(self._cfg.get("password") or "").strip()
+        self._phone = self._username
         self._account_name = account_name or f"cloud139用户{self.index}"
         self._debug = bool(self._cfg.get("debug"))
         self._user_cache: dict[str, Any] | None = None
+        self._account = ""
+        self._user_domain_id = ""
 
         self._session = requests.Session()
         self._session.headers.update(dict(self.DEFAULT_HEADERS))
@@ -116,6 +151,10 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
     @staticmethod
     def _md5(value: str) -> str:
         return hashlib.md5(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _sha1_hex(value: str) -> str:
+        return hashlib.sha1(value.encode("utf-8")).hexdigest()
 
     @classmethod
     def _random_str(cls, n: int = 16) -> str:
@@ -159,6 +198,18 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             return ""
         return raw if re.match(r"^Basic\s+", raw, flags=re.I) else f"Basic {raw}"
 
+    def _decode_basic_auth_parts(self, value: str) -> list[str]:
+        auth = self._normalize_basic_auth(value)
+        if not auth:
+            return []
+        try:
+            raw = re.sub(r"^Basic\s+", "", auth, flags=re.I)
+            padded = raw + ("=" * ((4 - len(raw) % 4) % 4))
+            decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+        return decoded.split(":")
+
     def _is_basic_auth_str(self, value: str) -> bool:
         raw = str(value or "").strip()
         if not raw:
@@ -166,34 +217,392 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         return bool(re.match(r"^Basic\s+", raw, flags=re.I) or re.fullmatch(r"[A-Za-z0-9+/]+=*", raw))
 
     def _parse_phone_from_authorization(self, value: str) -> str:
-        auth = self._normalize_basic_auth(value)
-        if not auth:
-            return ""
-        try:
-            raw = re.sub(r"^Basic\s+", "", auth, flags=re.I)
-            padded = raw + ("=" * ((4 - len(raw) % 4) % 4))
-            decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
-            parts = decoded.split(":")
-            if len(parts) >= 2 and re.fullmatch(r"1\d{10}", parts[1] or ""):
-                return parts[1]
-        except Exception:
-            return ""
+        parts = self._decode_basic_auth_parts(value)
+        if len(parts) >= 2 and re.fullmatch(r"1\d{10}", parts[1] or ""):
+            return str(parts[1] or "")
         return ""
 
     def _apply_auth_headers(self) -> None:
+        self._session.headers.pop("Authorization", None)
+        self._session.headers.pop("Cookie", None)
         auth = self._normalize_basic_auth(self._authorization)
         if auth:
             self._session.headers["Authorization"] = auth
-            if not self._phone:
-                self._phone = self._parse_phone_from_authorization(auth)
+            parsed_phone = self._parse_phone_from_authorization(auth)
+            if parsed_phone:
+                self._username = parsed_phone
+                self._phone = parsed_phone
         elif self._cookie_value:
             self._session.headers["Cookie"] = self._cookie_value
         else:
             # 保持空会话，init 时再提示未配置认证信息。
             pass
 
+    @staticmethod
+    def _parse_cookie_string(cookie_value: str) -> dict[str, str]:
+        parsed: dict[str, str] = {}
+        for chunk in str(cookie_value or "").split(";"):
+            item = chunk.strip()
+            if not item or "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            parsed[key.strip()] = value.strip()
+        return parsed
+
+    @classmethod
+    def _merge_cookie_values(cls, *cookie_values: str) -> str:
+        merged: dict[str, str] = {}
+        for cookie_value in cookie_values:
+            merged.update(cls._parse_cookie_string(cookie_value))
+        return "; ".join(f"{key}={value}" for key, value in merged.items() if key and value)
+
+    def _update_cookie_value(self, cookie_value: str) -> None:
+        merged = self._merge_cookie_values(self._cookie_value, cookie_value)
+        if merged:
+            self._cookie_value = merged
+        self._apply_auth_headers()
+
     def _account_payload(self) -> dict[str, Any]:
-        return {"account": self._phone or "", "accountType": 1}
+        account = self._username or self._phone or self._parse_phone_from_authorization(self._authorization)
+        return {"account": account or "", "accountType": 1}
+
+    @staticmethod
+    def _pkcs7_pad(data: bytes, block_size: int) -> bytes:
+        padding = block_size - (len(data) % block_size)
+        return data + bytes([padding] * padding)
+
+    @staticmethod
+    def _pkcs7_unpad(data: bytes) -> bytes:
+        if not data:
+            raise ValueError("empty data")
+        padding = data[-1]
+        if padding <= 0 or padding > len(data):
+            raise ValueError("invalid padding")
+        if data[-padding:] != bytes([padding] * padding):
+            raise ValueError("invalid padding bytes")
+        return data[:-padding]
+
+    @staticmethod
+    def _aes_cbc_encrypt(plaintext: bytes, key: bytes, iv: bytes) -> bytes:
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        return encryptor.update(Cloud139Adapter._pkcs7_pad(plaintext, algorithms.AES.block_size // 8)) + encryptor.finalize()
+
+    @staticmethod
+    def _aes_cbc_decrypt(ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        return Cloud139Adapter._pkcs7_unpad(decryptor.update(ciphertext) + decryptor.finalize())
+
+    @staticmethod
+    def _aes_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+        cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+        decryptor = cipher.decryptor()
+        return Cloud139Adapter._pkcs7_unpad(decryptor.update(ciphertext) + decryptor.finalize())
+
+    @classmethod
+    def _sorted_json_stringify(cls, obj: Any) -> str:
+        if obj is None:
+            return "null"
+        if isinstance(obj, bool):
+            return "true" if obj else "false"
+        if isinstance(obj, (int, float)):
+            return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(obj, str):
+            return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(obj, list):
+            return "[" + ",".join(cls._sorted_json_stringify(item) for item in obj) + "]"
+        if isinstance(obj, tuple):
+            return "[" + ",".join(cls._sorted_json_stringify(item) for item in obj) + "]"
+        if isinstance(obj, dict):
+            items = []
+            for key in sorted(obj.keys()):
+                items.append(
+                    f"{json.dumps(str(key), ensure_ascii=False, separators=(',', ':'))}:{cls._sorted_json_stringify(obj[key])}"
+                )
+            return "{" + ",".join(items) + "}"
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+    def _encrypted_request(
+        self,
+        req_url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        aes_key_hex: str,
+    ) -> bytes:
+        try:
+            aes_key = binascii.unhexlify(aes_key_hex)
+        except (binascii.Error, ValueError) as exc:
+            raise RuntimeError("解码 AES Key 失败") from exc
+        payload_text = self._sorted_json_stringify(body)
+        iv = os.urandom(16)
+        encrypted = self._aes_cbc_encrypt(payload_text.encode("utf-8"), aes_key, iv)
+        request_payload = base64.b64encode(iv + encrypted).decode("utf-8")
+
+        self._throttle_request()
+        resp = self._session.request(
+            method="POST",
+            url=req_url,
+            data=request_payload,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        response_bytes = resp.content or b""
+        if response_bytes.startswith(b"{"):
+            return response_bytes
+        try:
+            decoded = base64.b64decode(response_bytes)
+        except Exception as exc:
+            raise RuntimeError("解析加密响应失败") from exc
+        if len(decoded) < 16:
+            raise RuntimeError("加密响应内容过短")
+        resp_iv = decoded[:16]
+        resp_ciphertext = decoded[16:]
+        return self._aes_cbc_decrypt(resp_ciphertext, aes_key, resp_iv)
+
+    def _password_login_headers(self, cguid: str) -> dict[str, str]:
+        referer = (
+            "https://mail.10086.cn/default.html?&s=1&v=0&u="
+            f"{base64.b64encode((self._username or '').encode('utf-8')).decode('utf-8')}"
+            f"&m=1&ec=S001&resource=indexLogin&clientid=1003&auto=on&cguid={cguid}&mtime=45"
+        )
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://mail.10086.cn",
+            "Referer": referer,
+            "User-Agent": self.DEFAULT_HEADERS["User-Agent"],
+        }
+        if self._cookie_value:
+            headers["Cookie"] = self._cookie_value
+        return headers
+
+    def _step1_password_login(self) -> str:
+        if not self._username or not self._password:
+            raise RuntimeError("账号密码不能为空")
+        hashed_password = self._sha1_hex(f"fetion.com.cn:{self._password}")
+        cguid = str(int(time.time() * 1000))
+        form = {
+            "UserName": self._username,
+            "passOld": "",
+            "auto": "on",
+            "Password": hashed_password,
+            "webIndexPagePwdLogin": "1",
+            "pwdType": "1",
+            "clientId": "1003",
+            "authType": "2",
+        }
+        self._throttle_request()
+        resp = self._session.request(
+            method="POST",
+            url="https://mail.10086.cn/Login/Login.ashx",
+            data=form,
+            headers=self._password_login_headers(cguid),
+            timeout=30,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+
+        cookie_pairs = [f"{cookie.name}={cookie.value}" for cookie in resp.cookies]
+        if cookie_pairs:
+            self._update_cookie_value("; ".join(cookie_pairs))
+
+        sid = ""
+        location = str(resp.headers.get("Location") or "")
+        if location:
+            match = re.search(r"sid=([^&]+)", location)
+            if match:
+                sid = str(match.group(1) or "")
+
+        if not sid:
+            sid = self._parse_cookie_string(self._cookie_value).get("Os_SSo_Sid", "")
+        if not sid:
+            raise RuntimeError("密码登录失败，未获取到 sid")
+        return sid
+
+    def _step2_get_artifact(self, sid: str) -> str:
+        cookie_map = self._parse_cookie_string(self._cookie_value)
+        rmkey = str(cookie_map.get("RMKEY") or "")
+        if not rmkey:
+            raise RuntimeError("密码登录失败，缺少 RMKEY")
+        cookie_header = self._cookie_value.strip() or f"RMKEY={rmkey}"
+        cguid = str(int(time.time() * 1000))
+        url = (
+            "https://smsrebuild1.mail.10086.cn/setting/s?"
+            f"func={quote('umc:getArtifact', safe='')}&sid={quote(sid, safe='')}&cguid={cguid}"
+        )
+        headers = {
+            "Host": "smsrebuild1.mail.10086.cn",
+            "Cookie": cookie_header,
+            "Content-Type": "text/xml; charset=utf-8",
+            "Accept-Encoding": "gzip",
+            "User-Agent": "okhttp/4.12.0",
+        }
+
+        self._throttle_request()
+        resp = self._session.request(
+            method="POST",
+            url=url,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.content or b""
+        artifact = ""
+        try:
+            payload = resp.json()
+            artifact = str((((payload or {}).get("var") or {}).get("artifact")) or "")
+        except Exception:
+            text = body.decode("utf-8", errors="ignore")
+            match = re.search(r'"artifact"\s*:\s*"([^"]+)"', text)
+            if match:
+                artifact = str(match.group(1) or "")
+        if not artifact:
+            raise RuntimeError("密码登录失败，未获取到 artifact")
+        return artifact
+
+    def _step3_third_party_login(self, artifact: str) -> str:
+        headers = {
+            "hcy-cool-flag": "1",
+            "x-huawei-channelSrc": "10246600",
+            "x-sdk-channelSrc": "",
+            "x-MM-Source": "0",
+            "x-UserAgent": "android|23116PN5BC|android15|1.2.6|||1440x3200|10246600",
+            "x-DeviceInfo": "4|127.0.0.1|5|1.2.6|Xiaomi|23116PN5BC||02-00-00-00-00-00|android 15|1440x3200|android|||",
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Host": "user-njs.yun.139.com",
+            "Accept-Encoding": "gzip",
+            "User-Agent": "okhttp/3.12.2",
+        }
+        request_body = {
+            "clientkey_decrypt": "l3TryM&Q+X7@dzwk)qP",
+            "clienttype": "886",
+            "cpid": "507",
+            "dycpwd": artifact,
+            "extInfo": {"ifOpenAccount": "0"},
+            "loginMode": "0",
+            "msisdn": self._username,
+            "pintype": "13",
+            "secinfo": self._sha1_hex(f"fetion.com.cn:{artifact}").upper(),
+            "version": "20250901",
+        }
+        decrypted = self._encrypted_request(
+            "https://user-njs.yun.139.com/user/thirdlogin",
+            request_body,
+            headers,
+            self.PASSWORD_LOGIN_AES_KEY_HEX,
+        )
+        try:
+            first_layer = json.loads(decrypted.decode("utf-8", errors="ignore"))
+        except Exception as exc:
+            raise RuntimeError("解析 thirdlogin 第一层响应失败") from exc
+        hex_inner = str((first_layer or {}).get("data") or "")
+        if not hex_inner:
+            raise RuntimeError("thirdlogin 响应缺少 data 字段")
+        try:
+            inner_ciphertext = binascii.unhexlify(hex_inner)
+            inner_key = binascii.unhexlify(self.THIRD_LOGIN_INNER_AES_KEY_HEX)
+            final_bytes = self._aes_ecb_decrypt(inner_ciphertext, inner_key)
+            final_payload = json.loads(final_bytes.decode("utf-8", errors="ignore"))
+        except Exception as exc:
+            raise RuntimeError("解析 thirdlogin 第二层响应失败") from exc
+
+        auth_token = str((final_payload or {}).get("authToken") or "")
+        account = str((final_payload or {}).get("account") or self._username or "")
+        user_domain_id = str((final_payload or {}).get("userDomainId") or "")
+        if not auth_token or not account:
+            raise RuntimeError("thirdlogin 响应缺少 authToken 或 account")
+        self._account = account
+        self._user_domain_id = user_domain_id
+        self._username = account
+        self._phone = account
+        auth_raw = base64.b64encode(f"pc:{account}:{auth_token}".encode("utf-8")).decode("utf-8")
+        self._authorization = self._normalize_basic_auth(auth_raw)
+        self._apply_auth_headers()
+        return self._authorization
+
+    def _login_with_password(self) -> str:
+        sid = self._step1_password_login()
+        artifact = self._step2_get_artifact(sid)
+        return self._step3_third_party_login(artifact)
+
+    def _refresh_authorization_token(self) -> str:
+        parts = self._decode_basic_auth_parts(self._authorization)
+        if len(parts) < 3:
+            raise RuntimeError("authorization 格式无效")
+        account = str(parts[1] or "")
+        token = str(parts[2] or "")
+        token_segments = token.split("|")
+        if len(token_segments) >= 4:
+            try:
+                expiration = int(token_segments[3])
+                if expiration - int(time.time() * 1000) > 15 * 24 * 60 * 60 * 1000:
+                    return self._normalize_basic_auth(self._authorization)
+                if expiration <= int(time.time() * 1000):
+                    raise RuntimeError("authorization 已过期")
+            except ValueError:
+                pass
+        req_body = (
+            f"<root><token>{token}</token><account>{account}</account>"
+            "<clienttype>656</clienttype></root>"
+        )
+        headers = {
+            "Content-Type": "application/xml",
+            "User-Agent": self.DEFAULT_HEADERS["User-Agent"],
+        }
+        self._throttle_request()
+        resp = self._session.request(
+            method="POST",
+            url="https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do",
+            data=req_body,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        text = resp.text or ""
+        return_code = re.search(r"<return>([^<]+)</return>", text)
+        refreshed_token = re.search(r"<token>([^<]+)</token>", text)
+        if not return_code or str(return_code.group(1) or "") != "0" or not refreshed_token:
+            raise RuntimeError("authorization 刷新失败")
+        new_token = str(refreshed_token.group(1) or "")
+        new_auth_raw = base64.b64encode(f"{parts[0]}:{account}:{new_token}".encode("utf-8")).decode("utf-8")
+        self._authorization = self._normalize_basic_auth(new_auth_raw)
+        self._account = account
+        if re.fullmatch(r"1\d{10}", account):
+            self._username = account
+            self._phone = account
+        self._apply_auth_headers()
+        return self._authorization
+
+    def _ensure_authenticated(self) -> None:
+        if self._authorization:
+            try:
+                self._refresh_authorization_token()
+                return
+            except Exception as exc:
+                self._debug_log_json("auth.refresh_failed", {"message": str(exc)})
+                self._apply_auth_headers()
+                if self._username and self._password:
+                    self._login_with_password()
+                return
+        if self._username and self._password:
+            self._login_with_password()
+            return
+        if self._cookie_value:
+            self._apply_auth_headers()
+            return
+        raise RuntimeError("未配置 authorization、cookie 或账号密码")
+
+    def _update_identity_from_user_info(self, info: dict[str, Any]) -> None:
+        account = str(info.get("account") or self._account or self._username or "").strip()
+        if account:
+            self._account = account
+            if re.fullmatch(r"1\d{10}", account):
+                self._username = account
+                self._phone = account
+        user_domain_id = str(info.get("userDomainId") or self._user_domain_id or "").strip()
+        if user_domain_id:
+            self._user_domain_id = user_domain_id
 
     def _request_json(
         self,
@@ -203,6 +612,7 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        cookies: dict[str, str] | None = None,
         timeout: int | float = 20,
     ) -> Any:
         self._throttle_request()
@@ -212,6 +622,58 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             headers=headers,
             params=params,
             json=json_body,
+            cookies=cookies,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise RuntimeError((resp.text or "").strip()[:300] or "响应解析失败") from exc
+
+    def _request_text(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        data: Any = None,
+        cookies: dict[str, str] | None = None,
+        timeout: int | float = 20,
+    ) -> str:
+        self._throttle_request()
+        resp = self._session.request(
+            method=method,
+            url=url,
+            headers=headers,
+            params=params,
+            data=data,
+            cookies=cookies,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.text or ""
+
+    def _market_request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        cookies: dict[str, str] | None = None,
+        timeout: int | float = 20,
+    ) -> Any:
+        self._throttle_request()
+        resp = requests.request(
+            method=method,
+            url=url,
+            headers=headers,
+            params=params,
+            json=json_body,
+            cookies=cookies,
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -298,6 +760,7 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         if not isinstance(data, dict):
             raise RuntimeError("获取 139 用户信息失败")
         self._user_cache = dict(data)
+        self._update_identity_from_user_info(self._user_cache)
         return dict(data)
 
     def _get_disk_info(self) -> dict[str, Any]:
@@ -309,16 +772,18 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         return data if isinstance(data, dict) else {}
 
     def init(self) -> Any:
-        if not (self._authorization or self._cookie_value):
+        if not (self._authorization or self._cookie_value or (self._username and self._password)):
             return False
         try:
+            self._ensure_authenticated()
             info = self._get_user_info()
         except Exception as exc:
             logger.warning("[cloud139] init failed: %s", exc)
             self.is_active = False
             return False
         self.is_active = True
-        self.nickname = str(info.get("nickName") or info.get("nickname") or self._phone or self._account_name)
+        self._update_identity_from_user_info(info)
+        self.nickname = str(info.get("nickName") or info.get("nickname") or self._username or self._account_name)
         return info
 
     def get_account_config(self) -> Dict[str, Any]:
@@ -339,13 +804,175 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             "drive_type": self.DRIVE_TYPE,
             "drive_name": self.DRIVE_NAME,
             "nickname": nickname,
-            "username": str(info.get("account") or self._phone or nickname),
+            "username": str(info.get("account") or self._username or nickname),
             "used_space": used_space,
             "total_space": total_space,
             "raw": {
                 "user_info": info or None,
                 "disk_info": disk_info or None,
             },
+        }
+
+    def export_runtime_config(self) -> dict[str, Any]:
+        return {
+            "authorization": self._normalize_basic_auth(self._authorization),
+            "cookie": self._cookie_value,
+            "username": self._username or self._phone,
+            "password": self._password,
+            "debug": self._debug,
+        }
+
+    def _market_headers(self, *, include_jwt: bool = False, jwt_token: str = "") -> dict[str, str]:
+        headers = {
+            "User-Agent": self.MARKET_USER_AGENT,
+            "Accept": "*/*",
+            "Host": "caiyun.feixin.10086.cn:7071",
+        }
+        if include_jwt and jwt_token:
+            headers["jwtToken"] = jwt_token
+        return headers
+
+    def _market_cookies(self, jwt_token: str = "") -> dict[str, str]:
+        cookies = {
+            "sensors_stay_time": str(int(time.time() * 1000)),
+        }
+        if jwt_token:
+            cookies["jwtToken"] = jwt_token
+        return cookies
+
+    def _extract_signin_reward(self, payload: Any) -> int:
+        if isinstance(payload, dict):
+            for key in ("cloudCount", "reward", "count", "total", "receive"):
+                value = payload.get(key)
+                try:
+                    return int(value) if value is not None else 0
+                except Exception:
+                    continue
+            for value in payload.values():
+                reward = self._extract_signin_reward(value)
+                if reward:
+                    return reward
+        elif isinstance(payload, list):
+            for item in payload:
+                reward = self._extract_signin_reward(item)
+                if reward:
+                    return reward
+        return 0
+
+    def _query_market_sso_token(self) -> str:
+        account = self._username or self._phone or self._parse_phone_from_authorization(self._authorization)
+        if not account:
+            raise RuntimeError("缺少账号信息，无法获取签到 ssoToken")
+        headers = {
+            "Authorization": self._normalize_basic_auth(self._authorization),
+            "User-Agent": self.MARKET_USER_AGENT,
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+            "Host": "orches.yun.139.com",
+        }
+        payload = self._market_request_json(
+            "POST",
+            "https://orches.yun.139.com/orchestration/auth-rebuild/token/v1.0/querySpecToken",
+            headers=headers,
+            json_body={"account": account, "toSourceId": "001005"},
+            timeout=20,
+        )
+        if not isinstance(payload, dict) or not bool(payload.get("success")):
+            raise RuntimeError(str((payload or {}).get("message") or "获取签到 ssoToken 失败"))
+        token = str(((payload.get("data") or {}).get("token")) or "")
+        if not token:
+            raise RuntimeError("签到 ssoToken 为空")
+        return token
+
+    def _query_market_jwt_token(self, sso_token: str) -> str:
+        payload = self._market_request_json(
+            "POST",
+            "https://caiyun.feixin.10086.cn/portal/auth/tyrzLogin.action",
+            headers=self._market_headers(),
+            params={"ssoToken": sso_token},
+            timeout=20,
+        )
+        code = -1
+        if isinstance(payload, dict):
+            try:
+                code = int(payload.get("code", -1))
+            except Exception:
+                code = -1
+        if not isinstance(payload, dict) or code != 0:
+            raise RuntimeError(str((payload or {}).get("msg") or "获取签到 jwtToken 失败"))
+        token = str(((payload.get("result") or {}).get("token")) or "")
+        if not token:
+            raise RuntimeError("签到 jwtToken 为空")
+        return token
+
+    def _query_market_signin_info(self, jwt_token: str) -> dict[str, Any]:
+        payload = self._market_request_json(
+            "GET",
+            "https://caiyun.feixin.10086.cn:7071/market/signin/page/info",
+            headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            params={"client": "app"},
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("查询签到状态失败")
+        return payload
+
+    def _do_market_signin(self, jwt_token: str) -> dict[str, Any]:
+        payload = self._market_request_json(
+            "GET",
+            "https://caiyun.feixin.10086.cn:7071/market/manager/commonMarketconfig/getByMarketRuleName",
+            headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            params={"marketName": "sign_in_3"},
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("签到失败")
+        return payload
+
+    def sign_in(self) -> Dict[str, Any]:
+        self._ensure_authenticated()
+        try:
+            info = self._get_user_info()
+        except Exception:
+            info = {}
+        if isinstance(info, dict):
+            self._update_identity_from_user_info(info)
+
+        sso_token = self._query_market_sso_token()
+        jwt_token = self._query_market_jwt_token(sso_token)
+
+        status_data = self._query_market_signin_info(jwt_token)
+        raw: dict[str, Any] = {"status": status_data}
+        if str(status_data.get("msg") or "") != "success":
+            raise RuntimeError(str(status_data.get("msg") or "查询签到状态失败"))
+
+        result = status_data.get("result") or {}
+        today_signed = bool(result.get("todaySignIn"))
+        if today_signed:
+            reward = self._extract_signin_reward(result)
+            return {
+                "supported": True,
+                "ok": True,
+                "reward": reward,
+                "message": "今日已签到",
+                "raw": raw,
+            }
+
+        signin_data = self._do_market_signin(jwt_token)
+        raw["signin"] = signin_data
+        if str(signin_data.get("msg") or "") != "success":
+            raise RuntimeError(str(signin_data.get("msg") or "签到失败"))
+
+        reward = self._extract_signin_reward(signin_data.get("result") or signin_data)
+        message = f"签到成功，获得 {reward} 云朵" if reward else "签到成功"
+        return {
+            "supported": True,
+            "ok": True,
+            "reward": reward,
+            "message": message,
+            "raw": raw,
         }
 
     def _parse_timestamp(self, value: Any) -> int:

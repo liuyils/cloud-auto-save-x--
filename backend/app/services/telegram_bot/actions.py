@@ -37,8 +37,10 @@ from app.services.drive_accounts import (
     get_drive_account,
     list_drive_accounts,
     probe_drive_account,
+    merge_runtime_account_config,
     refresh_drive_account_profiles,
     serialize_drive_account,
+    set_default_drive_account,
     set_default_drive_account,
     set_drive_account_enabled,
     sign_in_drive_account,
@@ -1275,7 +1277,14 @@ class TelegramBotActions:
         else:
             raise bad_request("DRIVE_ACCOUNT_AUTH_METHOD_MISMATCH", "认证方式不匹配")
         delete_auth_session(session_id)
-        update_drive_account(self.db, int(session.account_id), config=session.adapter.export_runtime_config())
+        account = self.db.get(DriveAccount, int(session.account_id))
+        if account is None:
+            raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
+        update_drive_account(
+            self.db,
+            int(session.account_id),
+            config=merge_runtime_account_config(account, session.adapter.export_runtime_config()),
+        )
         account = probe_drive_account(self.db, int(session.account_id))
         self.db.commit()
         self.db.refresh(account)

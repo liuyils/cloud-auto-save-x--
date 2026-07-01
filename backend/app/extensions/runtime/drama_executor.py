@@ -135,6 +135,7 @@ class DramaTaskExecutor:
         self.task_data = task_data
         self.log = log
         self.transfer_count = 0
+        self.changed_relative_dirs: set[str] = set()
 
     def _set_stage(self, stage: str | None) -> None:
         if self.log:
@@ -147,6 +148,22 @@ class DramaTaskExecutor:
     def _line(self, text: str = "") -> None:
         if self.log:
             self.log.line(text)
+
+    def _normalize_relative_dir(self, relative_path: str | None) -> str:
+        text = str(relative_path or "").strip().strip("/")
+        return text
+
+    def _join_relative_dir(self, parent_relative_path: str | None, child_name: str | None) -> str:
+        parent = self._normalize_relative_dir(parent_relative_path)
+        child = str(child_name or "").strip().strip("/")
+        if not parent:
+            return child
+        if not child:
+            return parent
+        return f"{parent}/{child}"
+
+    def _mark_changed_dir(self, relative_path: str | None) -> None:
+        self.changed_relative_dirs.add(self._normalize_relative_dir(relative_path))
 
     def _retry(
         self,
@@ -410,6 +427,7 @@ class DramaTaskExecutor:
         tree: Tree,
         parent_node: str,
         depth: int,
+        dest_relative_path: str,
     ) -> None:
         if depth > 3:
             return
@@ -438,13 +456,17 @@ class DramaTaskExecutor:
                         tree=tree,
                         parent_node=node_id,
                         depth=depth + 1,
+                        dest_relative_path=self._join_relative_dir(dest_relative_path, name),
                     )
                     continue
+                self._mark_changed_dir(dest_relative_path)
+                self._mark_changed_dir(self._join_relative_dir(dest_relative_path, name))
                 self._save_items(pwd_id=pwd_id, stoken=stoken, to_pdir_fid=dest_dir_fid, items=[raw])
                 tree.create_node(f"📁{name}", f"dir-new-{dest_dir_name}-{fid}", parent=parent_node)
                 continue
             if _normalize_name(name, ignore_extension) in dest_file_names:
                 continue
+            self._mark_changed_dir(dest_relative_path)
             self._save_items(pwd_id=pwd_id, stoken=stoken, to_pdir_fid=dest_dir_fid, items=[raw])
             tree.create_node(f"{name} -> {name}", f"file-{dest_dir_name}-{fid}", parent=parent_node)
 
@@ -547,11 +569,9 @@ class DramaTaskExecutor:
                                 movie_rename_template=str(self.task_data.get("guessit_tmdb_movie_rename_template") or "").strip() or None,
                                 trace_tag="drama_plan",
                             )
-                        if not target:
-                            continue
-                        file_name_re = target
+                        file_name_re = target or mr.sub(pattern, replace, origin_name)
                     except Exception:
-                        continue
+                        file_name_re = mr.sub(pattern, replace, origin_name)
                 else:
                     file_name_re = mr.sub(pattern, replace, origin_name)
             if mr.is_exists(file_name_re, dest_filename_list, ignore_extension and not _is_dir(raw)):
@@ -833,6 +853,7 @@ class DramaTaskExecutor:
         plan = self._plan_transfer(share_files=self._iter_files(root_files), dest_file_list=dest_file_list)
         self._line(f"待转存文件数: {len(plan)}")
         if plan:
+            self._mark_changed_dir("")
             self._set_stage("save_file")
             self._section("执行转存")
             saved_fids = self._save_with_saved_fids(pwd_id=str(pwd_id), stoken=str(stoken), dest_root_fid=dest_root_fid, plan=plan)
@@ -896,6 +917,8 @@ class DramaTaskExecutor:
                     existing_dest_fid = dest_dir_map.get(name)
                     if existing_dest_fid:
                         self.adapter.delete([existing_dest_fid])
+                    self._mark_changed_dir("")
+                    self._mark_changed_dir(name)
                     self._save_items(pwd_id=str(pwd_id), stoken=str(stoken), to_pdir_fid=dest_root_fid, items=[raw])
                     tree.create_node(f"📁{name}（重存）", f"dir-resave-{fid}", parent="root")
                     continue
@@ -914,13 +937,17 @@ class DramaTaskExecutor:
                         tree=tree,
                         parent_node=node_id,
                         depth=0,
+                        dest_relative_path=name,
                     )
                     continue
+                self._mark_changed_dir("")
+                self._mark_changed_dir(name)
                 self._save_items(pwd_id=str(pwd_id), stoken=str(stoken), to_pdir_fid=dest_root_fid, items=[raw])
                 tree.create_node(f"📁{name}", f"dir-new-{fid}", parent="root")
 
         if tree.size() <= 1:
             tree.create_node("无可转存文件", "empty", parent="root")
             self._line("无可转存文件")
+        setattr(tree, "_changed_relative_dirs", sorted(self.changed_relative_dirs))
         self._set_stage("end")
         return tree

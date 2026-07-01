@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from treelib import Tree
 
@@ -19,9 +20,11 @@ from app.extensions.runtime.execution_log import ExecutionLog
 from app.extensions.runtime.plugin_hooks import PluginHookRunner
 from app.extensions.runtime.plugin_loader import sync_plugin_definitions
 from app.extensions.runtime.plugin_registry import PluginRegistry
+from app.models.drive_account import DriveAccount
 from app.models.task import Task
 from app.models.task_execution import TaskExecution
 from app.services.drama_share_autoupdate import is_115_auto_update_task, resolve_drama_shareurl_update
+from app.services.drive_account_lsdir_scan import trigger_drive_account_lsdir_targeted_scan
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,38 @@ class ExecutionPayload:
 class TaskExecutor:
     def __init__(self, db: Session):
         self.db = db
+
+    def _trigger_targeted_lsdir_refresh(self, *, task: Task, task_data: dict[str, Any], adapter: Any, tree: Tree, log: ExecutionLog) -> None:
+        if str(task_data.get("task_type") or "") != "drama":
+            return
+        savepath = str(task_data.get("savepath") or "").strip()
+        if not savepath:
+            log.line("ls_dir 缓存增量刷新: 跳过（缺少 savepath）")
+            return
+        account_name = str(getattr(adapter, "account_name", "") or task_data.get("account_name") or "").strip()
+        if not account_name:
+            log.line("ls_dir 缓存增量刷新: 跳过（缺少 account_name）")
+            return
+        account_id = self.db.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
+        if account_id is None:
+            log.line("ls_dir 缓存增量刷新: 跳过（无法解析账号）")
+            return
+        changed_relative_dirs = getattr(tree, "_changed_relative_dirs", None)
+        relative_dir_paths = changed_relative_dirs if isinstance(changed_relative_dirs, list) else []
+        source = f"task_executor.drama.task_id={int(getattr(task, 'id', 0) or 0)}"
+        queued = trigger_drive_account_lsdir_targeted_scan(
+            int(account_id),
+            savepath=savepath,
+            relative_dir_paths=[str(item or "") for item in relative_dir_paths],
+            source=source,
+        )
+        if queued:
+            log.line(
+                "ls_dir 缓存增量刷新: 已触发"
+                f" account_id={int(account_id)} savepath={savepath} touched_dirs={len(relative_dir_paths)}"
+            )
+        else:
+            log.line("ls_dir 缓存增量刷新: 跳过（账号已有扫描任务运行中）")
 
     @staticmethod
     def _task_to_dict(task: Task) -> dict[str, Any]:
@@ -449,6 +484,17 @@ class TaskExecutor:
                     )
                 except Exception:
                     snapshot_row = None
+            if has_new_files:
+                try:
+                    self._trigger_targeted_lsdir_refresh(task=task, task_data=task_data, adapter=adapter, tree=tree, log=log)
+                except Exception as exc:
+                    logger.warning(
+                        "任务执行后触发 ls_dir 缓存增量刷新失败 task_id=%s task_uid=%s err=%s",
+                        task_id,
+                        str(getattr(task, "task_uid", "") or ""),
+                        str(exc),
+                    )
+                    log.line(f"WARN: ls_dir 缓存增量刷新触发失败 err={str(exc).strip() or type(exc).__name__}")
             log.set_stage("end")
             log.section("程序结束")
             finished_at_local = datetime.now()

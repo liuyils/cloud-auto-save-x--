@@ -1645,7 +1645,7 @@ async function autoResolveShareFolder(shareurl: string, runId: number) {
 
   const isVideoFile = (name: any) => {
     const s = String(name || '').toLowerCase()
-    return /\.(mp4|mkv|mov|m4v|avi|mpeg|ts|flv|wmv|webm|cas)$/.test(s)
+    return /\.(mp4|mkv|mov|m4v|avi|mpeg|ts|flv|wmv|webm|cas|zip)$/.test(s)
   }
 
   for (let depth = 0; depth < 12; depth += 1) {
