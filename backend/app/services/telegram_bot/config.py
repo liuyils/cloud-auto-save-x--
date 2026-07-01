@@ -12,6 +12,7 @@ class TelegramBotConfig:
     token: str
     user_id: int
     api_host: str
+    channel_enabled: bool
     proxy_scheme: str
     proxy_host: str
     proxy_port: str
@@ -19,7 +20,7 @@ class TelegramBotConfig:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.token and self.user_id)
+        return bool(self.channel_enabled and self.token and self.user_id)
 
 
 def load_telegram_bot_config(db: Session) -> TelegramBotConfig:
@@ -27,6 +28,10 @@ def load_telegram_bot_config(db: Session) -> TelegramBotConfig:
     token = str(config.get("TG_BOT_TOKEN") or "").strip()
     user_id_raw = str(config.get("TG_USER_ID") or "").strip()
     api_host = str(config.get("TG_API_HOST") or "").strip() or "https://api.telegram.org"
+    channel_enabled_map = config.get("__channel_enabled")
+    channel_enabled = True
+    if isinstance(channel_enabled_map, dict) and "telegram" in channel_enabled_map:
+        channel_enabled = bool(channel_enabled_map.get("telegram"))
     proxy_scheme = str(config.get("TG_PROXY_SCHEME") or "").strip()
     proxy_host = str(config.get("TG_PROXY_HOST") or "").strip()
     proxy_port = str(config.get("TG_PROXY_PORT") or "").strip()
@@ -39,6 +44,7 @@ def load_telegram_bot_config(db: Session) -> TelegramBotConfig:
         token=token,
         user_id=user_id,
         api_host=api_host.rstrip("/"),
+        channel_enabled=channel_enabled,
         proxy_scheme=proxy_scheme,
         proxy_host=proxy_host,
         proxy_port=proxy_port,

@@ -33,7 +33,7 @@ class TelegramBotManager:
     def __init__(self) -> None:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._config_signature: tuple[str, int, str, str, str, str] | None = None
+        self._config_signature: tuple[str, int, str, bool, str, str, str, str] | None = None
         self._client: TelegramBotClient | None = None
         self._handler: TelegramBotHandler | None = None
 
@@ -58,6 +58,8 @@ class TelegramBotManager:
             config.token,
             config.user_id,
             config.api_host,
+            config.channel_enabled,
+            config.proxy_scheme,
             config.proxy_host,
             config.proxy_port,
             config.proxy_auth,
