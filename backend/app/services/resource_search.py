@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -479,13 +479,10 @@ def fetch_task_suggestions(
     def net_search():
         try:
             def clean_search_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-                out = []
+                out: list[dict[str, Any]] = []
                 for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    if keyword not in item.get("title"):
-                        continue
-                    out.append(item)
+                    if isinstance(item, dict):
+                        out.append(item)
                 return out
             if not rows["net"].enabled:
                 return []
@@ -497,7 +494,7 @@ def fetch_task_suggestions(
             if isinstance(data, dict):
                 items = data.get("data") if isinstance(data.get("data"), list) else []
                 return clean_search_results(items)
-            return clean_search_results(items)
+            return []
         except Exception:
             return []
 
@@ -580,7 +577,10 @@ def fetch_task_suggestions(
     enabled_drive_types = set(
         str(x or "").strip()
         for x in db.execute(
-            select(DriveAccount.drive_type).where(DriveAccount.enabled.is_(True), DriveAccount.runtime_status == "active")
+            select(DriveAccount.drive_type).where(
+                DriveAccount.enabled.is_(True),
+                or_(DriveAccount.runtime_status == "active", DriveAccount.runtime_status.is_(None), DriveAccount.runtime_status == ""),
+            )
         )
         .scalars()
         .all()

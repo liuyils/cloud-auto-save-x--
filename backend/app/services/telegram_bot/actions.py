@@ -60,16 +60,20 @@ from app.services.openlist_client_factory import get_openlist_client
 from app.services.share_preview_batch import preview_share_batch
 from app.services.openlist_settings import get_or_create_openlist_setting, load_openlist_config, update_openlist_setting
 from app.services.resource_search import fetch_task_suggestions, list_sources, update_source
-from app.schemas.task_browse import SharePreviewBatchIn, SharePreviewIn
+from app.schemas.task_browse import DriveBrowseIn, SharePreviewBatchIn, SharePreviewIn
+from app.services.drive_browse import browse_drive_directory
 from app.services.sync_tasks import (
     browse_local_dir,
+    coerce_netdisk_path_to_base,
     create_sync_task,
     delete_sync_task,
     get_sync_task,
+    get_netdisk_sync_base_path,
     list_sync_execution_files,
     list_sync_executions,
     list_sync_tasks,
     update_sync_task,
+    validate_netdisk_sync_account,
 )
 from app.extensions.runtime.sync_executor import SyncExecutor
 from app.services.task_scheduler import get_or_create_task_scheduler_setting, update_task_scheduler_setting
@@ -404,6 +408,7 @@ def _task_execution_summary(execution: TaskExecution | None) -> dict[str, Any] |
 def _sync_execution_summary(execution: SyncExecution | None) -> dict[str, Any] | None:
     if execution is None:
         return None
+    stats = _loads(getattr(execution, "stats_json", None))
     return {
         "id": int(execution.id),
         "status": str(execution.status or ""),
@@ -412,7 +417,29 @@ def _sync_execution_summary(execution: SyncExecution | None) -> dict[str, Any] |
         "started_at": _dump_dt(execution.started_at),
         "finished_at": _dump_dt(execution.finished_at),
         "cancel_requested_at": _dump_dt(getattr(execution, "cancel_requested_at", None)),
+        "stats": stats,
+        "recent_events": list(stats.get("recent_events") or []) if isinstance(stats, dict) else [],
     }
+
+
+def _sync_endpoint_dict(db: Session, *, endpoint_type: str, path: str, account_id: int | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": str(endpoint_type or ""),
+        "path": str(path or ""),
+        "account_id": int(account_id) if account_id else None,
+    }
+    if str(endpoint_type or "") != "netdisk" or not account_id:
+        return payload
+    account = db.get(DriveAccount, int(account_id))
+    if account is None:
+        return payload
+    payload["account_name"] = str(getattr(account, "name", "") or "") or None
+    payload["drive_type"] = str(getattr(account, "drive_type", "") or "") or None
+    try:
+        payload["base_path"] = get_netdisk_sync_base_path(account)
+    except Exception:
+        payload["base_path"] = None
+    return payload
 
 
 def _task_to_dict(db: Session, task: Task) -> dict[str, Any]:
@@ -469,8 +496,18 @@ def _sync_task_to_dict(db: Session, task: SyncTask) -> dict[str, Any]:
         "uid": str(task.uid),
         "name": str(task.name or ""),
         "enabled": bool(task.enabled),
-        "source": {"type": str(task.source_type or ""), "path": str(task.source_path or "")},
-        "target": {"type": str(task.target_type or ""), "path": str(task.target_path or "")},
+        "source": _sync_endpoint_dict(
+            db,
+            endpoint_type=str(task.source_type or ""),
+            path=str(task.source_path or ""),
+            account_id=getattr(task, "source_account_id", None),
+        ),
+        "target": _sync_endpoint_dict(
+            db,
+            endpoint_type=str(task.target_type or ""),
+            path=str(task.target_path or ""),
+            account_id=getattr(task, "target_account_id", None),
+        ),
         "mode": str(task.mode or ""),
         "strategy": _loads(task.strategy_json),
         "addition": _loads(task.addition_json),
@@ -542,9 +579,8 @@ class TelegramBotActions:
 
     def run_task(self, task_id: int) -> dict[str, Any]:
         task = get_task(self.db, int(task_id))
+        self.db.close()
         execution = TaskExecutor(self.db).run_task(task)
-        self.db.commit()
-        self.db.refresh(execution)
         return _task_execution_summary(execution) or {}
 
     def list_task_executions(self, task_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
@@ -852,6 +888,29 @@ class TelegramBotActions:
             for item in items
         ]
 
+    def list_sync_netdisk_accounts(self) -> list[dict[str, Any]]:
+        rows = (
+            self.db.execute(select(DriveAccount).where(DriveAccount.enabled.is_(True)).order_by(DriveAccount.is_default.desc(), DriveAccount.id.asc()))
+            .scalars()
+            .all()
+        )
+        items: list[dict[str, Any]] = []
+        for account in rows:
+            try:
+                valid = validate_netdisk_sync_account(self.db, int(account.id))
+                base_path = get_netdisk_sync_base_path(valid)
+            except Exception:
+                continue
+            items.append(
+                {
+                    "id": int(valid.id),
+                    "name": str(valid.name or ""),
+                    "drive_type": str(valid.drive_type or ""),
+                    "base_path": base_path,
+                }
+            )
+        return items
+
     def list_drama_task_options(self) -> list[dict[str, Any]]:
         items = list_tasks_recent_executions(self.db, limit=1)
         return [
@@ -866,7 +925,14 @@ class TelegramBotActions:
         ]
 
     def get_sync_task_detail(self, sync_task_id: int) -> dict[str, Any]:
-        return _sync_task_to_dict(self.db, get_sync_task(self.db, int(sync_task_id)))
+        item = _sync_task_to_dict(self.db, get_sync_task(self.db, int(sync_task_id)))
+        latest_execution = item.get("latest_execution") or {}
+        execution_id = latest_execution.get("id")
+        if execution_id:
+            item["recent_files"] = self.list_sync_execution_files_summary(int(sync_task_id), int(execution_id), limit=5)
+        else:
+            item["recent_files"] = []
+        return item
 
     def toggle_sync_task(self, sync_task_id: int) -> dict[str, Any]:
         task = get_sync_task(self.db, int(sync_task_id))
@@ -891,9 +957,8 @@ class TelegramBotActions:
 
     def run_sync_task(self, sync_task_id: int) -> dict[str, Any]:
         task = get_sync_task(self.db, int(sync_task_id))
+        self.db.close()
         execution = SyncExecutor(self.db).run_sync_task(task)
-        self.db.commit()
-        self.db.refresh(execution)
         return _sync_execution_summary(execution) or {}
 
     def cancel_sync_task(self, sync_task_id: int) -> dict[str, Any] | None:
@@ -947,6 +1012,7 @@ class TelegramBotActions:
         if bool(account.enabled):
             account = set_drive_account_enabled(self.db, int(account_id), False)
         else:
+            self.db.rollback()
             account = probe_drive_account(self.db, int(account_id))
             if getattr(account, "runtime_status", None) == "active":
                 account.enabled = True
@@ -1111,7 +1177,7 @@ class TelegramBotActions:
             "paths": paths,
         }
 
-    def browse_sync_path(self, *, path_type: str, dir_path: str, max_items: int = 100) -> dict[str, Any]:
+    def browse_sync_path(self, *, path_type: str, dir_path: str, max_items: int = 100, account_id: int | None = None) -> dict[str, Any]:
         path_type = str(path_type or "").strip().lower()
         if path_type == "local":
             rel, exists, items, paths = browse_local_dir(dir_path)
@@ -1157,6 +1223,41 @@ class TelegramBotActions:
                 )
             items.sort(key=lambda x: (not bool(x.get("is_dir")), str(x.get("name") or "").lower()))
             return {"path_type": path_type, "dir_path": normalized, "exists": True, "items": items, "paths": paths}
+        if path_type == "netdisk":
+            if account_id in (None, 0):
+                raise bad_request("SYNC_NETDISK_ACCOUNT_INVALID", "请先选择网盘账号")
+            account = validate_netdisk_sync_account(self.db, int(account_id))
+            base_path = get_netdisk_sync_base_path(account)
+            scoped_path = coerce_netdisk_path_to_base(dir_path, base_path)
+            result = browse_drive_directory(
+                self.db,
+                DriveBrowseIn(dir_path=scoped_path, account_name=str(account.name or ""), max_items=int(max_items)),
+            )
+            current_path = str(result.dir_path or scoped_path)
+            items = [
+                {
+                    "fid": str(item.fid or ""),
+                    "name": str(item.name or ""),
+                    "path": coerce_netdisk_path_to_base(posixpath.join(current_path.rstrip("/") or "/", str(item.name or "")), base_path),
+                    "is_dir": bool(item.is_dir),
+                    "updated_at": item.updated_at,
+                    "size": item.size,
+                    "include_items": item.include_items,
+                }
+                for item in list(result.items or [])
+            ]
+            items.sort(key=lambda x: (not bool(x.get("is_dir")), str(x.get("name") or "").lower()))
+            return {
+                "path_type": path_type,
+                "dir_path": current_path,
+                "base_path": str(result.base_path or base_path),
+                "exists": bool(result.exists),
+                "account_id": int(account.id),
+                "account_name": str(account.name or ""),
+                "drive_type": str(account.drive_type or ""),
+                "items": items,
+                "paths": [{"fid": str(p.fid or ""), "name": str(p.name or "")} for p in list(result.paths or [])],
+            }
         raise ValueError("不支持的路径类型")
 
     def start_account_auth(self, account_id: int) -> dict[str, Any]:
@@ -1223,6 +1324,7 @@ class TelegramBotActions:
             config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
             config["refresh_token"] = str(data.get("refresh_token") or "")
             update_drive_account(self.db, account.id, config=config)
+            self.db.commit()
             account = probe_drive_account(self.db, account.id)
             self.db.commit()
             self.db.refresh(account)
@@ -1285,6 +1387,7 @@ class TelegramBotActions:
             int(session.account_id),
             config=merge_runtime_account_config(account, session.adapter.export_runtime_config()),
         )
+        self.db.commit()
         account = probe_drive_account(self.db, int(session.account_id))
         self.db.commit()
         self.db.refresh(account)

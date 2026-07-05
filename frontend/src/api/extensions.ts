@@ -62,7 +62,14 @@ export async function probeDriveAccount(accountId: number, options?: { silentToa
 }
 
 export async function signInDriveAccount(accountId: number) {
-  const { data } = await http.post(`/drive-accounts/${accountId}/sign-in`)
+  const { data } = await http.post(`/drive-accounts/${accountId}/sign-in`, null, {
+    params: { async: 1 },
+  })
+  return data as any
+}
+
+export async function getDriveAccountSignInJob(jobId: string) {
+  const { data } = await http.get(`/drive-accounts/sign-in-jobs/${jobId}`)
   return data as any
 }
 

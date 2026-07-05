@@ -17,30 +17,86 @@ from app.core.permissions import SYNC_READ, SYNC_RUN, SYNC_WRITE
 from app.db.session import SessionLocal, get_db
 from app.extensions.runtime.execution_log import ExecutionLog
 from app.extensions.runtime.sync_executor import SyncExecutor
+from app.models.drive_account import DriveAccount
 from app.models.sync_execution import SyncExecution
 from app.models.sync_task import SyncTask
 from app.models.sync_task_drama_link import SyncTaskDramaLink
-from app.schemas.sync_execution_files import SyncExecutionFileOut
+from app.schemas.task_browse import DriveBrowseIn, DriveBrowseOut
+from app.schemas.sync_execution_files import SyncExecutionFileOut, SyncExecutionFilePageOut
 from app.schemas.sync_task import SyncCancelIn, SyncExecutionOut, SyncRunIn, SyncTaskCreateIn, SyncTaskOut, SyncTaskUpdateIn
 from app.schemas.path_browse import PathBrowseIn, PathBrowseItemOut, PathBrowseOut, PathBrowsePathOut
 from app.services import audit
+from app.services.drive_browse import browse_drive_directory
 from app.services.sync_tasks import (
     browse_local_dir,
+    coerce_netdisk_path_to_base,
     create_sync_task,
     delete_sync_task,
     get_sync_task,
-    list_sync_execution_files,
+    get_netdisk_sync_base_path,
+    list_sync_execution_files_page,
     list_sync_executions,
     list_sync_tasks,
     update_sync_task,
+    validate_netdisk_sync_account,
 )
+from app.services.sync_execution_recovery import refresh_running_sync_execution
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _task_out(item: SyncTask, *, drama_task_uids: list[str] | None = None) -> SyncTaskOut:
+def _parse_min_started_at(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+    except Exception:
+        raise ApiError(code="SYNC_EXECUTION_STARTED_AT_INVALID", message="started_at 参数无效", http_status=400)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _build_account_map(db: Session, rows: list[SyncTask]) -> dict[int, dict[str, object]]:
+    account_ids: set[int] = set()
+    for item in rows:
+        for raw in (getattr(item, "source_account_id", None), getattr(item, "target_account_id", None)):
+            try:
+                if raw is not None:
+                    account_ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+    if not account_ids:
+        return {}
+    accounts = db.execute(select(DriveAccount).where(DriveAccount.id.in_(sorted(account_ids)))).scalars().all()
+    return {
+        int(item.id): {
+            "account_id": int(item.id),
+            "account_name": str(getattr(item, "name", "") or "").strip() or None,
+            "drive_type": str(getattr(item, "drive_type", "") or "").strip() or None,
+        }
+        for item in accounts
+    }
+
+
+def _endpoint_out(tp: str, path: str, account_id: int | None, account_map: dict[int, dict[str, object]]) -> dict[str, object]:
+    out: dict[str, object] = {"type": tp, "path": path}
+    if tp != "netdisk":
+        return out
+    info = account_map.get(int(account_id or 0), {}) if account_id is not None else {}
+    out["account_id"] = int(account_id) if account_id is not None else None
+    out["account_name"] = info.get("account_name")
+    out["drive_type"] = info.get("drive_type")
+    return out
+
+
+def _task_out(item: SyncTask, *, drama_task_uids: list[str] | None = None, account_map: dict[int, dict[str, object]] | None = None) -> SyncTaskOut:
+    account_map = account_map or {}
     strategy = {}
     if item.strategy_json:
         try:
@@ -61,8 +117,8 @@ def _task_out(item: SyncTask, *, drama_task_uids: list[str] | None = None) -> Sy
         uid=item.uid,
         name=item.name,
         enabled=item.enabled,
-        source={"type": item.source_type, "path": item.source_path},
-        target={"type": item.target_type, "path": item.target_path},
+        source=_endpoint_out(item.source_type, item.source_path, getattr(item, "source_account_id", None), account_map),
+        target=_endpoint_out(item.target_type, item.target_path, getattr(item, "target_account_id", None), account_map),
         mode=item.mode,
         strategy=strategy,
         drama_task_uids=list(drama_task_uids or []),
@@ -142,6 +198,9 @@ def post_cancel_sync_execution(
         )
         db.commit()
         db.refresh(execution)
+        refresh_running_sync_execution(db, execution, try_cancel=True)
+        db.commit()
+        db.refresh(execution)
 
     return _execution_out(execution)
 
@@ -155,7 +214,8 @@ def get_sync_tasks(current: CurrentUser = Depends(get_current_user), db: Session
         links = db.execute(select(SyncTaskDramaLink).where(SyncTaskDramaLink.sync_task_uid.in_(uids))).scalars().all()
         for it in links:
             mapping.setdefault(str(it.sync_task_uid), []).append(str(it.task_uid))
-    return [_task_out(t, drama_task_uids=mapping.get(str(t.uid), [])) for t in rows]
+    account_map = _build_account_map(db, rows)
+    return [_task_out(t, drama_task_uids=mapping.get(str(t.uid), []), account_map=account_map) for t in rows]
 
 
 @router.post("", response_model=SyncTaskOut, dependencies=[Depends(require_permissions(SYNC_WRITE))])
@@ -184,7 +244,7 @@ def post_sync_task(request: Request, payload: SyncTaskCreateIn, current: Current
     db.commit()
     db.refresh(task)
     linked = db.execute(select(SyncTaskDramaLink.task_uid).where(SyncTaskDramaLink.sync_task_uid == str(task.uid))).scalars().all()
-    return _task_out(task, drama_task_uids=[str(x) for x in linked if x])
+    return _task_out(task, drama_task_uids=[str(x) for x in linked if x], account_map=_build_account_map(db, [task]))
 
 
 @router.patch("/{sync_task_id:int}", response_model=SyncTaskOut, dependencies=[Depends(require_permissions(SYNC_WRITE))])
@@ -203,7 +263,7 @@ def patch_sync_task(request: Request, sync_task_id: int, payload: SyncTaskUpdate
     db.commit()
     db.refresh(task)
     linked = db.execute(select(SyncTaskDramaLink.task_uid).where(SyncTaskDramaLink.sync_task_uid == str(task.uid))).scalars().all()
-    return _task_out(task, drama_task_uids=[str(x) for x in linked if x])
+    return _task_out(task, drama_task_uids=[str(x) for x in linked if x], account_map=_build_account_map(db, [task]))
 
 
 @router.delete("/{sync_task_id:int}", dependencies=[Depends(require_permissions(SYNC_WRITE))])
@@ -225,20 +285,47 @@ def delete_sync_task_by_id(request: Request, sync_task_id: int, current: Current
 
 @router.get("/{sync_task_id:int}/executions", response_model=list[SyncExecutionOut], dependencies=[Depends(require_permissions(SYNC_READ))])
 def get_sync_task_executions(sync_task_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [_execution_out(e) for e in list_sync_executions(db, sync_task_id)]
+    rows = list_sync_executions(db, sync_task_id)
+    changed = False
+    for item in rows:
+        changed = refresh_running_sync_execution(db, item, try_cancel=True) or changed
+    if changed:
+        db.commit()
+    return [_execution_out(e) for e in rows]
 
 
 @router.get("/{sync_task_id:int}/executions/latest", response_model=SyncExecutionOut | None, dependencies=[Depends(require_permissions(SYNC_READ))])
 def get_sync_task_execution_latest(
     sync_task_id: int,
     max_log_chars: int = 0,
+    min_started_at: str | None = None,
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    rows = list_sync_executions(db, sync_task_id, limit=1)
+    threshold = _parse_min_started_at(min_started_at)
+    rows = list_sync_executions(db, sync_task_id, limit=20 if threshold else 1)
     if not rows:
         return None
-    out = _execution_out(rows[0])
+    target = None
+    for row in rows:
+        row_started_at = getattr(row, "started_at", None)
+        if threshold is not None:
+            if row_started_at is None:
+                continue
+            normalized_started = row_started_at
+            if normalized_started.tzinfo is None:
+                normalized_started = normalized_started.replace(tzinfo=timezone.utc)
+            if normalized_started < threshold:
+                continue
+        target = row
+        break
+    if target is None:
+        return None
+    changed = refresh_running_sync_execution(db, target, try_cancel=True)
+    if changed:
+        db.commit()
+        db.refresh(target)
+    out = _execution_out(target)
     if max_log_chars and out.run_log and len(out.run_log) > max_log_chars:
         out.run_log = out.run_log[-int(max_log_chars) :]
     return out
@@ -246,7 +333,7 @@ def get_sync_task_execution_latest(
 
 @router.get(
     "/{sync_task_id:int}/executions/{sync_execution_id:int}/files",
-    response_model=list[SyncExecutionFileOut],
+    response_model=SyncExecutionFilePageOut,
     dependencies=[Depends(require_permissions(SYNC_READ))],
 )
 def get_sync_execution_files(
@@ -257,21 +344,34 @@ def get_sync_execution_files(
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    rows = list_sync_execution_files(db, sync_task_id, sync_execution_id, offset=offset, limit=limit)
-    return [
-        SyncExecutionFileOut(
-            id=r.id,
-            sync_execution_id=r.sync_execution_id,
-            path=r.path,
-            action=r.action,
-            status=r.status,
-            size=r.size,
-            message=r.message,
-            updated_at=r.updated_at,
-            created_at=r.created_at,
-        )
-        for r in rows
-    ]
+    normalized_offset = max(0, int(offset))
+    normalized_limit = max(1, min(int(limit), 1000))
+    rows, total = list_sync_execution_files_page(
+        db,
+        sync_task_id,
+        sync_execution_id,
+        offset=normalized_offset,
+        limit=normalized_limit,
+    )
+    return SyncExecutionFilePageOut(
+        items=[
+            SyncExecutionFileOut(
+                id=r.id,
+                sync_execution_id=r.sync_execution_id,
+                path=r.path,
+                action=r.action,
+                status=r.status,
+                size=r.size,
+                message=r.message,
+                updated_at=r.updated_at,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ],
+        total=total,
+        offset=normalized_offset,
+        limit=normalized_limit,
+    )
 
 
 @router.post("/local/browse", response_model=PathBrowseOut, dependencies=[Depends(require_permissions(SYNC_READ))])
@@ -289,6 +389,25 @@ def post_local_browse(payload: PathBrowseIn, current: CurrentUser = Depends(get_
     ]
     out_paths = [PathBrowsePathOut(name=str(p["name"]), path=str(p["path"])) for p in paths]
     return PathBrowseOut(dir_path=str(rel), exists=bool(exists), paths=out_paths, items=out_items)
+
+
+@router.post("/netdisk/browse", response_model=DriveBrowseOut, dependencies=[Depends(require_permissions(SYNC_READ))])
+def post_netdisk_browse(payload: DriveBrowseIn, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)) -> DriveBrowseOut:
+    account_name = str(payload.account_name or "").strip()
+    if not account_name:
+        raise ApiError(code="SYNC_NETDISK_ACCOUNT_INVALID", message="请先选择网盘账号", http_status=400)
+    account = (
+        db.execute(select(DriveAccount).where(DriveAccount.enabled.is_(True), DriveAccount.name == account_name)).scalars().first()
+    )
+    if account is None:
+        raise ApiError(code="DRIVE_ACCOUNT_NOT_FOUND", message="指定账号不存在或不可用", http_status=404)
+    account = validate_netdisk_sync_account(db, int(account.id))
+    base_path = get_netdisk_sync_base_path(account)
+    scoped_payload = payload.model_copy(update={"dir_path": coerce_netdisk_path_to_base(payload.dir_path, base_path)})
+    result = browse_drive_directory(db, scoped_payload)
+    result.base_path = base_path
+    result.dir_path = coerce_netdisk_path_to_base(result.dir_path, base_path)
+    return result
 
 
 @router.post("/{sync_task_id:int}/run", response_model=SyncExecutionOut, dependencies=[Depends(require_permissions(SYNC_RUN))])
@@ -322,6 +441,7 @@ def post_run_sync_task(
             logger.debug("sync run rejected sync_task_id=%s running_execution_id=%s", int(sync_task_id), int(running.id))
         raise ApiError(code="SYNC_TASK_RUNNING", message="同步任务正在执行", http_status=409, detail=str(running.id))
     task = get_sync_task(db, sync_task_id)
+    db.close()
     execution = SyncExecutor(db).run_sync_task(task, strategy_override=override)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -331,19 +451,19 @@ def post_run_sync_task(
             str(getattr(execution, "status", "") or ""),
             str(getattr(execution, "stage", "") or ""),
         )
-    audit.write_audit_log(
-        db,
-        actor_user_id=current.user.id,
-        action="sync_task.run",
-        target_type="sync_task",
-        target_id=str(sync_task_id),
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        success=execution.status == "success",
-        detail=execution.message,
-    )
-    db.commit()
-    db.refresh(execution)
+    with SessionLocal() as adb:
+        audit.write_audit_log(
+            adb,
+            actor_user_id=current.user.id,
+            action="sync_task.run",
+            target_type="sync_task",
+            target_id=str(sync_task_id),
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            success=execution.status == "success",
+            detail=execution.message,
+        )
+        adb.commit()
     return _execution_out(execution)
 
 
@@ -354,6 +474,7 @@ def post_run_sync_task_stream(
     payload: SyncRunIn | None = None,
     current: CurrentUser = Depends(get_current_user_scoped),
 ):
+    actor_user_id = int(getattr(current.user, "id", 0) or 0)
     init_payload = {"sync_task_id": int(sync_task_id), "started_at": datetime.now().isoformat()}
     with SessionLocal() as adb:
         running = (
@@ -373,7 +494,7 @@ def post_run_sync_task_stream(
             raise ApiError(code="SYNC_TASK_RUNNING", message="同步任务正在执行", http_status=409, detail=str(running.id))
         audit.write_audit_log(
             adb,
-            actor_user_id=current.user.id,
+            actor_user_id=actor_user_id,
             action="sync_task.run.stream",
             target_type="sync_task",
             target_id=str(sync_task_id),
@@ -398,43 +519,40 @@ def post_run_sync_task_stream(
     override = payload.strategy.model_dump(mode="json") if payload and payload.strategy else None
 
     def worker() -> None:
-        with SessionLocal() as wdb:
-            log = ExecutionLog(emit_line=emit_line, emit_stage=emit_stage, emit_progress=emit_progress)
-            try:
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        "sync run(stream) start sync_task_id=%s user_id=%s ip=%s override=%s",
-                        int(sync_task_id),
-                        int(getattr(current.user, "id", 0) or 0),
-                        request.client.host if request.client else None,
-                        json.dumps(override, ensure_ascii=False) if override else None,
-                    )
+        log = ExecutionLog(emit_line=emit_line, emit_stage=emit_stage, emit_progress=emit_progress)
+        try:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "sync run(stream) start sync_task_id=%s user_id=%s ip=%s override=%s",
+                    int(sync_task_id),
+                    actor_user_id,
+                    request.client.host if request.client else None,
+                    json.dumps(override, ensure_ascii=False) if override else None,
+                )
+            with SessionLocal() as wdb:
                 wtask = get_sync_task(wdb, sync_task_id)
-                execution = SyncExecutor(wdb).run_sync_task(wtask, log=log, strategy_override=override)
-                wdb.commit()
-                wdb.refresh(execution)
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        "sync run(stream) finished sync_task_id=%s sync_execution_id=%s status=%s stage=%s",
-                        int(sync_task_id),
-                        int(getattr(execution, "id", 0) or 0),
-                        str(getattr(execution, "status", "") or ""),
-                        str(getattr(execution, "stage", "") or ""),
-                    )
-                q.put(("done", {"status": execution.status, "message": execution.message, "execution": _execution_out(execution).model_dump(mode="json")}))
-            except Exception as exc:
-                wdb.rollback()
-                message = getattr(exc, "message", None) or str(exc).strip() or type(exc).__name__
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        "sync run(stream) failed sync_task_id=%s err=%s",
-                        int(sync_task_id),
-                        message,
-                    )
-                q.put(
-                    (
-                        "done",
-                        {
+            execution = SyncExecutor(db=None).run_sync_task(wtask, log=log, strategy_override=override)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "sync run(stream) finished sync_task_id=%s sync_execution_id=%s status=%s stage=%s",
+                    int(sync_task_id),
+                    int(getattr(execution, "id", 0) or 0),
+                    str(getattr(execution, "status", "") or ""),
+                    str(getattr(execution, "stage", "") or ""),
+                )
+            q.put(("done", {"status": execution.status, "message": execution.message, "execution": _execution_out(execution).model_dump(mode="json")}))
+        except Exception as exc:
+            message = getattr(exc, "message", None) or str(exc).strip() or type(exc).__name__
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "sync run(stream) failed sync_task_id=%s err=%s",
+                    int(sync_task_id),
+                    message,
+                )
+            q.put(
+                (
+                    "done",
+                    {
                             "status": "failed",
                             "message": message,
                             "execution": {
@@ -448,11 +566,11 @@ def post_run_sync_task_stream(
                                 "stats": {},
                                 "message": message,
                             },
-                        },
-                    )
+                    },
                 )
-            finally:
-                q.put(("done_sentinel", done_sentinel))
+            )
+        finally:
+            q.put(("done_sentinel", done_sentinel))
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()

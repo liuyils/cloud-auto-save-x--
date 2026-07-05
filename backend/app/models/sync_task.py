@@ -18,8 +18,10 @@ class SyncTask(Base):
 
     source_type: Mapped[str] = mapped_column(String(16), nullable=False)
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     target_type: Mapped[str] = mapped_column(String(16), nullable=False)
     target_path: Mapped[str] = mapped_column(Text, nullable=False)
+    target_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     mode: Mapped[str] = mapped_column(String(16), nullable=False, server_default="one_way")
     strategy_json: Mapped[str | None] = mapped_column(Text, nullable=True)

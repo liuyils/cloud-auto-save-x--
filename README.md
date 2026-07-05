@@ -33,10 +33,10 @@
 网盘自动转存（Cloud Auto Save X 简称 CASX）是一个基于 FastAPI + Vue3 的 Web 应用，提供网盘自动转存功能，可以帮助你：
 
 - 🔄 **自动转存**：定时或自动（根据节目状态和任务进度）运行，自动转存各种网盘分享链接中的文件
-- 🔄 **数据同步**：基于OpenList实现的多网盘数据同步和网盘与NAS本地的数据同步
+- 🔄 **数据同步**：支持 OpenList、网盘直连、NAS 本地目录等多种同步方式，适合多网盘与本地资料库统一管理
 - 📝 **智能规则**：在为手动配置重命名规则并且配置TMDB配置时，支持自动识别-重命名
 - 🧩 **文件过滤**：通过过滤规则排除不需要的文件或文件夹，支持高级过滤功能
-- 📊 **任务管理**：支持多任务管理，支持全局统一设置及单任务独立设置，支持任务筛选和排序
+- 📊 **任务管理**：支持多任务管理，支持全局统一设置及单任务独立设置，支持任务筛选、排序、暂停、停止、继续等操作
 - 🔍 **资源搜索**：智能搜索网盘资源，自动识别链接可用性，自动定位到分享目录
 - 🎬 **影视发现**：浏览豆瓣热门影视榜单，一键快速创建任务，智能填充配置
 - 📅 **追剧日历**：追踪节目播出时间，了解转存进度，支持海报视图和日历视图
@@ -44,7 +44,8 @@
 - 🔔 **通知推送**：支持多个通知推送渠道，及时了解转存状态
 - 🔌 **插件系统**：支持多种插件扩展功能，包括媒体库局部刷新、下载任务推送、strm 文件生成等
 - 🔄 **自动修复异常任务**：自动识别并修复异常任务，如分享链接失效、账号被限流等
-- 🔄 **STRM 302直连与反代**: 支持生成302直连STRM，支持飞牛影视反代（其它系统会陆续适配）
+- 🔄 **多网盘复制与秒传加速**：支持网盘到网盘、网盘到本地、本地到网盘的复制，并自动为后续分发准备秒传数据
+- 🔄 **STRM 302直连与反代**: 支持生成302直连STRM，支持飞牛影视反代，并可结合多账号自动负载与 CAS 数据实现更顺滑的直连体验
 
 ## 核心功能
 
@@ -52,15 +53,15 @@
 
 | 网盘名称  | 签到 | 302 |
 |:-----:|:--:|:---:|
-| 夸克网盘  | ✅  | ❌  |
+| 夸克网盘  | ✅  | ✅  |
 | 天翼云盘  | ✅ | ✅  |
 | 百度网盘  | ✅ | ❌  |
 | 阿里云盘  | ❌ | ❌ |
 | 115网盘 | ❌ | ✅ |
 | 123网盘 | ❌ | ❌ |
-| UC网盘  | ❌ | ❌ |
+| UC网盘  | ❌ | ✅ |
 | 迅雷网盘  | ❌ | ❌ |
-| 移动云盘  | ❌ | ✅ |
+| 移动云盘  | ✅ | ✅ |
 | 光鸭云盘  | ❌ | ❌ |
 
 ### 自动转存
@@ -72,12 +73,37 @@
 - 支持自动解压压缩包（仅限夸克高级会员）
 - 支持一次性转存任务
 
-### 反代
+### 数据同步
+
+- 支持 OpenList、网盘直连、本地目录等多种同步端点
+- 支持网盘与网盘、网盘与 NAS、本地资料库之间的数据同步
+- 支持同步任务统一管理，便于查看进度、执行状态和异常信息
+- 适合把常用网盘内容同步到本地媒体库，或在多个网盘之间建立副本
+
+### 网盘复制与秒传加速
+
+- 支持本地到网盘、网盘到本地、网盘到网盘的文件复制
+- 支持流式复制与下载复制两种方式，可按场景选择速度优先或空间优先
+- 支持 115、天翼云盘、移动云盘等账号间更高效的同盘复制体验
+- 复制完成后会自动准备可复用的秒传数据，方便后续把同一文件快速分发到其他网盘
+- 即使文件先落到本地或临时目录，也能继续为后续上传准备可复用的数据
+
+### CAS 数据任务
+
+- 支持按账号扫描 `302_path` 下的视频文件，批量生成 CAS 数据
+- 已生成的数据可直接服务于 302 反代、预览和多网盘分发场景
+- 支持任务创建、暂停、停止、继续和查看明细进度
+- 任务状态会持久保存，服务重启或中断后可继续处理未完成任务
+- 适合首次接入 302 反代时做一次性预热，也适合后续按需补全
+
+### 多网盘 302 与智能反代
 
 - 支持飞牛影视反代（其它系统会陆续适配）
 - 当飞牛挂载本地资源时，自动识别内外网，如果网盘中同样存储对应资源，自动切换到网盘资源进行302直连
 - 智能负载策略，根据网盘负载情况智能切换到不同网盘进行302直连（需要网盘中有资源）
-- 预览功能：多网盘自动负载无需手动同步，配合cas能力实现主网盘有资源，子网盘无需任何操作即可实现302直连反代
+- 支持同类型多账号自动负载，减少单账号压力，提升预览可用性
+- 多网盘自动负载无需手动同步，配合 CAS 能力实现主网盘有资源、子网盘少操作甚至免操作即可实现302直连反代
+- 配合 STRM 使用时，可进一步提升媒体库预览和播放体验
 
 注：不建议将反代端口直接暴露给公网，可能存在安全风险。建议搭配Web反代服务使用。
 
@@ -129,10 +155,88 @@ services:
 | `PORT`           | `5115`     | 管理后台/302端口                       |
 | `REVERSE_PORT`   | `5225`     | 反代端口                       |
 | `DEBUG`          | `0`        | 开启调试模式，打印更多日志信息 |
+| `DB_DRIVER`      | `sqlite3`  | 数据库驱动，可选 `sqlite3` / `mysql` |
+| `DATABASE_URL`   | 空         | 完整数据库连接串，配置后优先级最高 |
+| `SQLITE_PATH`    | `./data/app.db` | SQLite 数据库文件路径 |
+| `APP_DATA_DIR`   | `./data`   | 项目运行数据目录，缓存等文件会落在这里 |
+| `DB_HOST`        | `127.0.0.1`| MySQL 主机地址，仅 `DB_DRIVER=mysql` 时生效 |
+| `DB_PORT`        | `3306`     | MySQL 端口，仅 `DB_DRIVER=mysql` 时生效 |
+| `DB_NAME`        | `xxm`      | MySQL 数据库名，仅 `DB_DRIVER=mysql` 时生效 |
+| `DB_USER`        | `root`     | MySQL 用户名，仅 `DB_DRIVER=mysql` 时生效 |
+| `DB_PASSWORD`    | 空         | MySQL 密码，仅 `DB_DRIVER=mysql` 时生效 |
+| `DB_CHARSET`     | `utf8mb4`  | MySQL 字符集，仅 `DB_DRIVER=mysql` 时生效 |
 | `DRAMA_RUNTIME_RETRY_MAX_ATTEMPTS`        | `0`        | 最大重试次数，默认3次，0表示不重试 |
 | `DRAMA_RUNTIME_RETRY_BACKOFF_SECONDS`        | `1`        | 重试延迟时间，默认1秒 |
 | `DRAMA_RUNTIME_RETRY_MAX_BACKOFF_SECONDS`        | `8`        | 最大重试延迟时间，默认8秒 |
 | `DRAMA_RUNTIME_RETRY_JITTER_RATIO`        | `0.2`        | 重试延迟随机化比例，默认0.2 |
+
+### 使用 MySQL
+
+项目默认使用 `sqlite3`。如果需要切换到 MySQL，有两种配置方式：
+
+1. 直接配置完整连接串：
+
+```env
+DB_DRIVER=mysql
+DATABASE_URL=mysql+pymysql://root:your_password@127.0.0.1:3306/xxm?charset=utf8mb4
+APP_DATA_DIR=./data
+```
+
+2. 使用分项配置：
+
+```env
+DB_DRIVER=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_NAME=xxm
+DB_USER=root
+DB_PASSWORD=your_password
+DB_CHARSET=utf8mb4
+APP_DATA_DIR=./data
+```
+
+说明：
+
+- `DATABASE_URL` 优先级最高，配置后会覆盖 `DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD`
+- `APP_DATA_DIR` 是项目运行数据目录，不是 MySQL 数据文件目录
+- 首次切换到 MySQL 前请先手动创建数据库，例如 `CREATE DATABASE xxm CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
+- 配置完成后请执行数据库迁移，再启动服务
+
+如果使用 `docker-compose`，可以这样写：
+
+```yaml
+name: cloud-auto-save-x
+services:
+  cloud-auto-save-x:
+    image: ozoo0/cloud-auto-save-x:latest
+    container_name: cloud-auto-save-x
+    network_mode: bridge
+    ports:
+      - 5115:5115
+      - 5225:5225
+    restart: unless-stopped
+    environment:
+      DB_DRIVER: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_NAME: xxm
+      DB_USER: root
+      DB_PASSWORD: your_password
+      DB_CHARSET: utf8mb4
+      APP_DATA_DIR: /app/backend/data
+    volumes:
+      - ./cloud-auto-save-x/data:/app/backend/data
+      - ./cloud-auto-save-x/media:/media
+      - ./cloud-auto-save-x/strm:/strm
+      - ./cloud-auto-save-x/nasfile:/app/backend/data/sync/nasfile
+```
+
+如果是源码运行，请在 `backend/.env` 中写入上述配置，然后执行：
+
+```shell
+cd backend
+alembic upgrade head
+```
 
 
 

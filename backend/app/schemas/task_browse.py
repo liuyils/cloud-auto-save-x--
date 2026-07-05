@@ -102,6 +102,7 @@ class DriveBrowseOut(BaseModel):
     account_name: str
     drive_type: str | None = None
     dir_path: str
+    base_path: str | None = None
     exists: bool = True
     pdir_fid: str | None = None
     items: list[DriveBrowseItemOut] = []

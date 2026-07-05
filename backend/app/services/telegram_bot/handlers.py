@@ -78,9 +78,13 @@ TASK_FIELDS: list[dict[str, Any]] = [
 SYNC_FIELDS: list[dict[str, Any]] = [
     {"key": "name", "label": "同步名称", "type": "str", "default": ""},
     {"key": "enabled", "label": "启用同步", "type": "bool", "default": True, "editor": False},
-    {"key": "source.type", "label": "源类型", "type": "enum", "options": ["local", "openlist"], "default": "local"},
+    {"key": "source.type", "label": "源类型", "type": "enum", "options": ["local", "openlist", "netdisk"], "default": "local"},
+    {"key": "source.__account__", "label": "源账号", "type": "action", "default": "", "display_key": "source.account_name", "transient": True},
+    {"key": "source.account_id", "label": "源账号ID", "type": "int", "default": None, "editor": False},
     {"key": "source.path", "label": "源路径", "type": "str", "default": ""},
-    {"key": "target.type", "label": "目标类型", "type": "enum", "options": ["local", "openlist"], "default": "openlist"},
+    {"key": "target.type", "label": "目标类型", "type": "enum", "options": ["local", "openlist", "netdisk"], "default": "openlist"},
+    {"key": "target.__account__", "label": "目标账号", "type": "action", "default": "", "display_key": "target.account_name", "transient": True},
+    {"key": "target.account_id", "label": "目标账号ID", "type": "int", "default": None, "editor": False},
     {"key": "target.path", "label": "目标路径", "type": "str", "default": ""},
     {"key": "mode", "label": "同步模式", "type": "enum", "options": ["one_way", "two_way"], "default": "one_way"},
     {"key": "strategy.overwrite", "label": "允许覆盖", "type": "bool", "default": False},
@@ -1050,6 +1054,37 @@ class TelegramBotHandler:
         save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, scene="task_account_selector", step="idle", context=ctx, last_message_id=mid)
         db.commit()
 
+    def _show_sync_account_selector(
+        self,
+        db: Session,
+        chat_id: int,
+        *,
+        endpoint: str,
+        message_id: int | None = None,
+    ) -> None:
+        session = load_session_data(db, chat_id=chat_id, user_id=self.config.user_id)
+        ctx = dict(session.context or {})
+        draft = dict(ctx.get("draft") or {})
+        endpoint = "source" if endpoint == "source" else "target"
+        current_id = int(_get_nested(draft, f"{endpoint}.account_id") or 0)
+        options = self._actions(db).list_sync_netdisk_accounts()
+        rows: list[list[dict[str, str]]] = []
+        for idx, item in enumerate(options):
+            mark = "✓" if current_id and current_id == int(item.get("id") or 0) else "○"
+            text = f"{mark} {str(item.get('name') or '')} · {str(item.get('base_path') or '/')}"
+            rows.append([button(text[:56], "ssel", endpoint, "pick", idx)])
+        rows.append([button("✏️ 返回编辑器", "ssel", endpoint, "back"), button("🏠 首页", "home")])
+        lines = [
+            f"选择{ '源' if endpoint == 'source' else '目标' }端网盘账号",
+            f"当前: {str(_get_nested(draft, f'{endpoint}.account_name') or '-')}",
+            "仅显示已启用且已配置 302_path 的 netdisk 账号。",
+        ]
+        mid = self._edit_or_send(chat_id, "\n".join(lines), message_id=message_id or session.last_message_id, reply_markup=keyboard(rows))
+        ctx["sync_account_selector_endpoint"] = endpoint
+        ctx["sync_account_selector_options"] = options
+        save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, scene="sync_account_selector", step="idle", context=ctx, last_message_id=mid)
+        db.commit()
+
     def _show_task_magic_rule_selector(self, db: Session, chat_id: int, *, message_id: int | None = None) -> None:
         session = load_session_data(db, chat_id=chat_id, user_id=self.config.user_id)
         ctx = dict(session.context or {})
@@ -1376,12 +1411,15 @@ class TelegramBotHandler:
         ctx = dict(session.context or {})
         draft = dict(ctx.get("draft") or {})
         path_type = str(_get_nested(draft, field.replace(".path", ".type")) or "")
+        account_id = _get_nested(draft, field.replace(".path", ".account_id"))
+        account_name = str(_get_nested(draft, field.replace(".path", ".account_name")) or "").strip()
         browse_key = f"browse_path:{field}"
         browse_path = str(ctx.get(browse_key) or _get_nested(draft, field) or ("" if path_type == "local" else "/"))
-        payload = self._actions(db).browse_sync_path(path_type=path_type, dir_path=browse_path, max_items=20)
+        payload = self._actions(db).browse_sync_path(path_type=path_type, dir_path=browse_path, max_items=20, account_id=account_id)
         rows: list[list[dict[str, str]]] = []
         dir_path = str(payload.get("dir_path") or "")
-        is_root = dir_path in {"", "/"}
+        base_path = str(payload.get("base_path") or "")
+        is_root = dir_path in {"", "/"} or (base_path and dir_path == base_path)
         if not is_root:
             rows.append([button("⬆️ 上一级", "brw", "sync", "up")])
         if not (path_type == "local" and dir_path == ""):
@@ -1397,6 +1435,10 @@ class TelegramBotHandler:
             f"类型: {path_type}",
             f"路径: {dir_path or '/'}",
         ]
+        if path_type == "netdisk":
+            text_lines.append(f"账号: {account_name or '-'}")
+            if base_path:
+                text_lines.append(f"302_path: {base_path}")
         if path_type == "local" and dir_path == "":
             text_lines.append("本地根目录仅用于浏览，请继续进入子目录后再选择。")
         if not payload.get("exists"):
@@ -1853,6 +1895,9 @@ class TelegramBotHandler:
             return
         if head == "asel":
             self._dispatch_task_account_selector(db, chat_id, message_id, parts[1:])
+            return
+        if head == "ssel":
+            self._dispatch_sync_account_selector(db, chat_id, message_id, parts[1:])
             return
         if head == "rsel":
             self._dispatch_task_magic_rule_selector(db, chat_id, message_id, parts[1:])
@@ -2439,7 +2484,18 @@ class TelegramBotHandler:
             if action == "up":
                 draft = dict(ctx.get("draft") or {})
                 path_type = str(_get_nested(draft, field.replace(".path", ".type")) or "")
-                ctx[browse_key] = _local_parent_path(current_path) if path_type == "local" else _remote_parent_path(current_path)
+                if path_type == "netdisk":
+                    payload = self._actions(db).browse_sync_path(
+                        path_type=path_type,
+                        dir_path=current_path,
+                        max_items=20,
+                        account_id=_get_nested(draft, field.replace(".path", ".account_id")),
+                    )
+                    base_path = str(payload.get("base_path") or "/")
+                    parent_path = _remote_parent_path(current_path)
+                    ctx[browse_key] = base_path if parent_path == "/" or parent_path == current_path else parent_path
+                else:
+                    ctx[browse_key] = _local_parent_path(current_path) if path_type == "local" else _remote_parent_path(current_path)
                 save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, context=ctx)
                 db.commit()
                 self._show_sync_path_browser(db, chat_id, field=field, message_id=message_id)
@@ -2448,7 +2504,12 @@ class TelegramBotHandler:
                 idx = int(parts[2]) if len(parts) > 2 else -1
                 draft = dict(ctx.get("draft") or {})
                 path_type = str(_get_nested(draft, field.replace(".path", ".type")) or "")
-                payload = self._actions(db).browse_sync_path(path_type=path_type, dir_path=current_path, max_items=20)
+                payload = self._actions(db).browse_sync_path(
+                    path_type=path_type,
+                    dir_path=current_path,
+                    max_items=20,
+                    account_id=_get_nested(draft, field.replace(".path", ".account_id")),
+                )
                 items = list(payload.get("items") or [])
                 if idx < 0 or idx >= len(items):
                     raise ValueError("目录项不存在")
@@ -2768,6 +2829,39 @@ class TelegramBotHandler:
             extras={k: v for k, v in ctx.items() if k != "draft"},
         )
 
+    def _dispatch_sync_account_selector(self, db: Session, chat_id: int, message_id: int, parts: list[str]) -> None:
+        session = load_session_data(db, chat_id=chat_id, user_id=self.config.user_id)
+        ctx = dict(session.context or {})
+        draft = dict(ctx.get("draft") or {})
+        endpoint = str(parts[0] or ctx.get("sync_account_selector_endpoint") or "source") if parts else str(ctx.get("sync_account_selector_endpoint") or "source")
+        endpoint = "source" if endpoint == "source" else "target"
+        action = parts[1] if len(parts) > 1 else "back"
+        options = list(ctx.get("sync_account_selector_options") or [])
+        if action == "pick":
+            idx = int(parts[2]) if len(parts) > 2 and str(parts[2]).isdigit() else -1
+            if idx < 0 or idx >= len(options):
+                raise ValueError("账号不存在")
+            item = dict(options[idx] or {})
+            _set_nested(draft, f"{endpoint}.account_id", int(item.get("id") or 0) or None)
+            _set_nested(draft, f"{endpoint}.account_name", str(item.get("name") or ""))
+            _set_nested(draft, f"{endpoint}.path", str(item.get("base_path") or "/"))
+            ctx["draft"] = draft
+        ctx.pop("sync_account_selector_options", None)
+        ctx.pop("sync_account_selector_endpoint", None)
+        save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, scene="sync_editor", step="idle", context=ctx, last_message_id=message_id)
+        db.commit()
+        self._start_editor(
+            db,
+            chat_id,
+            kind="sync",
+            title=_editor_title("sync", int(ctx.get("target_id") or 0) or None),
+            fields=SYNC_FIELDS,
+            draft=draft,
+            target_id=int(ctx.get("target_id") or 0) or None,
+            message_id=message_id,
+            extras={k: v for k, v in ctx.items() if k != "draft"},
+        )
+
     def _dispatch_task_magic_rule_selector(self, db: Session, chat_id: int, message_id: int, parts: list[str]) -> None:
         session = load_session_data(db, chat_id=chat_id, user_id=self.config.user_id)
         ctx = dict(session.context or {})
@@ -2841,7 +2935,13 @@ class TelegramBotHandler:
         if kind == "sync" and field == "drama_task_uids":
             self._show_sync_drama_selector(db, chat_id, message_id=message_id)
             return
+        if kind == "sync" and field in {"source.__account__", "target.__account__"}:
+            self._show_sync_account_selector(db, chat_id, endpoint="source" if field.startswith("source.") else "target", message_id=message_id)
+            return
         if kind == "sync" and field in {"source.path", "target.path"}:
+            endpoint = "source" if field.startswith("source.") else "target"
+            if str(_get_nested(draft, f"{endpoint}.type") or "") == "netdisk" and not _get_nested(draft, f"{endpoint}.account_id"):
+                raise ValueError("请先选择网盘账号")
             self._show_sync_path_browser(db, chat_id, field=field, message_id=message_id)
             return
         meta = _field_meta(fields, field)
@@ -2875,7 +2975,17 @@ class TelegramBotHandler:
                 idx = options.index(current)
             except ValueError:
                 idx = -1
-            _set_nested(draft, field, options[(idx + 1) % len(options)])
+            next_value = options[(idx + 1) % len(options)]
+            _set_nested(draft, field, next_value)
+            if kind == "sync" and field in {"source.type", "target.type"}:
+                endpoint = "source" if field.startswith("source.") else "target"
+                if next_value != "netdisk":
+                    _set_nested(draft, f"{endpoint}.account_id", None)
+                    _set_nested(draft, f"{endpoint}.account_name", "")
+                    if next_value == "local":
+                        _set_nested(draft, f"{endpoint}.path", "")
+                    else:
+                        _set_nested(draft, f"{endpoint}.path", "/")
             ctx["draft"] = draft
             save_session_data(db, chat_id=chat_id, user_id=self.config.user_id, context=ctx)
             db.commit()

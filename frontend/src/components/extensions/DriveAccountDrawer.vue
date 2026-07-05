@@ -45,6 +45,7 @@ function cloneConfig<T>(value: T): T {
 const isEditing = computed(() => Boolean(props.account?.id))
 const currentDriveType = computed(() => props.driveTypes.find((item) => item.code === state.drive_type) || null)
 const currentDriveFields = computed<ConfigFieldItem[]>(() => currentDriveType.value?.config_fields || [])
+const isTvCredentialDrive = computed(() => ['quark', 'uc'].includes(String(state.drive_type || '').trim().toLowerCase()))
 const isMobile = useIsMobile()
 
 function syncState() {
@@ -137,6 +138,13 @@ function submit() {
           v-if="isEditing"
           title="当前显示的是已保存的结构化登录参数，保存后会直接覆盖当前账号配置。"
           type="info"
+          :closable="false"
+          style="margin-bottom: 16px"
+        />
+        <el-alert
+          v-if="isTvCredentialDrive"
+          title="Quark / UC 当前支持同时保存 Cookie 与 TV 凭据，但账号运行仍按 Cookie 优先；TV 字段仅用于 TV 扫码登录与凭据留存。"
+          type="warning"
           :closable="false"
           style="margin-bottom: 16px"
         />

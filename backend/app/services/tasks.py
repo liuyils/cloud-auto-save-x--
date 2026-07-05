@@ -254,7 +254,7 @@ def delete_task(db: Session, task_id: int) -> None:
 
 def run_task(db: Session, task_id: int):
     task = get_task(db, task_id)
+    db.close()
     executor = TaskExecutor(db)
     execution = executor.run_task(task)
-    db.flush()
     return execution

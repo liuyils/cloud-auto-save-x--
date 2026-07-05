@@ -11,6 +11,62 @@ class DL302SupportedDriverOut(BaseModel):
     account_count: int = 0
     enabled_count: int = 0
     default_account_name: str | None = None
+    accounts: list["DL302SupportedAccountOut"] = Field(default_factory=list)
+
+
+class DL302CASTaskOut(BaseModel):
+    id: int = 0
+    task_id: str = ""
+    drive_type: str = ""
+    account: str = ""
+    base_path: str = ""
+    status: Literal["pending", "running", "pausing", "paused", "done", "failed", "cancelled"] = "pending"
+    total_items: int = 0
+    done_items: int = 0
+    failed_items: int = 0
+    skipped_items: int = 0
+    total_bytes: int = 0
+    done_bytes: int = 0
+    current_item_id: int = 0
+    last_error: str = ""
+    created_at: str | None = None
+    updated_at: str | None = None
+    finished_at: str | None = None
+
+
+class DL302CASTaskItemOut(BaseModel):
+    id: int = 0
+    task_id: str = ""
+    file_id: str = ""
+    file_path: str = ""
+    name: str = ""
+    size: int = 0
+    status: Literal["pending", "running", "done", "failed", "skipped", "cancelled"] = "pending"
+    stage: str = ""
+    stage_done: int = 0
+    stage_total: int = 0
+    retry_count: int = 0
+    last_error: str = ""
+    rapid_drive_types: str = ""
+
+
+class DL302CASTaskListOut(BaseModel):
+    tasks: list[DL302CASTaskOut] = Field(default_factory=list)
+
+
+class DL302SupportedAccountOut(BaseModel):
+    account_id: int
+    account_name: str
+    drive_type: str
+    drive_name: str
+    enabled: bool = False
+    is_default: bool = False
+    runtime_status: str | None = None
+    nickname: str | None = None
+    username: str | None = None
+    has_302_path: bool = False
+    media_base_path: str | None = None
+    cas_task: DL302CASTaskOut | None = None
 
 
 class DL302StrmSummaryOut(BaseModel):
@@ -29,6 +85,8 @@ class DL302ConfigOut(BaseModel):
     proxy_url: str | None = None
     proxy_path_offset: int = -1
     intranet_cidrs: list[str] = Field(default_factory=list)
+    auto_balance: bool = False
+    copy_download_mode: Literal["0", "1"] = "0"
     strm_enabled: bool = False
     strm_mode: Literal["auto", "independent"] = "auto"
     strm_root_dir: str = "/strm"
@@ -40,6 +98,8 @@ class DL302ConfigUpdateIn(BaseModel):
     proxy_url: str | None = Field(default=None)
     proxy_path_offset: int | None = Field(default=None)
     intranet_cidrs: list[str] | None = Field(default=None)
+    auto_balance: bool | None = Field(default=None)
+    copy_download_mode: Literal["0", "1"] | None = Field(default=None)
     strm_enabled: bool | None = Field(default=None)
     strm_mode: Literal["auto", "independent"] | None = Field(default=None)
     strm_root_dir: str | None = Field(default=None)
@@ -58,4 +118,10 @@ class DL302StrmGenerateOut(BaseModel):
     generated_files: int = 0
     generated_dirs: int = 0
     skipped_accounts: int = 0
+    message: str = ""
+
+
+class DL302CasGenerateOut(BaseModel):
+    ok: bool = True
+    task: DL302CASTaskOut
     message: str = ""

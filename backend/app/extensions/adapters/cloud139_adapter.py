@@ -10,13 +10,16 @@ import os
 import random
 import re
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+from cryptography.hazmat.primitives.serialization import load_der_public_key
 
 from app.extensions.adapters.base_adapter import BaseCloudDriveAdapter
 
@@ -120,6 +123,71 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/90.0.4430.210 "
         "Mobile Safari/537.36 MCloudApp/10.0.1"
     )
+    MARKET_BASE_URL = "https://m.mcloud.139.com"
+    MARKET_SOURCE_ID = "1097"
+    SIGNIN_ACTIVITY_ID = "sign_in_3"
+    SIGN_IN_TOTAL_BUDGET_SECONDS = 40.0
+    SIGN_IN_STAGE_MIN_SECONDS = 1.5
+    REFRESH_TOKEN_AES_KEY = "c7lXOigXahPnTViq"
+    CLOUD_FILE_DUMMY_CONTENT = b"0"
+    CLOUD_FILE_DUMMY_HASH = hashlib.sha256(CLOUD_FILE_DUMMY_CONTENT).hexdigest()
+    RED_PACKET_SOURCE_ID = "001216"
+    RED_PACKET_VERSION = "SYS_CONFIG_Y"
+    RED_PACKET_BASE_URL = "https://cpactiv.buy.139.com/cloudphone-market"
+    RED_PACKET_PAGE_URL = "https://cpactiv.buy.139.com/#/redEnvelopeParty/home?channelSrc=red-cmccapp"
+    RED_PACKET_APP_ID = "12345681"
+    RED_PACKET_SIGN_KEY = "e10adc3949ba59abbe56e057f20f883e"
+    RED_PACKET_CHANNEL_SRC = "red-cmccapp"
+    RED_PACKET_BROWSE_TASKS = {"NOVICE_2", "NOVICE_3", "MONTHLY_1"}
+    RED_PACKET_DIRECT_TASKS = {"MONTHLY_4", "MONTHLY_5"}
+    RED_PACKET_MANUAL_TASKS = {"NOVICE_1": "需跳转领取定向流量"}
+    RED_PACKET_KNOWN_ANSWERS = {
+        "如何查看并更新移动云手机客户端最新版本？": '进入"我的"-点击"关于云手机"-点击"检查新版本"',
+        "移动云手机可领取定向流量，每月赠送的定向流量是（  ）。": "30GB",
+        "移动云手机端内订购的专业版分辨率已升级到1080P，该说法是否正确？": "正确",
+        "移动云手机支持视频录制，该说法是否正确？": "正确",
+        "云手机支持通过手机、平板、电脑等多种终端设备登录使用，该说法是否正确？": "正确",
+        "使用中国移动号码登录移动云手机，是否支持手机号一键登录？": "支持",
+        "只有中国移动运营商号码能使用移动云手机？": "不正确",
+        "移动云手机是否需要充电使用？": "不需要",
+        "移动云手机支持截图，该说法是否正确？": "正确",
+        "移动云手机AI灵犀助手已接入DeepSeek，是否正确？": "正确",
+        "移动云手机内支持画面清晰度切换，该说法是否正确？": "正确",
+        "移动云手机支持连接蓝牙使用吗？": "不支持",
+        "在云手机内安装游戏应用是否占本地手机存储空间？": "否，不占本地空间",
+        "如何更换云机内的桌面主题或壁纸？": "云机内-【设置】-壁纸/个性主题",
+        "如何将云手机里的应用添加至本地手机桌面？": "云手机桌面-长按应用-发送图标到本地",
+    }
+    AI_CAMERA_SAMPLE_BASE64 = (
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQDxAPEA8QDw8PEA8PDw8PDw8PDw8QFREWFhUR"
+        "FRUYHSggGBolGxUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGxAQGy0lICYtLS0tLS0tLS0t"
+        "LS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBIgACEQEDEQH/xAAX"
+        "AAADAQAAAAAAAAAAAAAAAAAAAQMC/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEAMQAAAB"
+        "6gD/xAAVEAEBAAAAAAAAAAAAAAAAAAABAP/aAAgBAQABBQJf/8QAFBEBAAAAAAAAAAAAAAAAAAAA"
+        "AP/aAAgBAwEBPwEf/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwEf/8QAFBABAAAAAAAA"
+        "AAAAAAAAAAAAAP/aAAgBAQAGPwJf/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyFf/9k="
+    )
+    _SM_PUBLIC_KEY = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC8KHAcHbkCn5rxGgGJE+07tY+pt86D/oZ7sA51FaEBv2jgno2TI9zHJVYKJynmiKpixgwUcv93EfWIrU/p/UCs5Vu+odS3I4UBp3R7IZ1A0W01FkumAHYW2PQpMm8ueQKPLUq/idkpG/9b2JDv/qU+Ks36nbUPwlW4CjdfrV+V9QIDAQAB"
+    _SM_ORGANIZATION = "FXlyfmWg2AzwbrxDKSv5"
+    _SM_ANDROID_MODELS = [
+        {"model": "23127HN0CC", "build": "UKQ1.230917.001", "android": "14", "chrome": "143.0.7499.146"},
+        {"model": "24053PY09C", "build": "UP1A.231005.007", "android": "14", "chrome": "142.0.6522.118"},
+        {"model": "23049RAD8C", "build": "TKQ1.221114.001", "android": "13", "chrome": "143.0.7499.146"},
+        {"model": "PGP110", "build": "UKQ1.230917.001", "android": "14", "chrome": "141.0.6464.127"},
+        {"model": "RMXP4721", "build": "UKQ1.230917.001", "android": "14", "chrome": "143.0.7499.146"},
+        {"model": "M2012K10C", "build": "RP1A.200720.011", "android": "11", "chrome": "142.0.6522.118"},
+        {"model": "V2324A", "build": "UP1A.231005.007", "android": "14", "chrome": "143.0.7499.146"},
+        {"model": "RE58B1", "build": "TKQ1.221114.001", "android": "13", "chrome": "140.0.6385.82"},
+        {"model": "22081212C", "build": "UKQ1.230917.001", "android": "14", "chrome": "143.0.7499.146"},
+        {"model": "LLY-AN00", "build": "HONORLLY-AN00", "android": "14", "chrome": "142.0.6522.118"},
+    ]
+    _SM_SCREENS = [
+        {"w": 1080, "h": 2340, "dpr": 2.625},
+        {"w": 1080, "h": 2400, "dpr": 2.75},
+        {"w": 720, "h": 1280, "dpr": 1.5},
+        {"w": 1080, "h": 2160, "dpr": 2.625},
+        {"w": 1080, "h": 2310, "dpr": 2.625},
+    ]
 
     def __init__(
         self,
@@ -144,9 +212,18 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
 
         self._session = requests.Session()
         self._session.headers.update(dict(self.DEFAULT_HEADERS))
+        self._market_session = requests.Session()
         self._apply_auth_headers()
         if self._debug:
             logger.setLevel(logging.DEBUG)
+        self._market_device_id = ""
+        self._market_jwt_token = ""
+        self._market_sso_token = ""
+        self._market_session_prepared = False
+        self._red_packet_token = ""
+        self._red_packet_mobile = ""
+        self._red_packet_jwt_token = ""
+        self._sign_in_deadline_ts: float | None = None
 
     @staticmethod
     def _md5(value: str) -> str:
@@ -299,6 +376,12 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
         decryptor = cipher.decryptor()
         return Cloud139Adapter._pkcs7_unpad(decryptor.update(ciphertext) + decryptor.finalize())
+
+    @staticmethod
+    def _aes_ecb_encrypt(plaintext: bytes, key: bytes) -> bytes:
+        cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+        encryptor = cipher.encryptor()
+        return encryptor.update(Cloud139Adapter._pkcs7_pad(plaintext, algorithms.AES.block_size // 8)) + encryptor.finalize()
 
     @classmethod
     def _sorted_json_stringify(cls, obj: Any) -> str:
@@ -536,12 +619,55 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         if len(token_segments) >= 4:
             try:
                 expiration = int(token_segments[3])
-                if expiration - int(time.time() * 1000) > 15 * 24 * 60 * 60 * 1000:
+                if expiration - int(time.time() * 1000) > 5 * 24 * 60 * 60 * 1000:
                     return self._normalize_basic_auth(self._authorization)
                 if expiration <= int(time.time() * 1000):
                     raise RuntimeError("authorization 已过期")
             except ValueError:
                 pass
+        try:
+            refresh_headers = {
+                "Content-Type": "application/json",
+                "User-Agent": self.MARKET_USER_AGENT,
+                "x-yun-tid": self._random_str(8) + "-" + self._random_str(4) + "-4" + self._random_str(3) + "-" + random.choice("89ab") + self._random_str(3) + "-" + self._random_str(12),
+                "Authorization": self._normalize_basic_auth(self._authorization),
+                "x-yun-api-version": "v1",
+                "x-yun-module-type": "100",
+                "x-yun-op-type": "1",
+                "x-yun-app-channel": "10214200",
+                "x-yun-client-info": "||8||||||||||||",
+                "hcy-cool-flag": "1",
+            }
+            if self._user_domain_id:
+                refresh_headers["x-yun-uni"] = self._user_domain_id
+            payload = {"phoneNumber": account}
+            encrypted = base64.b64encode(
+                self._aes_ecb_encrypt(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), self.REFRESH_TOKEN_AES_KEY.encode("utf-8"))
+            ).decode("utf-8")
+            refresh_resp = self._request_json(
+                "POST",
+                f"{self.USER_NJS_URL}/user/auth/refreshToken",
+                headers=refresh_headers,
+                json_body={"data": encrypted},
+                timeout=30,
+            )
+            code = str((refresh_resp or {}).get("code") or "")
+            data = (refresh_resp or {}).get("data") or {}
+            success = bool((refresh_resp or {}).get("success"))
+            ok = code in ("0", "00", "000", "0000") or success or (code.startswith("0") and len(code) <= 4)
+            new_token = str((data or {}).get("token") or "")
+            if ok and new_token:
+                auth_type = str(parts[0] or "mobile")
+                new_auth_raw = base64.b64encode(f"{auth_type}:{account}:{new_token}".encode("utf-8")).decode("utf-8")
+                self._authorization = self._normalize_basic_auth(new_auth_raw)
+                self._account = account
+                if re.fullmatch(r"1\d{10}", account):
+                    self._username = account
+                    self._phone = account
+                self._apply_auth_headers()
+                return self._authorization
+        except Exception as exc:
+            self._debug_log_json("auth.refresh_new_failed", {"message": str(exc)})
         req_body = (
             f"<root><token>{token}</token><account>{account}</account>"
             "<clienttype>656</clienttype></root>"
@@ -612,19 +738,27 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        data: Any = None,
         cookies: dict[str, str] | None = None,
         timeout: int | float = 20,
+        session: requests.Session | None = None,
     ) -> Any:
         self._throttle_request()
-        resp = self._session.request(
-            method=method,
-            url=url,
-            headers=headers,
-            params=params,
-            json=json_body,
-            cookies=cookies,
-            timeout=timeout,
-        )
+        client = session or self._session
+        effective_timeout = self._effective_timeout(float(timeout))
+        request_kwargs: dict[str, Any] = {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "params": params,
+            "cookies": cookies,
+            "timeout": effective_timeout,
+        }
+        if data is None:
+            request_kwargs["json"] = json_body
+        else:
+            request_kwargs["data"] = data
+        resp = client.request(**request_kwargs)
         resp.raise_for_status()
         try:
             return resp.json()
@@ -641,16 +775,19 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         data: Any = None,
         cookies: dict[str, str] | None = None,
         timeout: int | float = 20,
+        session: requests.Session | None = None,
     ) -> str:
         self._throttle_request()
-        resp = self._session.request(
+        client = session or self._session
+        effective_timeout = self._effective_timeout(float(timeout))
+        resp = client.request(
             method=method,
             url=url,
             headers=headers,
             params=params,
             data=data,
             cookies=cookies,
-            timeout=timeout,
+            timeout=effective_timeout,
         )
         resp.raise_for_status()
         return resp.text or ""
@@ -666,21 +803,16 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         cookies: dict[str, str] | None = None,
         timeout: int | float = 20,
     ) -> Any:
-        self._throttle_request()
-        resp = requests.request(
-            method=method,
-            url=url,
+        return self._request_json(
+            method,
+            url,
             headers=headers,
             params=params,
-            json=json_body,
+            json_body=json_body,
             cookies=cookies,
             timeout=timeout,
+            session=self._market_session,
         )
-        resp.raise_for_status()
-        try:
-            return resp.json()
-        except Exception as exc:
-            raise RuntimeError((resp.text or "").strip()[:300] or "响应解析失败") from exc
 
     def _debug_log_json(self, tag: str, payload: Any) -> None:
         if not self._debug:
@@ -826,10 +958,14 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         headers = {
             "User-Agent": self.MARKET_USER_AGENT,
             "Accept": "*/*",
-            "Host": "caiyun.feixin.10086.cn:7071",
+            "X-Requested-With": "com.chinamobile.mcloud",
+            "Referer": self._build_market_page_url(),
         }
         if include_jwt and jwt_token:
             headers["jwtToken"] = jwt_token
+        device_id = self._get_market_device_id()
+        if device_id:
+            headers["deviceId"] = device_id
         return headers
 
     def _market_cookies(self, jwt_token: str = "") -> dict[str, str]:
@@ -838,7 +974,248 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         }
         if jwt_token:
             cookies["jwtToken"] = jwt_token
+        if self._user_domain_id:
+            cookies["userDomainId"] = self._user_domain_id
         return cookies
+
+    @staticmethod
+    def _current_millis() -> int:
+        return int(time.time() * 1000)
+
+    @staticmethod
+    def _extract_user_domain_id(jwt_token: str) -> str:
+        try:
+            payload = jwt_token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+            sub = data.get("sub", "")
+            if isinstance(sub, str):
+                sub = json.loads(sub)
+            if isinstance(sub, dict):
+                return str(sub.get("userDomainId") or "")
+        except Exception:
+            return ""
+        return ""
+
+    @classmethod
+    def _sm_rsa_encrypt(cls, plaintext: str) -> str:
+        public_key = load_der_public_key(base64.b64decode(cls._SM_PUBLIC_KEY), backend=default_backend())
+        encrypted = public_key.encrypt(plaintext.encode("utf-8"), asym_padding.PKCS1v15())
+        return base64.b64encode(encrypted).decode("ascii")
+
+    @staticmethod
+    def _sm_get_smid(uid: str) -> str:
+        now = datetime.now()
+        ts = now.strftime("%Y%m%d%H%M%S")
+        md5_uid = hashlib.md5(uid.encode("utf-8")).hexdigest()
+        base_str = ts + md5_uid + "00"
+        check = hashlib.md5(("smsk_web_" + base_str).encode("utf-8")).hexdigest()[:14]
+        return base_str + check + "0"
+
+    @classmethod
+    def _generate_market_device_profile(cls) -> str:
+        phone = random.choice(cls._SM_ANDROID_MODELS)
+        screen = random.choice(cls._SM_SCREENS)
+        ua = (
+            f"Mozilla/5.0 (Linux; Android {phone['android']}; {phone['model']} Build/{phone['build']}; wv) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/{phone['chrome']} "
+            "Mobile Safari/537.36 MCloudApp/13.0.0 AppLanguage/zh-CN"
+        )
+        sw, sh = screen["w"], screen["h"]
+        avail_h = sh - random.randint(48, 128)
+        uid = f"{cls._random_str(8)}-{cls._random_str(4)}-{cls._random_str(4)}-{cls._random_str(4)}-{cls._random_str(12)}"
+        ep = cls._sm_rsa_encrypt(uid)
+        smid = cls._sm_get_smid(uid)
+        now_ts = int(time.time() * 1000)
+        start_time = now_ts - random.randint(1800000, 5400000)
+        now_cst = datetime.now(timezone(timedelta(hours=8)))
+        env = {
+            "protocol": 242, "organization": cls._SM_ORGANIZATION, "appId": "default",
+            "os": "web", "version": "3.0.0", "sdkver": "3.0.0", "box": "",
+            "rtype": "all", "smid": smid, "subVersion": "1.0.0",
+            "time": now_ts - start_time, "cdp": 0, "maxTouchPoints": 5, "connectionRtt": 0, "cpucount": 8,
+            "battery": {"charging": 0, "level": round(0.6 + random.random() * 0.35, 2)},
+            "dg": "5.0 " + ua[len("Mozilla/"):], "gj": "zh-CN", "rr": "Google Inc.", "sv": "Netscape", "qc": "Mozilla",
+            "ye": 8, "jq": 8, "lo": [], "bw": "", "lr": "Etc/GMT-8", "nr": 1, "no": 0, "br": 1, "ra": 0,
+            "gt": sw, "wy": sw, "cj": avail_h, "wt": random.randint(100, 180), "hu": ["chrome"],
+            "documentExist": 1, "yi": ["location"], "dx": "UTF-8",
+            "ig": now_cst.strftime("%a %b %d %Y %H:%M:%S ") + "(GMT+08:00)", "ii": 1, "fs": 0, "ga": 0,
+            "tk": 0, "rm": 0, "kr": 0, "nk": 0, "by": "srgb", "ar": 0, "or": 0, "et": 0, "zc": 0, "fj": 0,
+            "dc": 0, "vd": 0, "ni": "", "hn": "", "hv": "48000_2_1_0_2_explicit_speakers|______",
+            "de": hashlib.md5(uid.encode("utf-8")).hexdigest()[:16] + "|10011011111000111100001100101101111100110101001110000000000100000",
+            "xt": 1, "vh": 0, "xc": {"red": "0"},
+            "pm": {
+                "default": round(120.5 + random.random() * 20, 1),
+                "apple": round(120.5 + random.random() * 20, 1),
+                "serif": round(100 + random.random() * 20, 1),
+                "sans": round(120.5 + random.random() * 20, 1),
+                "mono": round(100 + random.random() * 20, 1),
+                "min": round(10 + random.random() * 2, 1),
+                "system": round(120.5 + random.random() * 20, 1),
+            },
+            "ob": {"maxTouchPoints": 5, "touchEvent": True, "touchStart": True},
+            "incognito": {
+                "getDirectoryExist": 0, "getDirectoryIncognito": 0, "maxTouchPointsExist": 1,
+                "indexedDBIncognito": 0, "openDatabaseExist": 0, "openDatabaseIncognito": 0,
+                "localStorageExist": 1, "localStorageIncognito": 0, "promiseExist": 1,
+                "promiseAllSettledExist": 1, "queryUsageAndQuotaIncognito": 0,
+                "webkitRequestFileSystemIncognito": 0, "serviceWorkerExist": 1,
+                "indexedDBExist": 1, "browserName": "Chrome",
+            },
+            "t": now_cst.strftime("%a %b %d %Y %H:%M:%S GMT+0800 (GMT+08:00)"),
+            "collectTime": random.randint(50, 130),
+        }
+        data_b64 = base64.b64encode(json.dumps(env, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        return json.dumps(
+            {
+                "appId": "default",
+                "organization": cls._SM_ORGANIZATION,
+                "ep": ep,
+                "data": data_b64,
+                "os": "web",
+                "encode": 1,
+                "compress": 0,
+            },
+            separators=(",", ":"),
+        )
+
+    def _fetch_market_device_id(self) -> str:
+        headers = {
+            "User-Agent": self.MARKET_USER_AGENT,
+            "Content-Type": "application/json;charset=UTF-8",
+            "Origin": self.MARKET_BASE_URL,
+            "Referer": f"{self.MARKET_BASE_URL}/portal/mobilecloud/index.html?path=newsignin",
+        }
+        try:
+            payload_str = self._generate_market_device_profile()
+            self._throttle_request()
+            resp = self._market_session.post(
+                "https://slw.h5cmpassport.com:9090/deviceprofile/v4",
+                data=payload_str,
+                headers=headers,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            device_id = str(((data or {}).get("detail") or {}).get("deviceId") or "")
+            if str((data or {}).get("code") or "") == "1100" and device_id:
+                return device_id if device_id.startswith("B") else f"B{device_id}"
+        except Exception as exc:
+            self._debug_log_json("signin.device_id_failed", {"message": str(exc)})
+        return ""
+
+    def _load_market_device_id(self) -> str:
+        if self._market_device_id:
+            return self._market_device_id
+        self._market_device_id = self._fetch_market_device_id()
+        if not self._market_device_id:
+            fallback = hashlib.md5(f"{self._username or self._phone or self._account_name}:{self._current_millis()}".encode("utf-8")).hexdigest()
+            self._market_device_id = f"B{fallback}"
+        return self._market_device_id
+
+    def _get_market_device_id(self) -> str:
+        device_id = self._load_market_device_id()
+        return device_id if device_id.startswith("B") else f"B{device_id}"
+
+    def _seed_market_device_cookie(self) -> None:
+        device_id = self._get_market_device_id()
+        if not device_id:
+            return
+        cookie_value = device_id[1:] if device_id.startswith("B") else device_id
+        cookie_name = f".thumbcache_{self._username or self._phone or self.index}"
+        self._market_session.cookies.set(cookie_name, cookie_value, domain="m.mcloud.139.com", path="/")
+
+    def _build_market_page_url(self, source_id: str | None = None) -> str:
+        current_source_id = source_id or self.MARKET_SOURCE_ID
+        return (
+            f"{self.MARKET_BASE_URL}/portal/mobilecloud/index.html?path=newsignin"
+            f"&sourceid={current_source_id}&enableShare=1&token={quote(self._market_sso_token or '', safe='')}&targetSourceId=001005"
+        )
+
+    def _build_market_context(self, jwt_token: str, sso_token: str = "") -> None:
+        if sso_token:
+            self._market_sso_token = sso_token
+        self._market_jwt_token = jwt_token
+        user_domain_id = self._extract_user_domain_id(jwt_token)
+        if user_domain_id:
+            self._user_domain_id = user_domain_id
+        self._market_session_prepared = False
+        self._seed_market_device_cookie()
+
+    def _post_signin_journaling(self, keyword: str, source_id: str | None = None) -> bool:
+        current_source_id = source_id or self.MARKET_SOURCE_ID
+        payload = f"module=uservisit&optkeyword={keyword}&sourceid={current_source_id}&marketName={self.SIGNIN_ACTIVITY_ID}"
+        try:
+            self._request_text(
+                "POST",
+                f"{self.MARKET_BASE_URL}/ycloud/visitlog/journaling",
+                headers={
+                    **self._market_headers(include_jwt=True, jwt_token=self._market_jwt_token),
+                    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                    "Referer": self._build_market_page_url(current_source_id),
+                },
+                data=payload,
+                cookies=self._market_cookies(self._market_jwt_token),
+                timeout=15,
+                session=self._market_session,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _build_receive_headers(self, jwt_token: str, source_id: str | None = None) -> dict[str, str]:
+        current_source_id = source_id or self.MARKET_SOURCE_ID
+        return {
+            **self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            "showLoading": "true",
+            "appVersion": "13.0.0.0",
+            "activityId": self.SIGNIN_ACTIVITY_ID,
+            "Referer": self._build_market_page_url(current_source_id),
+        }
+
+    def _prepare_signin_center_session(self, *, for_receive: bool = False, source_id: str | None = None) -> None:
+        if not self._market_jwt_token:
+            return
+        current_source_id = source_id or self.MARKET_SOURCE_ID
+        if not self._market_session_prepared:
+            page_url = self._build_market_page_url(current_source_id)
+            try:
+                self._request_text(
+                    "GET",
+                    page_url,
+                    headers={
+                        **self._market_headers(include_jwt=True, jwt_token=self._market_jwt_token),
+                        "Referer": page_url,
+                    },
+                    cookies=self._market_cookies(self._market_jwt_token),
+                    timeout=20,
+                    session=self._market_session,
+                )
+            except Exception:
+                pass
+            for keyword in (
+                "newsignin_index_pv",
+                "newsignin_index_client",
+                "newsignin_index_app_client",
+                "newsignin_index_cookie_login",
+                "newsignin_index_cookie",
+                "newsignin_index_app_cookie_login",
+            ):
+                self._post_signin_journaling(keyword, current_source_id)
+            self._market_session_prepared = True
+        if for_receive:
+            self._post_signin_journaling("newsignin_index_receive_type", current_source_id)
+
+    def _get_today_sign_state(self, result: Any) -> bool | None:
+        if not isinstance(result, dict):
+            return None
+        today_sign_in = result.get("todaySignIn")
+        if isinstance(today_sign_in, bool):
+            return today_sign_in
+        for day in result.get("cal") or []:
+            if day.get("t"):
+                return bool(day.get("s"))
+        return None
 
     def _extract_signin_reward(self, payload: Any) -> int:
         if isinstance(payload, dict):
@@ -859,7 +1236,7 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
                     return reward
         return 0
 
-    def _query_market_sso_token(self) -> str:
+    def _query_market_sso_token(self, to_source_id: str = "001005") -> str:
         account = self._username or self._phone or self._parse_phone_from_authorization(self._authorization)
         if not account:
             raise RuntimeError("缺少账号信息，无法获取签到 ssoToken")
@@ -874,7 +1251,7 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             "POST",
             "https://orches.yun.139.com/orchestration/auth-rebuild/token/v1.0/querySpecToken",
             headers=headers,
-            json_body={"account": account, "toSourceId": "001005"},
+            json_body={"account": account, "toSourceId": to_source_id},
             timeout=20,
         )
         if not isinstance(payload, dict) or not bool(payload.get("success")):
@@ -906,9 +1283,11 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         return token
 
     def _query_market_signin_info(self, jwt_token: str) -> dict[str, Any]:
+        self._build_market_context(jwt_token)
+        self._prepare_signin_center_session()
         payload = self._market_request_json(
             "GET",
-            "https://caiyun.feixin.10086.cn:7071/market/signin/page/info",
+            f"{self.MARKET_BASE_URL}/ycloud/signin/page/infoV3",
             headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
             params={"client": "app"},
             cookies=self._market_cookies(jwt_token),
@@ -919,17 +1298,896 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
         return payload
 
     def _do_market_signin(self, jwt_token: str) -> dict[str, Any]:
+        self._build_market_context(jwt_token)
+        self._prepare_signin_center_session()
         payload = self._market_request_json(
             "GET",
-            "https://caiyun.feixin.10086.cn:7071/market/manager/commonMarketconfig/getByMarketRuleName",
+            f"{self.MARKET_BASE_URL}/ycloud/signin/page/startSignIn",
             headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
-            params={"marketName": "sign_in_3"},
+            params={"client": "app"},
             cookies=self._market_cookies(jwt_token),
             timeout=20,
         )
         if not isinstance(payload, dict):
             raise RuntimeError("签到失败")
         return payload
+
+    def _build_sign_stage_result(self, *, ok: bool, message: str, reward: int = 0, skipped: bool = False, raw: Any = None, **extra: Any) -> dict[str, Any]:
+        result = {
+            "ok": ok,
+            "message": message,
+            "reward": reward,
+            "skipped": skipped,
+            "raw": raw,
+        }
+        result.update(extra)
+        return result
+
+    def _skip_sign_stage(self, message: str) -> dict[str, Any]:
+        return self._build_sign_stage_result(ok=False, skipped=True, message=message)
+
+    def _start_sign_in_budget(self) -> None:
+        self._sign_in_deadline_ts = time.monotonic() + self.SIGN_IN_TOTAL_BUDGET_SECONDS
+
+    def _clear_sign_in_budget(self) -> None:
+        self._sign_in_deadline_ts = None
+
+    def _remaining_sign_in_seconds(self) -> float | None:
+        if self._sign_in_deadline_ts is None:
+            return None
+        return max(self._sign_in_deadline_ts - time.monotonic(), 0.0)
+
+    def _effective_timeout(self, requested_timeout: float) -> float:
+        remaining = self._remaining_sign_in_seconds()
+        if remaining is None:
+            return requested_timeout
+        if remaining <= 0:
+            raise TimeoutError("签到执行超时，已停止后续请求")
+        return max(min(requested_timeout, remaining), 0.2)
+
+    def _sleep_with_budget(self, seconds: float) -> None:
+        remaining = self._remaining_sign_in_seconds()
+        if remaining is None:
+            time.sleep(seconds)
+            return
+        if remaining <= 0:
+            raise TimeoutError("签到执行超时，已停止后续等待")
+        time.sleep(min(seconds, max(remaining - 0.1, 0)))
+
+    def _run_sign_stage(self, runner: Any, name: str, *, required_jwt: bool = False, jwt_token: str = "") -> dict[str, Any]:
+        if required_jwt and not jwt_token:
+            return self._skip_sign_stage("缺少签到上下文，已跳过")
+        remaining = self._remaining_sign_in_seconds()
+        if remaining is not None and remaining < self.SIGN_IN_STAGE_MIN_SECONDS:
+            return self._skip_sign_stage(f"签到剩余预算不足 {self.SIGN_IN_STAGE_MIN_SECONDS:.1f}s，已跳过")
+        try:
+            result = runner(jwt_token) if required_jwt else runner()
+        except Exception as exc:
+            self._debug_log_json(f"signin.stage_failed.{name}", {"message": str(exc)})
+            return self._build_sign_stage_result(ok=False, message=str(exc))
+        if isinstance(result, dict):
+            return result
+        return self._build_sign_stage_result(ok=True, message="执行完成", raw=result)
+
+    def _prepare_market_context(self) -> dict[str, str]:
+        sso_token = self._query_market_sso_token()
+        jwt_token = self._query_market_jwt_token(sso_token)
+        self._build_market_context(jwt_token, sso_token)
+        return {"sso_token": sso_token, "jwt_token": jwt_token}
+
+    def _jwt_activity_headers(self, jwt_token: str) -> dict[str, str]:
+        headers = {
+            "User-Agent": self.MARKET_USER_AGENT,
+            "Accept": "*/*",
+            "Host": "caiyun.feixin.10086.cn:7071",
+        }
+        if jwt_token:
+            headers["jwtToken"] = jwt_token
+        return headers
+
+    def _jwt_activity_cookies(self, jwt_token: str) -> dict[str, str]:
+        cookies = {"sensors_stay_time": str(self._current_millis())}
+        if jwt_token:
+            cookies["jwtToken"] = jwt_token
+        return cookies
+
+    def _sign_in_market_stage(self, jwt_token: str) -> dict[str, Any]:
+        status_data = self._query_market_signin_info(jwt_token)
+        raw: dict[str, Any] = {"status": status_data}
+        if int(status_data.get("code", -1)) != 0:
+            raise RuntimeError(str(status_data.get("msg") or "查询签到状态失败"))
+        result = status_data.get("result") or {}
+        if bool(self._get_today_sign_state(result)):
+            reward = self._extract_signin_reward(result)
+            return self._build_sign_stage_result(ok=True, message="今日已签到", reward=reward, raw=raw)
+        signin_data = self._do_market_signin(jwt_token)
+        raw["signin"] = signin_data
+        sign_result = signin_data.get("result") or {}
+        if int(signin_data.get("code", -1)) == 0 and bool(self._get_today_sign_state(sign_result)):
+            reward = self._extract_signin_reward(sign_result)
+            return self._build_sign_stage_result(ok=True, message=f"签到成功，获得 {reward} 云朵" if reward else "签到成功", reward=reward, raw=raw)
+        latest_data = self._query_market_signin_info(jwt_token)
+        raw["latest"] = latest_data
+        latest_result = latest_data.get("result") or {}
+        if int(latest_data.get("code", -1)) == 0 and bool(self._get_today_sign_state(latest_result)):
+            reward = self._extract_signin_reward(latest_result) or self._extract_signin_reward(sign_result)
+            return self._build_sign_stage_result(ok=True, message=f"签到成功，获得 {reward} 云朵" if reward else "签到成功", reward=reward, raw=raw)
+        if int(signin_data.get("code", -1)) != 0:
+            raise RuntimeError(str(signin_data.get("msg") or "签到失败"))
+        reward = self._extract_signin_reward(sign_result or signin_data)
+        return self._build_sign_stage_result(ok=True, message=f"签到成功，获得 {reward} 云朵" if reward else "签到成功", reward=reward, raw=raw)
+
+    def _click_market_task(self, task_id: int | str, key: str = "task") -> dict[str, Any]:
+        payload = self._market_request_json(
+            "GET",
+            f"{self.MARKET_BASE_URL}/ycloud/signin/task/click",
+            headers=self._market_headers(include_jwt=True, jwt_token=self._market_jwt_token),
+            params={"key": key, "id": task_id},
+            cookies=self._market_cookies(self._market_jwt_token),
+            timeout=20,
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    def _run_market_click_stage(self, _jwt_token: str) -> dict[str, Any]:
+        rewards: list[str] = []
+        success = 0
+        for _ in range(15):
+            remaining = self._remaining_sign_in_seconds()
+            if remaining is not None and remaining < 1.0:
+                break
+            data = self._click_market_task(319) or {}
+            result = data.get("result") or {}
+            if result:
+                success += 1
+                text = str(result)
+                if text:
+                    rewards.append(text)
+            self._sleep_with_budget(0.2)
+        if success:
+            return self._build_sign_stage_result(ok=True, message=f"戳一戳完成 {success} 次", raw={"rewards": rewards[:5], "count": success})
+        return self._build_sign_stage_result(ok=False, message="戳一戳未获得奖励")
+
+    def _build_cloud_file_headers(self) -> dict[str, str]:
+        return {
+            "x-yun-op-type": "1",
+            "x-yun-sub-op-type": "100",
+            "x-yun-api-version": "v1",
+            "x-yun-client-info": "6|127.0.0.1|1|12.1.0|realme|RMX5060|BCFF2BBA6881DD8E4971803C63DDB5E4|02-00-00-00-00-00|android 15|1264X2592|zh||||032|0|",
+            "x-yun-app-channel": "10000023",
+            "Authorization": self._normalize_basic_auth(self._authorization),
+            "Content-Type": "application/json; charset=UTF-8",
+            "User-Agent": "okhttp/4.12.0",
+            "Host": "personal-kd-njs.yun.139.com",
+            "Connection": "Keep-Alive",
+        }
+
+    def _build_share_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": self._normalize_basic_auth(self._authorization),
+            "x-yun-api-version": "v1",
+            "x-yun-app-channel": "10000023",
+            "x-yun-client-info": "||9|13.0.0|Chrome|143.0.7499.146|codextestshare||Windows 10||zh-CN|||Q2hyb21l||",
+            "x-yun-module-type": "100",
+            "x-yun-svc-type": "1",
+            "x-SvcType": "1",
+            "x-yun-channel-source": "10000023",
+            "x-huawei-channelSrc": "10000023",
+            "Content-Type": "application/json;charset=UTF-8",
+            "CMS-DEVICE": "default",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+            "Referer": "https://yun.139.com/shareweb/",
+            "Origin": "https://yun.139.com",
+        }
+
+    def _create_cloud_file(self, prefix: str) -> dict[str, Any] | None:
+        now = datetime.now(timezone(timedelta(hours=8)))
+        file_size = len(self.CLOUD_FILE_DUMMY_CONTENT)
+        file_name = f"{prefix}{now.strftime('%Y%m%d_%H%M%S')}.txt"
+        payload = {
+            "contentHash": self.CLOUD_FILE_DUMMY_HASH,
+            "contentHashAlgorithm": "SHA256",
+            "contentType": "application/oct-stream",
+            "fileRenameMode": "force_rename",
+            "localCreatedAt": now.isoformat(timespec="milliseconds"),
+            "name": file_name,
+            "parallelUpload": True,
+            "parentFileId": "/",
+            "partInfos": [{"end": file_size, "partNumber": 1, "partSize": file_size, "start": 0}],
+            "size": file_size,
+            "type": "file",
+        }
+        data = self._request_json(
+            "POST",
+            f"{self.PERSONAL_KD_NJS_URL}/hcy/file/create",
+            headers=self._build_cloud_file_headers(),
+            json_body=payload,
+            timeout=30,
+        )
+        if not isinstance(data, dict) or not bool(data.get("success")):
+            return None
+        payload_data = data.get("data") or {}
+        return {"fileId": payload_data.get("fileId"), "fileName": payload_data.get("fileName") or file_name}
+
+    def _list_cloud_root_files(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        page_cursor = ""
+        while True:
+            response = self._request_json(
+                "POST",
+                f"{self.PERSONAL_KD_NJS_URL}/hcy/file/list",
+                headers=self._build_cloud_file_headers(),
+                json_body={
+                    "imageThumbnailStyleList": ["Small", "Large"],
+                    "orderBy": "updated_at",
+                    "orderDirection": "DESC",
+                    "pageInfo": {"pageCursor": page_cursor, "pageSize": 100},
+                    "parentFileId": "/",
+                },
+                timeout=30,
+            )
+            if not isinstance(response, dict) or not bool(response.get("success")):
+                return items
+            data = response.get("data") or {}
+            items.extend(data.get("items") or [])
+            page_cursor = str(data.get("nextPageCursor") or "")
+            if not page_cursor:
+                return items
+
+    def _is_cleanup_upload_file(self, item: dict[str, Any]) -> bool:
+        if item.get("type") != "file" or item.get("parentFileId") != "/":
+            return False
+        name = str(item.get("name") or "")
+        if not (name.endswith(".txt") and (name.startswith("auto_upload_") or name.startswith("auto_share_"))):
+            return False
+        size = item.get("size")
+        content_hash = item.get("contentHash")
+        return size in (0, 1, None) or content_hash == self.CLOUD_FILE_DUMMY_HASH
+
+    def _trash_cloud_files(self, file_ids: list[str]) -> bool:
+        if not file_ids:
+            return True
+        response = self._request_json(
+            "POST",
+            f"{self.PERSONAL_KD_NJS_URL}/hcy/recyclebin/batchTrash",
+            headers=self._build_cloud_file_headers(),
+            json_body={"fileIds": file_ids},
+            timeout=30,
+        )
+        return isinstance(response, dict) and bool(response.get("success"))
+
+    def _cleanup_uploaded_files(self, current_file: dict[str, Any] | None = None) -> bool:
+        file_ids: list[str] = []
+        if current_file and current_file.get("fileId"):
+            file_ids.append(str(current_file["fileId"]))
+        for item in self._list_cloud_root_files():
+            if self._is_cleanup_upload_file(item):
+                file_ids.append(str(item.get("fileId") or ""))
+        unique = [item for item in dict.fromkeys(file_ids) if item]
+        if not unique:
+            return True
+        return self._trash_cloud_files(unique)
+
+    def _upload_dummy_file(self) -> dict[str, Any] | None:
+        created = self._create_cloud_file("auto_upload_")
+        if created:
+            self._cleanup_uploaded_files(created)
+        return created
+
+    def _complete_share_file_task(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        share_file = self._create_cloud_file("auto_share_")
+        if not share_file:
+            return None
+        try:
+            response = self._request_json(
+                "POST",
+                f"{self.BASE_URL}/orchestration/personalCloud-rebuild/outlink/v1.0/getOutLink",
+                headers=self._build_share_headers(),
+                json_body={
+                    "getOutLinkReq": {
+                        "subLinkType": 0,
+                        "encrypt": 0,
+                        "coIDLst": [share_file.get("fileId")],
+                        "caIDLst": [],
+                        "pubType": 1,
+                        "dedicatedName": share_file.get("fileName", ""),
+                        "periodUnit": 1,
+                        "viewerLst": [],
+                        "extInfo": {"isWatermark": 0, "shareChannel": "3001"},
+                        "commonAccountInfo": self._account_payload(),
+                    }
+                },
+                timeout=30,
+            )
+        finally:
+            self._trash_cloud_files([str(share_file.get("fileId") or "")])
+        result = ((response or {}).get("data") or {}).get("result") or {}
+        if not isinstance(response, dict) or not bool(response.get("success")) or str(result.get("resultCode") or "") != "0":
+            return None
+        return self._query_cloud_task(int(task.get("id") or 434), "month") or task
+
+    def _build_ai_headers(self, *, use_client_info: bool = False) -> dict[str, str]:
+        headers = {
+            "Connection": "keep-alive",
+            "sec-ch-ua-platform": '"Android"',
+            "Authorization": self._normalize_basic_auth(self._authorization),
+            "x-yun-api-version": "v1",
+            "x-yun-tid": str(uuid.uuid4()),
+            "sec-ch-ua": '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+            "sec-ch-ua-mobile": "?1",
+            "X-Requested-With": "com.chinamobile.mcloud",
+            "Origin": "https://frontend.mcloud.139.com",
+            "Referer": "https://frontend.mcloud.139.com/",
+            "User-Agent": f"Mozilla/5.0 (Linux; Android 10; MI 8 Build/QKQ1.190828.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36 MCloudApp/13.0.0 tid/{uuid.uuid4()}",
+            "Content-Type": "application/json",
+            "Sec-Fetch-Site": "same-site",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "zh,zh-CN;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+        if use_client_info:
+            headers["Accept"] = "text/event-stream"
+            headers["x-yun-client-info"] = f"4||1|13.0.0||MI 8|{uuid.uuid4().hex.upper()}||android 10|||||"
+            headers["x-yun-app-channel"] = "101"
+        else:
+            headers["Accept"] = "*/*"
+            headers["x-DeviceInfo"] = f"||36|13.0.0||MI 8|{uuid.uuid4()}||android 10|||||"
+        return headers
+
+    def _get_ai_camera_sample_base64(self) -> str:
+        return f"data:image/jpg;base64,{self.AI_CAMERA_SAMPLE_BASE64}"
+
+    @staticmethod
+    def _is_ai_chat_success(text: str) -> bool:
+        payloads = []
+        for line in (text or "").splitlines():
+            if line.startswith("data:"):
+                payloads.append(line[5:].strip())
+        if not payloads and text:
+            payloads.append(text.strip())
+        for payload in payloads:
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                data = json.loads(payload)
+            except ValueError:
+                continue
+            if data.get("success") or data.get("code") == "0000":
+                return True
+        return False
+
+    def _complete_ai_camera_task(self) -> bool:
+        if not self._user_domain_id:
+            return False
+        recognize_data = self._request_json(
+            "POST",
+            "https://ai.yun.139.com/api/image/aiRecognize",
+            headers=self._build_ai_headers(),
+            data=json.dumps(
+                {
+                    "channelId": "101",
+                    "userId": self._user_domain_id,
+                    "recognizeType": "1",
+                    "base64": self._get_ai_camera_sample_base64(),
+                    "sendType": "2",
+                    "imageExt": "jpg",
+                    "uploadToCloud": True,
+                    "timeout": 30000,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            timeout=30,
+        )
+        if not isinstance(recognize_data, dict) or not bool(recognize_data.get("success")):
+            return False
+        result = recognize_data.get("data") or {}
+        file_id = str(result.get("fileId") or "")
+        task_id = str(result.get("taskId") or int(time.time() * 1000))
+        if not file_id:
+            return False
+        file_name = f"{int(task_id) + 1}.jpeg" if task_id.isdigit() else f"{task_id}.jpeg"
+        chat_payload = json.dumps(
+            {
+                "userId": self._user_domain_id,
+                "sessionId": "",
+                "applicationType": "chat",
+                "applicationId": "",
+                "sourceChannel": "101",
+                "dialogueInput": {
+                    "dialogue": "？",
+                    "prompt": "",
+                    "inputTime": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="milliseconds"),
+                    "enableForceLlm": False,
+                    "enableForceNetworkSearch": True,
+                    "enableModelThinking": False,
+                    "enableAllNetworkSearch": False,
+                    "enableKnowledgeAndNetworkSearch": False,
+                    "enableRegenerate": False,
+                    "versionInfo": {"h5Version": "2.7.6"},
+                    "extInfo": "{}",
+                    "sortInfo": {},
+                    "toolSetting": {"imageToolSetting": {"enableLlmDescribe": True}},
+                    "attachment": {"attachmentTypeList": [3], "fileList": [{"fileId": file_id, "name": file_name}]},
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        response_text = self._request_text(
+            "POST",
+            "https://ai.yun.139.com/api/outer/assistant/chat/v2/add",
+            headers=self._build_ai_headers(use_client_info=True),
+            data=chat_payload,
+            timeout=30,
+        )
+        return self._is_ai_chat_success(response_text)
+
+    @staticmethod
+    def _get_task_progress(task: dict[str, Any]) -> str:
+        progress_parts = []
+        currstep = task.get("currstep", 0)
+        process = task.get("process", 0)
+        if currstep:
+            progress_parts.append(f"阶段{currstep}")
+        if process:
+            progress_parts.append(f"进度{process}")
+        return f" ({'，'.join(progress_parts)})" if progress_parts else ""
+
+    @staticmethod
+    def _strip_task_name(task: dict[str, Any]) -> str:
+        return re.sub(r"<[^>]+>", "", str(task.get("name") or ""))
+
+    @staticmethod
+    def _get_task_step_types(task: dict[str, Any]) -> set[str]:
+        return set(task.get("stepTypeSet") or [])
+
+    def _get_task_click_keys(self, task: dict[str, Any]) -> list[str]:
+        task_id = int(task.get("id") or 0)
+        currstep = int(task.get("currstep") or 0)
+        step_types = self._get_task_step_types(task)
+        if task_id == 409:
+            return ["task2"] if currstep > 0 else ["task", "task2"]
+        if "click" in step_types:
+            return ["task"]
+        if task.get("state", "") != "FINISH":
+            return ["task"]
+        return []
+
+    def _query_cloud_task(self, task_id: int, group: str = "time") -> dict[str, Any] | None:
+        data = self._market_request_json(
+            "POST",
+            f"{self.MARKET_BASE_URL}/ycloud/signin/task/taskListV2",
+            headers=self._market_headers(include_jwt=True, jwt_token=self._market_jwt_token),
+            json_body={"marketname": self.SIGNIN_ACTIVITY_ID, "clientVersion": "13.0.0", "group": group},
+            cookies=self._market_cookies(self._market_jwt_token),
+            timeout=20,
+        )
+        if not isinstance(data, dict) or int(data.get("code", -1)) != 0:
+            return None
+        for task in ((data.get("result") or {}).get(group) or []):
+            if int(task.get("id") or 0) == int(task_id):
+                return task
+        return None
+
+    def _complete_monthly_upload_task(self, task: dict[str, Any]) -> bool:
+        target_count = 100
+        current_process = int(task.get("process") or 0)
+        for _ in range(3):
+            remaining = self._remaining_sign_in_seconds()
+            if remaining is not None and remaining < 4.0:
+                return False
+            remaining = max(0, target_count - current_process)
+            if remaining == 0:
+                return True
+            for _ in range(remaining):
+                time_left = self._remaining_sign_in_seconds()
+                if time_left is not None and time_left < 2.0:
+                    return False
+                self._upload_dummy_file()
+            refreshed = self._query_cloud_task(int(task.get("id") or 522), "time")
+            if not refreshed:
+                return False
+            refreshed_process = int(refreshed.get("process") or 0)
+            if refreshed.get("state") == "FINISH" or refreshed_process >= target_count:
+                return True
+            if refreshed_process <= current_process:
+                return False
+            current_process = refreshed_process
+        return False
+
+    def _format_notice_task_log(self, task_name: str, notice_status: dict[str, Any]) -> str:
+        if not notice_status:
+            return f"需手动完成: {task_name}"
+        push_on = int(notice_status.get("pushOn") or 0)
+        first_status = int(notice_status.get("firstTaskStatus") or 0)
+        second_status = int(notice_status.get("secondTaskStatus") or 0)
+        on_duration = int(notice_status.get("onDuaration") or 0)
+        total = int(notice_status.get("total") or 31)
+        if push_on != 1:
+            return f"需手动完成: {task_name} (通知未开启)"
+        if second_status == 3:
+            return f"已完成: {task_name}"
+        if first_status != 3:
+            return f"待领取: {task_name} (首日奖励可领取)"
+        if second_status == 2:
+            return f"待领取: {task_name} (已开启{on_duration}/{total}天)"
+        return f"进行中: {task_name} (已开启{on_duration}/{total}天)"
+
+    def _get_notice_status(self) -> dict[str, Any]:
+        data = self._request_json("GET", "https://caiyun.feixin.10086.cn/market/msgPushOn/task/status", headers=self._market_headers(include_jwt=True, jwt_token=self._market_jwt_token), cookies=self._market_cookies(self._market_jwt_token), timeout=20)
+        if not isinstance(data, dict) or int(data.get("code", -1)) != 0:
+            return {}
+        return data.get("result") or {}
+
+    def _claim_revival_reward(self) -> dict[str, Any]:
+        data = self._market_request_json(
+            "POST",
+            f"{self.MARKET_BASE_URL}/ycloud/signin/page/receiveRevivalReward",
+            headers=self._market_headers(include_jwt=True, jwt_token=self._market_jwt_token),
+            json_body={},
+            cookies=self._market_cookies(self._market_jwt_token),
+            timeout=20,
+        )
+        if not isinstance(data, dict):
+            return {"message": "复活卡接口无响应"}
+        result = data.get("result") or {}
+        reward = int(result.get("rewardClouds") or 0)
+        return {"code": data.get("code"), "reward": reward, "total": result.get("totalClouds"), "message": str(data.get("msg") or "")}
+
+    def _claim_multiple_clouds(self) -> dict[str, Any]:
+        data = self._market_request_json(
+            "GET",
+            f"{self.MARKET_BASE_URL}/ycloud/signin/page/multiple",
+            headers=self._market_headers(include_jwt=True, jwt_token=self._market_jwt_token),
+            cookies=self._market_cookies(self._market_jwt_token),
+            timeout=20,
+        )
+        if not isinstance(data, dict):
+            return {}
+        result = data.get("result") or {}
+        return {"code": data.get("code"), "cloudCount": int(result.get("cloudCount") or 0)}
+
+    def _handle_cloud_v2_task(self, group: str, task: dict[str, Any]) -> dict[str, Any]:
+        task_id = int(task.get("id") or 0)
+        task_name = self._strip_task_name(task)
+        task_status = str(task.get("state") or "")
+        if task_status == "FINISH":
+            return {"task_id": task_id, "task_name": task_name, "status": "finished"}
+        if group == "day" and task_id == 106:
+            self._upload_dummy_file()
+            return {"task_id": task_id, "task_name": task_name, "status": "attempted"}
+        if task_id == 522:
+            if self._complete_monthly_upload_task(task):
+                return {"task_id": task_id, "task_name": task_name, "status": "finished"}
+            return {"task_id": task_id, "task_name": task_name, "status": "manual", "message": self._get_task_progress(task)}
+        if task_id == 434:
+            refreshed = self._complete_share_file_task(task)
+            if refreshed and refreshed.get("state") == "FINISH":
+                return {"task_id": task_id, "task_name": task_name, "status": "finished"}
+            return {"task_id": task_id, "task_name": task_name, "status": "manual", "message": self._get_task_progress(refreshed or task)}
+        if task_id == 406:
+            return {"task_id": task_id, "task_name": task_name, "status": "info", "message": self._format_notice_task_log(task_name, self._get_notice_status())}
+        if task_id == 478:
+            click_data = self._click_market_task(task_id, "randomCloudTask") or {}
+            if int(click_data.get("code", -1)) == 0:
+                return {"task_id": task_id, "task_name": task_name, "status": "finished", "raw": click_data}
+            return {"task_id": task_id, "task_name": task_name, "status": "manual", "message": str(click_data.get("msg") or "未知错误")}
+        task_keys = self._get_task_click_keys(task)
+        if task_keys:
+            for task_key in task_keys:
+                click_data = self._click_market_task(task_id, task_key)
+                if int((click_data or {}).get("code", -1)) != 0:
+                    return {"task_id": task_id, "task_name": task_name, "status": "failed", "message": str((click_data or {}).get("msg") or "任务登记失败")}
+            if task_id == 585 and self._complete_ai_camera_task():
+                return {"task_id": task_id, "task_name": task_name, "status": "finished"}
+            return {"task_id": task_id, "task_name": task_name, "status": "registered"}
+        return {"task_id": task_id, "task_name": task_name, "status": "manual", "message": self._get_task_progress(task)}
+
+    def _run_cloud_tasks_stage(self, jwt_token: str) -> dict[str, Any]:
+        groups = [("cloudEmail", "联动任务"), ("time", "新版热门任务"), ("day", "云盘每日任务"), ("month", "云盘每月任务")]
+        handled: list[dict[str, Any]] = []
+        failures = 0
+        for group, _title in groups:
+            data = self._market_request_json(
+                "POST",
+                f"{self.MARKET_BASE_URL}/ycloud/signin/task/taskListV2",
+                headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+                json_body={"marketname": self.SIGNIN_ACTIVITY_ID, "clientVersion": "13.0.0", "group": group},
+                cookies=self._market_cookies(jwt_token),
+                timeout=20,
+            )
+            if not isinstance(data, dict) or int(data.get("code", -1)) != 0:
+                failures += 1
+                handled.append({"group": group, "status": "failed", "message": str((data or {}).get("msg") or "获取任务列表失败")})
+                continue
+            for task in ((data.get("result") or {}).get(group) or []):
+                handled.append({"group": group, **self._handle_cloud_v2_task(group, task)})
+        revival = self._claim_revival_reward()
+        multiple = self._claim_multiple_clouds()
+        self._cleanup_uploaded_files()
+        return self._build_sign_stage_result(
+            ok=failures == 0,
+            message="云朵中心任务处理完成" if failures == 0 else f"云朵中心任务处理完成，{failures} 个分组获取失败",
+            raw={"tasks": handled, "revival": revival, "multiple": multiple},
+            finished=sum(1 for item in handled if item.get("status") in {"finished", "registered", "attempted"}),
+        )
+
+    def _run_cloud_reward_stage(self, jwt_token: str) -> dict[str, Any]:
+        info_data = self._query_market_signin_info(jwt_token)
+        if int(info_data.get("code", -1)) != 0:
+            raise RuntimeError(str(info_data.get("msg") or "查询云朵失败"))
+        info_result = info_data.get("result") or {}
+        pending_amount = int(info_result.get("toReceive") or 0)
+        total_amount = int(info_result.get("total") or 0)
+        receive_amount = 0
+        raw: dict[str, Any] = {"info": info_data}
+        if pending_amount:
+            self._prepare_signin_center_session(for_receive=True)
+            receive_data: dict[str, Any] | None = None
+            receive_error = ""
+            try:
+                receive_data = self._market_request_json(
+                    "GET",
+                    f"{self.MARKET_BASE_URL}/ycloud/signin/page/receiveV2",
+                    headers=self._build_receive_headers(jwt_token),
+                    params={"client": "app"},
+                    cookies=self._market_cookies(jwt_token),
+                    timeout=20,
+                )
+            except Exception as exc:
+                receive_error = str(exc)
+            raw["receive"] = receive_data
+            if receive_error:
+                raw["receive_error"] = receive_error
+            if isinstance(receive_data, dict) and int(receive_data.get("code", -1)) == 0:
+                result = receive_data.get("result") or {}
+                receive_amount = int(result.get("receive") or pending_amount)
+                total_amount = int(result.get("total") or total_amount)
+            else:
+                latest_info_data = self._query_market_signin_info(jwt_token)
+                raw["latest_info"] = latest_info_data
+                latest_result = latest_info_data.get("result") or {}
+                latest_pending = int(latest_result.get("toReceive") or pending_amount)
+                latest_total = int(latest_result.get("total") or total_amount)
+                pending_delta = pending_amount - latest_pending
+                total_delta = latest_total - total_amount
+                claimed_amount = total_delta or pending_delta or (pending_amount if latest_pending == 0 else 0)
+                if claimed_amount > 0:
+                    receive_amount = claimed_amount
+                    total_amount = latest_total
+        prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPage?currPage=1&pageSize=15&_={self._current_millis()}"
+        try:
+            prize_data = self._request_json(
+                "GET",
+                prize_url,
+                headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+                cookies=self._market_cookies(jwt_token),
+                timeout=20,
+            )
+        except Exception as exc:
+            prize_data = {"error": str(exc)}
+        raw["prize"] = prize_data
+        pending_rewards: list[str] = []
+        if isinstance(prize_data, dict):
+            for item in (((prize_data.get("result") or {}).get("result")) or []):
+                if int(item.get("flag") or 0) == 1:
+                    name = str(item.get("prizeName") or "").strip()
+                    if name:
+                        pending_rewards.append(name)
+        message = f"云朵领取完成，当前 {total_amount} 云朵"
+        if pending_rewards:
+            message = f"{message}，待领取奖品 {len(pending_rewards)} 项"
+        return self._build_sign_stage_result(
+            ok=True,
+            message=message,
+            reward=receive_amount,
+            raw=raw,
+            total=total_amount,
+            pending=pending_amount,
+            pending_rewards=pending_rewards,
+        )
+
+    def _run_backup_stage(self, jwt_token: str) -> dict[str, Any]:
+        backup_info = self._request_json("GET", "https://caiyun.feixin.10086.cn/market/backupgift/info", headers=self._market_headers(include_jwt=True, jwt_token=jwt_token), cookies=self._market_cookies(jwt_token), timeout=20)
+        raw: dict[str, Any] = {"backup_info": backup_info}
+        if isinstance(backup_info, dict):
+            state = (backup_info.get("result") or {}).get("state")
+            if state == 0:
+                raw["backup_receive"] = self._request_json("GET", "https://caiyun.feixin.10086.cn/market/backupgift/receive", headers=self._market_headers(include_jwt=True, jwt_token=jwt_token), cookies=self._market_cookies(jwt_token), timeout=20)
+        expand_data = self._market_request_json("GET", f"{self.MARKET_BASE_URL}/ycloud/signin/page/taskExpansion", headers=self._market_headers(include_jwt=True, jwt_token=jwt_token), cookies=self._market_cookies(jwt_token), timeout=20)
+        raw["expand"] = expand_data
+        result = (expand_data or {}).get("result") or {}
+        if result.get("preMonthBackup") and not result.get("curMonthBackupTaskAccept") and result.get("acceptDate"):
+            raw["expand_receive"] = self._market_request_json("GET", f"{self.MARKET_BASE_URL}/ycloud/signin/page/receiveTaskExpansion", headers=self._market_headers(include_jwt=True, jwt_token=jwt_token), params={"acceptDate": result.get("acceptDate")}, cookies=self._market_cookies(jwt_token), timeout=20)
+        return self._build_sign_stage_result(ok=True, message="备份奖励链路执行完成", raw=raw)
+
+    def _run_wx_sign_stage(self, jwt_token: str) -> dict[str, Any]:
+        data = self._request_json("GET", "https://caiyun.feixin.10086.cn/market/playoffic/followSignInfo?isWx=true", headers=self._market_headers(include_jwt=True, jwt_token=jwt_token), cookies=self._market_cookies(jwt_token), timeout=20)
+        if not isinstance(data, dict) or str(data.get("msg") or "") != "success":
+            return self._build_sign_stage_result(ok=False, message=str((data or {}).get("msg") or "公众号签到失败"), raw=data)
+        today = bool(((data.get("result") or {}).get("todaySignIn")))
+        return self._build_sign_stage_result(ok=today, message="公众号签到成功" if today else "可能未绑定公众号", raw=data)
+
+    def _run_shake_stage(self, jwt_token: str) -> dict[str, Any]:
+        prizes: list[str] = []
+        error_message = ""
+        try:
+            for _ in range(15):
+                remaining = self._remaining_sign_in_seconds()
+                if remaining is not None and remaining < 2.0:
+                    break
+                data = self._request_json(
+                    "POST",
+                    "https://caiyun.feixin.10086.cn:7071/market/shake-server/shake/shakeIt?flag=1",
+                    headers=self._jwt_activity_headers(jwt_token),
+                    cookies=self._jwt_activity_cookies(jwt_token),
+                    timeout=20,
+                )
+                prize = (((data or {}).get("result") or {}).get("shakePrizeconfig") or {}).get("name")
+                if prize:
+                    prizes.append(str(prize))
+                self._sleep_with_budget(1)
+        except Exception as exc:
+            error_message = str(exc)
+        if prizes:
+            return self._build_sign_stage_result(ok=True, message=f"摇一摇获得 {len(prizes)} 次奖励", raw={"prizes": prizes, "error": error_message or None})
+        return self._build_sign_stage_result(ok=False, message=error_message or "摇一摇未中奖", raw={"prizes": prizes, "error": error_message or None})
+
+    def _run_draw_stage(self, jwt_token: str) -> dict[str, Any]:
+        info = self._request_json("GET", "https://caiyun.feixin.10086.cn/market/playoffic/drawInfo", headers=self._market_headers(include_jwt=True, jwt_token=jwt_token), cookies=self._market_cookies(jwt_token), timeout=20)
+        raw: dict[str, Any] = {"info": info, "draws": []}
+        if not isinstance(info, dict) or str(info.get("msg") or "") != "success":
+            return self._build_sign_stage_result(ok=False, message=str((info or {}).get("msg") or "抽奖查询失败"), raw=raw)
+        remain_num = int(((info.get("result") or {}).get("surplusNumber")) or 0)
+        if remain_num <= 49:
+            return self._build_sign_stage_result(ok=True, message=f"剩余抽奖次数 {remain_num}", raw=raw)
+        draw = self._request_json("GET", "https://caiyun.feixin.10086.cn/market/playoffic/draw", headers=self._market_headers(include_jwt=True, jwt_token=jwt_token), cookies=self._market_cookies(jwt_token), timeout=20)
+        raw["draws"].append(draw)
+        prize_name = (((draw or {}).get("result") or {}).get("prizeName") or "")
+        return self._build_sign_stage_result(ok=int((draw or {}).get("code", -1)) == 0, message=f"抽奖成功，获得 {prize_name}" if prize_name else "抽奖完成", raw=raw)
+
+    def _red_packet_login_headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "User-Agent": self.MARKET_USER_AGENT,
+            "Accept": "*/*",
+            "Host": "cpactiv.buy.139.com",
+        }
+
+    def _red_packet_market_headers(self, jwt_token: str) -> dict[str, str]:
+        return {
+            **self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            "Referer": self._build_market_page_url(self.RED_PACKET_SOURCE_ID),
+        }
+
+    def _red_packet_request(self, path: str, body: dict[str, Any], *, jwt_token: str = "") -> dict[str, Any]:
+        data = self._market_request_json(
+            "POST",
+            f"{self.RED_PACKET_BASE_URL}{path}",
+            headers=self._red_packet_market_headers(jwt_token),
+            json_body=body,
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def _login_red_packet(self) -> dict[str, Any]:
+        token = self._query_market_sso_token(self.RED_PACKET_SOURCE_ID)
+        resp = requests.post(
+            f"{self.RED_PACKET_BASE_URL}/ticket/login",
+            headers=self._red_packet_login_headers(),
+            json={"token": token, "sourceId": self.RED_PACKET_SOURCE_ID},
+            timeout=self._effective_timeout(20),
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"红包派对登录失败: HTTP {resp.status_code}")
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("红包派对登录失败: 接口无响应")
+        if int(data.get("code", -1)) != 0:
+            raise RuntimeError(str(data.get("msg") or "红包派对登录失败"))
+        header = data.get("header") or {}
+        if str(header.get("status") or "") != "200":
+            raise RuntimeError(str(header.get("respMsg") or "红包派对登录失败"))
+        result = data.get("result") or {}
+        self._red_packet_token = str(result.get("token") or "")
+        self._red_packet_mobile = str(result.get("mobile") or self._username or self._phone or "")
+        self._red_packet_jwt_token = str(result.get("jwtToken") or "")
+        if self._red_packet_jwt_token:
+            self._build_market_context(self._red_packet_jwt_token)
+        return {
+            "token": self._red_packet_token,
+            "mobile": self._red_packet_mobile,
+            "jwt_token": self._red_packet_jwt_token,
+        }
+
+    def _sign_red_packet(self, mobile: str, jwt_token: str) -> dict[str, Any]:
+        sign = hashlib.md5(f"{self.RED_PACKET_SIGN_KEY}mobile{mobile}".encode("utf-8")).hexdigest()
+        return self._red_packet_request("/sign/signBySourceId", {"mobile": mobile, "sign": sign, "sourceId": self.RED_PACKET_SOURCE_ID, "version": self.RED_PACKET_VERSION, "channelSrc": self.RED_PACKET_CHANNEL_SRC}, jwt_token=jwt_token)
+
+    def _get_red_packet_task_list(self, token: str, jwt_token: str) -> dict[str, Any]:
+        return self._red_packet_request("/taskCenter/task", {"appId": self.RED_PACKET_APP_ID, "sourceId": self.RED_PACKET_SOURCE_ID, "token": token}, jwt_token=jwt_token)
+
+    def _get_red_packet_balance(self, token: str, jwt_token: str) -> dict[str, Any]:
+        return self._red_packet_request("/taskCenter/balance", {"appId": self.RED_PACKET_APP_ID, "sourceId": self.RED_PACKET_SOURCE_ID, "token": token}, jwt_token=jwt_token)
+
+    def _get_red_packet_question(self, token: str, task_code: str, jwt_token: str) -> dict[str, Any]:
+        return self._red_packet_request("/taskCenter/question", {"appId": self.RED_PACKET_APP_ID, "sourceId": self.RED_PACKET_SOURCE_ID, "token": token, "taskCode": task_code}, jwt_token=jwt_token)
+
+    def _answer_red_packet_question(self, token: str, task_code: str, option_id: str, jwt_token: str) -> dict[str, Any]:
+        return self._red_packet_request("/taskCenter/answer", {"appId": self.RED_PACKET_APP_ID, "sourceId": self.RED_PACKET_SOURCE_ID, "token": token, "taskCode": task_code, "optionId": option_id}, jwt_token=jwt_token)
+
+    def _handle_red_packet_task(self, token: str, jwt_token: str, task: dict[str, Any]) -> dict[str, Any]:
+        task_name = str(task.get("taskName") or "")
+        task_code = str(task.get("taskCode") or "")
+        state = int(task.get("state") or 0)
+        if state == 3:
+            return {"task_name": task_name, "task_code": task_code, "status": "finished"}
+        if task_code in self.RED_PACKET_MANUAL_TASKS:
+            return {"task_name": task_name, "task_code": task_code, "status": "manual", "message": self.RED_PACKET_MANUAL_TASKS[task_code]}
+        if state == 0:
+            click_data = self._red_packet_request("/taskCenter/click", {"appId": self.RED_PACKET_APP_ID, "sourceId": self.RED_PACKET_SOURCE_ID, "token": token, "taskCode": task_code}, jwt_token=jwt_token)
+            header = click_data.get("header") or {}
+            if int(header.get("status") or 0) != 200:
+                return {"task_name": task_name, "task_code": task_code, "status": "failed", "message": str(header.get("respMsg") or "点击失败")}
+            done = click_data.get("data") or {}
+            if int(done.get("state") or 0) == 2:
+                return {"task_name": task_name, "task_code": task_code, "status": "running"}
+            return {"task_name": task_name, "task_code": task_code, "status": "clicked"}
+        if state == 1:
+            return {"task_name": task_name, "task_code": task_code, "status": "running"}
+        if state == 2:
+            if task_code in self.RED_PACKET_BROWSE_TASKS:
+                return {"task_name": task_name, "task_code": task_code, "status": "manual", "message": "需跳转活动页完成"}
+            if task_code in self.RED_PACKET_DIRECT_TASKS:
+                complete = self._red_packet_request("/taskCenter/complete", {"appId": self.RED_PACKET_APP_ID, "sourceId": self.RED_PACKET_SOURCE_ID, "token": token, "taskCode": task_code}, jwt_token=jwt_token)
+                header = complete.get("header") or {}
+                return {"task_name": task_name, "task_code": task_code, "status": "finished" if int(header.get("status") or 0) == 200 else "failed", "raw": complete}
+            if task_code.startswith("ANSWER_"):
+                question = self._get_red_packet_question(token, task_code, jwt_token)
+                qdata = question.get("data") or {}
+                question_text = str(qdata.get("question") or qdata.get("questionText") or "")
+                options = qdata.get("options") or qdata.get("questionOptionList") or []
+                answer = self.RED_PACKET_KNOWN_ANSWERS.get(question_text, "")
+                if not answer and options:
+                    answer = str((options[0] or {}).get("optionDesc") or (options[0] or {}).get("name") or "")
+                option_id = ""
+                for opt in options:
+                    desc = str(opt.get("optionDesc") or opt.get("name") or "")
+                    if desc == answer:
+                        option_id = str(opt.get("id") or opt.get("optionId") or "")
+                        break
+                if option_id:
+                    answer_data = self._answer_red_packet_question(token, task_code, option_id, jwt_token)
+                    header = answer_data.get("header") or {}
+                    return {"task_name": task_name, "task_code": task_code, "status": "finished" if int(header.get("status") or 0) == 200 else "failed", "raw": answer_data}
+            return {"task_name": task_name, "task_code": task_code, "status": "manual", "message": "需手动完成"}
+        return {"task_name": task_name, "task_code": task_code, "status": "unknown"}
+
+    def _run_red_packet_stage(self) -> dict[str, Any]:
+        login = self._login_red_packet()
+        token = str(login.get("token") or "")
+        mobile = str(login.get("mobile") or self._username or self._phone or "")
+        jwt_token = str(login.get("jwt_token") or self._red_packet_jwt_token or self._market_jwt_token or "")
+        if not token:
+            raise RuntimeError("红包派对 token 为空")
+        sign_data = self._sign_red_packet(mobile, jwt_token)
+        task_data = self._get_red_packet_task_list(token, jwt_token)
+        header = task_data.get("header") or {}
+        if int(header.get("status") or 0) != 200:
+            raise RuntimeError(str(header.get("errMsg") or header.get("respMsg") or "获取红包派对任务失败"))
+        task_list = task_data.get("data") or {}
+        handled: list[dict[str, Any]] = []
+        for group in ("SIGN", "NOVICE", "DAILY", "MONTHLY"):
+            for task in task_list.get(group) or []:
+                if group == "SIGN" and int(task.get("state") or 0) != 3:
+                    handled.append({"task_name": str(task.get("taskName") or "签到"), "task_code": str(task.get("taskCode") or ""), "status": "finished" if int(sign_data.get("code", -1)) == 0 else "failed", "raw": sign_data})
+                    continue
+                handled.append(self._handle_red_packet_task(token, jwt_token, task))
+        balance = self._get_red_packet_balance(token, jwt_token)
+        amount = ((balance.get("data") or {}).get("amount")) or 0
+        return self._build_sign_stage_result(ok=True, message=f"红包派对任务完成，余额 {amount}", raw={"login": login, "sign": sign_data, "tasks": handled, "balance": balance})
 
     def sign_in(self) -> Dict[str, Any]:
         self._ensure_authenticated()
@@ -939,40 +2197,42 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             info = {}
         if isinstance(info, dict):
             self._update_identity_from_user_info(info)
+        context_error = ""
+        jwt_token = ""
+        try:
+            context = self._prepare_market_context()
+            jwt_token = str(context.get("jwt_token") or "")
+        except Exception as exc:
+            context_error = str(exc)
 
-        sso_token = self._query_market_sso_token()
-        jwt_token = self._query_market_jwt_token(sso_token)
-
-        status_data = self._query_market_signin_info(jwt_token)
-        raw: dict[str, Any] = {"status": status_data}
-        if str(status_data.get("msg") or "") != "success":
-            raise RuntimeError(str(status_data.get("msg") or "查询签到状态失败"))
-
-        result = status_data.get("result") or {}
-        today_signed = bool(result.get("todaySignIn"))
-        if today_signed:
-            reward = self._extract_signin_reward(result)
-            return {
-                "supported": True,
-                "ok": True,
-                "reward": reward,
-                "message": "今日已签到",
-                "raw": raw,
-            }
-
-        signin_data = self._do_market_signin(jwt_token)
-        raw["signin"] = signin_data
-        if str(signin_data.get("msg") or "") != "success":
-            raise RuntimeError(str(signin_data.get("msg") or "签到失败"))
-
-        reward = self._extract_signin_reward(signin_data.get("result") or signin_data)
-        message = f"签到成功，获得 {reward} 云朵" if reward else "签到成功"
+        stages = {
+            "signin": self._run_sign_stage(self._sign_in_market_stage, "signin", required_jwt=True, jwt_token=jwt_token),
+            "click": self._run_sign_stage(self._run_market_click_stage, "click", required_jwt=True, jwt_token=jwt_token),
+            "cloud_tasks": self._run_sign_stage(self._run_cloud_tasks_stage, "cloud_tasks", required_jwt=True, jwt_token=jwt_token),
+            "backup": self._run_sign_stage(self._run_backup_stage, "backup", required_jwt=True, jwt_token=jwt_token),
+            "wxsign": self._run_sign_stage(self._run_wx_sign_stage, "wxsign", required_jwt=True, jwt_token=jwt_token),
+            "shake": self._run_sign_stage(self._run_shake_stage, "shake", required_jwt=True, jwt_token=jwt_token),
+            "draw": self._run_sign_stage(self._run_draw_stage, "draw", required_jwt=True, jwt_token=jwt_token),
+            "red_packet": self._run_sign_stage(self._run_red_packet_stage, "red_packet"),
+            "cloud_reward": self._run_sign_stage(self._run_cloud_reward_stage, "cloud_reward", required_jwt=True, jwt_token=jwt_token),
+        }
+        success_count = sum(1 for item in stages.values() if item.get("ok"))
+        skipped_count = sum(1 for item in stages.values() if item.get("skipped"))
+        reward = sum(int(item.get("reward") or 0) for item in stages.values())
+        sign_message = str((stages.get("signin") or {}).get("message") or ("签到上下文初始化失败" if context_error else "签到阶段已跳过"))
+        remaining = self._remaining_sign_in_seconds()
+        summary_message = f"{sign_message}；链路执行完成，成功 {success_count} 项，跳过 {skipped_count} 项"
         return {
             "supported": True,
             "ok": True,
             "reward": reward,
-            "message": message,
-            "raw": raw,
+            "message": sign_message,
+            "raw": {
+                "context_error": context_error or None,
+                "summary_message": summary_message,
+                "remaining_budget_seconds": round(remaining, 2) if remaining is not None else None,
+                "stages": stages,
+            },
         }
 
     def _parse_timestamp(self, value: Any) -> int:
@@ -1208,7 +2468,7 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
 
     def _list_disk_dir(self, parent_file_id: str = "/", *, cursor: str | None = None) -> dict[str, Any]:
         body = {
-            "pageInfo": {"pageSize": 100, "pageCursor": cursor},
+            "pageInfo": {"pageSize": 1000, "pageCursor": cursor},
             "orderBy": "updated_at",
             "orderDirection": "DESC",
             "parentFileId": parent_file_id or "/",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
@@ -11,16 +12,20 @@ from app.core.errors import bad_request
 from app.extensions.runtime.adapter_registry import AdapterRegistry
 from app.models.dl302_setting import DL302Setting
 from app.models.drive_account import DriveAccount
+from app.services.dl302_cas import get_dl302_cas_task_summary
+from app.services.drive_accounts import serialize_drive_account
 
 
 DL302_PROXY_URL_KEY = "ProxyURL"
 DL302_PROXY_PATH_OFFSET_KEY = "ProxyPathOffset"
 DL302_INTRANET_CIDRS_KEY = "IntranetCIDRs"
+DL302_AUTO_BALANCE_KEY = "AutoBalance"
+DL302_COPY_DOWNLOAD_MODE_KEY = "CopyDownloadMode"
 DL302_STRM_ENABLED_KEY = "StrmEnabled"
 DL302_STRM_MODE_KEY = "StrmMode"
 DL302_STRM_ROOT_DIR_KEY = "StrmRootDir"
 DL302_STRM_PREFIX_URL_KEY = "StrmPrefixURL"
-DL302_SUPPORTED_DRIVE_TYPES = ("115", "cloud189", "cloud139")
+DL302_SUPPORTED_DRIVE_TYPES = ("115", "cloud189", "cloud139", "quark", "uc")
 DL302_STRM_MODES = ("auto", "independent")
 DL302_DEFAULT_INTRANET_CIDRS = (
     "10.0.0.0/8",
@@ -66,6 +71,8 @@ def serialize_dl302_config_kv(payload: dict[str, object]) -> str:
         DL302_PROXY_URL_KEY,
         DL302_PROXY_PATH_OFFSET_KEY,
         DL302_INTRANET_CIDRS_KEY,
+        DL302_AUTO_BALANCE_KEY,
+        DL302_COPY_DOWNLOAD_MODE_KEY,
         DL302_STRM_ENABLED_KEY,
         DL302_STRM_MODE_KEY,
         DL302_STRM_ROOT_DIR_KEY,
@@ -90,6 +97,10 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         proxy_path_offset = -1
     proxy_url = str(payload.get(DL302_PROXY_URL_KEY, "") or "").strip() or None
     intranet_cidrs = parse_intranet_cidrs(payload.get(DL302_INTRANET_CIDRS_KEY))
+    auto_balance_raw = str(payload.get(DL302_AUTO_BALANCE_KEY, "") or "").strip().lower()
+    auto_balance = auto_balance_raw in {"1", "true", "yes", "on"}
+    copy_download_mode_raw = str(payload.get(DL302_COPY_DOWNLOAD_MODE_KEY, "") or "").strip()
+    copy_download_mode = "1" if copy_download_mode_raw == "1" else "0"
     strm_enabled_raw = str(payload.get(DL302_STRM_ENABLED_KEY, "") or "").strip().lower()
     strm_enabled = strm_enabled_raw in {"1", "true", "yes", "on"}
     strm_mode = str(payload.get(DL302_STRM_MODE_KEY, "") or "").strip().lower() or "auto"
@@ -101,6 +112,8 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         "proxy_url": proxy_url,
         "proxy_path_offset": proxy_path_offset,
         "intranet_cidrs": intranet_cidrs,
+        "auto_balance": auto_balance,
+        "copy_download_mode": copy_download_mode,
         "strm_enabled": strm_enabled,
         "strm_mode": strm_mode,
         "strm_root_dir": strm_root_dir,
@@ -194,6 +207,28 @@ def normalize_strm_root_dir(value: object) -> str | None:
     return text.rstrip("/") or "/"
 
 
+def extract_dl302_media_base_path(account: DriveAccount) -> str | None:
+    payload = str(getattr(account, "config_json", "") or "").strip()
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    text = str(data.get("302_path") or "").strip()
+    if not text:
+        return None
+    try:
+        path = str(PurePosixPath(text))
+    except Exception:
+        return None
+    if not path.startswith("/"):
+        path = "/" + path.lstrip("/")
+    return path.rstrip("/") or "/"
+
+
 def validate_strm_root_dir(value: object) -> str:
     text = normalize_strm_root_dir(value)
     if not text or not text.startswith("/"):
@@ -244,6 +279,19 @@ def update_dl302_setting(db: Session, *, payload: dict[str, object]) -> DL302Set
             else:
                 current[DL302_INTRANET_CIDRS_KEY] = ",".join(cidrs)
 
+    if "auto_balance" in payload:
+        value = payload.get("auto_balance")
+        if value is None:
+            current.pop(DL302_AUTO_BALANCE_KEY, None)
+        else:
+            current[DL302_AUTO_BALANCE_KEY] = "true" if bool(value) else "false"
+
+    if "copy_download_mode" in payload:
+        value = str(payload.get("copy_download_mode") or "").strip()
+        if value not in {"0", "1"}:
+            raise bad_request("DL302_COPY_DOWNLOAD_MODE_INVALID", "复制方式仅支持 0(流式) 或 1(下载)")
+        current[DL302_COPY_DOWNLOAD_MODE_KEY] = value
+
     if "strm_enabled" in payload:
         value = payload.get("strm_enabled")
         if value is None:
@@ -284,6 +332,7 @@ def list_supported_dl302_drivers(db: Session) -> list[dict[str, object]]:
             "account_count": 0,
             "enabled_count": 0,
             "default_account_name": None,
+            "accounts": [],
         }
         for code in DL302_SUPPORTED_DRIVE_TYPES
     }
@@ -297,6 +346,25 @@ def list_supported_dl302_drivers(db: Session) -> list[dict[str, object]]:
             state["enabled_count"] = int(state["enabled_count"]) + 1
         if bool(getattr(item, "is_default", False)):
             state["default_account_name"] = str(getattr(item, "name", "") or "").strip() or None
+        account_data = serialize_drive_account(item)
+        profile = dict(account_data.get("profile") or {})
+        media_base_path = extract_dl302_media_base_path(item)
+        state["accounts"].append(
+            {
+                "account_id": int(account_data.get("id") or 0),
+                "account_name": str(account_data.get("name") or ""),
+                "drive_type": drive_type,
+                "drive_name": str(profile.get("drive_name") or AdapterRegistry.get_drive_type_meta(drive_type).get("drive_name") or drive_type),
+                "enabled": bool(account_data.get("enabled")),
+                "is_default": bool(account_data.get("is_default")),
+                "runtime_status": account_data.get("runtime_status"),
+                "nickname": str(profile.get("nickname") or "").strip() or None,
+                "username": str(profile.get("username") or "").strip() or None,
+                "has_302_path": bool(media_base_path),
+                "media_base_path": media_base_path,
+                "cas_task": get_dl302_cas_task_summary(int(account_data.get("id") or 0), db),
+            }
+        )
 
     return [
         {

@@ -16,31 +16,28 @@ from app.core.exception_handlers import api_error_handler, http_error_handler, v
 from app.core.errors import ApiError
 from app.core.logging import setup_logging
 from app.core.settings import settings
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, driver
 from app.extensions.runtime.telegram_bot_manager import telegram_bot_manager
 from app.extensions.runtime.task_scheduler import task_scheduler_manager
 from app.middlewares.timing import TimingMiddleware
 from app.services.proxy_image_cache import ensure_dir, resolve_proxy_image_cache_dir
-from app.services.sync_execution_recovery import abort_running_sync_executions_on_startup, release_all_sync_task_locks_on_startup
+from app.services.sync_execution_recovery import recover_running_sync_executions_on_startup, release_all_sync_task_locks_on_startup
 from app.services.setup import ensure_permissions_and_roles
 
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_sqlite_dir() -> None:
-    if not settings.database_url.startswith("sqlite"):
-        return
-    if "///" not in settings.database_url:
-        return
-    path = settings.database_url.split("///", 1)[1]
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
+def _prepare_db_environment() -> None:
+    driver.prepare_environment()
 
 
 def _ensure_proxy_image_cache_dir() -> None:
-    path = resolve_proxy_image_cache_dir(database_url=settings.database_url, explicit_dir=settings.media_proxy_image_cache_dir)
+    path = resolve_proxy_image_cache_dir(
+        app_data_dir=settings.resolved_app_data_dir,
+        database_url=settings.database_url,
+        explicit_dir=settings.media_proxy_image_cache_dir,
+    )
     ensure_dir(path)
 
 
@@ -60,7 +57,7 @@ def _run_db_migrations_if_needed() -> None:
 
 def create_app() -> FastAPI:
     setup_logging()
-    _ensure_sqlite_dir()
+    _prepare_db_environment()
     _ensure_proxy_image_cache_dir()
 
     @asynccontextmanager
@@ -69,7 +66,7 @@ def create_app() -> FastAPI:
         try:
             with SessionLocal() as db:
                 ensure_permissions_and_roles(db)
-                abort_running_sync_executions_on_startup(db)
+                recover_running_sync_executions_on_startup(db)
                 release_all_sync_task_locks_on_startup(db)
                 db.commit()
         except Exception as e:

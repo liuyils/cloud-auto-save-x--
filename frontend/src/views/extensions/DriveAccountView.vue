@@ -16,6 +16,7 @@ import {
   refreshDriveAccountProfiles,
   setDriveAccountDefault,
   setDriveAccountStatus,
+  getDriveAccountSignInJob,
   signInDriveAccount,
   updateDriveAccount,
 } from '@/api/extensions'
@@ -85,6 +86,8 @@ type AuthChallenge = {
   session_id: string
 }
 
+const TV_QRCODE_DRIVES = ['quark', 'uc']
+
 function parseAuthChallenge(error: unknown): AuthChallenge | null {
   if (!axios.isAxiosError(error)) return null
   const err = error as AxiosError<ApiErrorBody>
@@ -105,7 +108,19 @@ async function gotoAuth(challenge: AuthChallenge) {
   await router.push({
     name: 'DriveAccountAuth',
     params: { accountId: String(challenge.account_id) },
-    query: { session_id: challenge.session_id, method: challenge.method },
+    query: { session_id: challenge.session_id, method: challenge.method, drive_type: challenge.drive_type },
+  })
+}
+
+function supportsTvQrcodeAuth(driveType: string) {
+  return TV_QRCODE_DRIVES.includes(String(driveType || '').trim().toLowerCase())
+}
+
+async function handleTvQrcodeAuth(row: DriveAccountItem) {
+  await router.push({
+    name: 'DriveAccountAuth',
+    params: { accountId: String(row.id) },
+    query: { drive_type: row.drive_type, start_qrcode: '1' },
   })
 }
 
@@ -296,6 +311,22 @@ async function handleProbe(row: DriveAccountItem) {
 
 async function handleSignIn(row: DriveAccountItem) {
   const result = await signInDriveAccount(row.id)
+  if (result?.async && result?.job_id) {
+    ElMessage.info('签到任务已提交，后台执行中')
+    for (;;) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      const job = await getDriveAccountSignInJob(String(result.job_id))
+      const status = String(job?.status ?? '')
+      if (status === 'pending' || status === 'running') continue
+      if (status === 'succeeded') {
+        const message = job?.result?.raw?.summary_message ?? job?.message ?? job?.result?.message ?? '签到成功'
+        ElMessage.success(String(message))
+        await loadData()
+        return
+      }
+      throw new Error(String(job?.message ?? job?.error?.message ?? '签到失败'))
+    }
+  }
   const message = result?.message ?? ''
   if (message) {
     ElMessage.success(String(message))
@@ -425,6 +456,9 @@ onMounted(loadProbeScheduler)
       <CapacityAccountCard v-for="item in filteredAccounts" :key="item.id" :account="item">
         <template #actions>
           <el-button v-if="canWrite" text bg @click="openEditDrawer(item)">编辑</el-button>
+          <el-button v-if="canWrite && supportsTvQrcodeAuth(item.drive_type)" text bg type="primary" @click="handleTvQrcodeAuth(item)">
+            TV 扫码登录
+          </el-button>
           <el-button v-if="canWrite" text bg @click="handleToggle(item, !item.enabled)">
             {{ item.enabled ? '禁用' : '启用' }}
           </el-button>

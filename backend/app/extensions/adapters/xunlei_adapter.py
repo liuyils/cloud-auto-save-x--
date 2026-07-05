@@ -619,7 +619,7 @@ class XunleiAdapter(BaseCloudDriveAdapter):
                     "filters": FILE_LIST_FILTERS,
                     "with_audit": "true",
                     "thumbnail_size": "SIZE_SMALL",
-                    "limit": 100,
+                    "limit": 1000,
                 }
                 
                 # 只有访问子目录时才传递 parent_id 参数

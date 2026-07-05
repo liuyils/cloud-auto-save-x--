@@ -9,6 +9,10 @@ from app.core.deps import CurrentUser, get_current_user, require_permissions
 from app.core.permissions import TASK_READ, TASK_WRITE
 from app.db.session import get_db
 from app.schemas.dl302_settings import (
+    DL302CASTaskItemOut,
+    DL302CASTaskListOut,
+    DL302CASTaskOut,
+    DL302CasGenerateOut,
     DL302ConfigOut,
     DL302ConfigUpdateIn,
     DL302StrmGenerateIn,
@@ -16,6 +20,15 @@ from app.schemas.dl302_settings import (
     DL302SupportedDriverOut,
 )
 from app.services import audit
+from app.services.dl302_cas import (
+    cancel_dl302_cas_task,
+    get_dl302_cas_task,
+    list_dl302_cas_task_items,
+    list_dl302_cas_tasks,
+    pause_dl302_cas_task,
+    resume_dl302_cas_task,
+    submit_dl302_cas_task,
+)
 from app.services.dl302_strm import cleanup_dl302_strm_outputs, ensure_strm_prefix_url, get_dl302_strm_summary, rebuild_dl302_strm
 from app.services.dl302_settings import get_or_create_dl302_setting, list_supported_dl302_drivers, load_dl302_config, update_dl302_setting
 from app.thirdparty.dl302_grpc_client import reload_dl302
@@ -124,3 +137,112 @@ def post_dl302_strm_generate(
     )
     db.commit()
     return DL302StrmGenerateOut(**result)
+
+
+@router.post("/cas/accounts/{account_id}/tasks", response_model=DL302CasGenerateOut, dependencies=[Depends(require_permissions(TASK_WRITE))])
+def post_dl302_cas_task(
+    request: Request,
+    account_id: int,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DL302CasGenerateOut:
+    task = submit_dl302_cas_task(int(account_id), db)
+    audit.write_audit_log(
+        db,
+        actor_user_id=current.user.id,
+        action="dl302.cas.submit",
+        target_type="drive_account",
+        target_id=str(account_id),
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+        detail=f"task_id={task.get('task_id')}",
+    )
+    db.commit()
+    return DL302CasGenerateOut(
+        ok=True,
+        task=DL302CASTaskOut(**task),
+        message="CAS 任务已提交",
+    )
+
+
+@router.get("/cas/accounts/{account_id}/tasks", response_model=DL302CASTaskListOut, dependencies=[Depends(require_permissions(TASK_READ))])
+def get_dl302_cas_task_list(account_id: int, db: Session = Depends(get_db)) -> DL302CASTaskListOut:
+    tasks = list_dl302_cas_tasks(int(account_id), db, limit=5)
+    return DL302CASTaskListOut(tasks=[DL302CASTaskOut(**item) for item in tasks])
+
+
+@router.get("/cas/tasks/{task_id}", response_model=DL302CASTaskOut, dependencies=[Depends(require_permissions(TASK_READ))])
+def get_dl302_cas_task_detail(task_id: str) -> DL302CASTaskOut:
+    return DL302CASTaskOut(**get_dl302_cas_task(task_id))
+
+
+@router.get("/cas/tasks/{task_id}/items", response_model=list[DL302CASTaskItemOut], dependencies=[Depends(require_permissions(TASK_READ))])
+def get_dl302_cas_task_item_list(task_id: str) -> list[DL302CASTaskItemOut]:
+    return [DL302CASTaskItemOut(**item) for item in list_dl302_cas_task_items(task_id)]
+
+
+@router.post("/cas/tasks/{task_id}/pause", response_model=DL302CASTaskOut, dependencies=[Depends(require_permissions(TASK_WRITE))])
+def post_dl302_cas_task_pause(
+    request: Request,
+    task_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DL302CASTaskOut:
+    task = pause_dl302_cas_task(task_id)
+    audit.write_audit_log(
+        db,
+        actor_user_id=current.user.id,
+        action="dl302.cas.pause",
+        target_type="dl302_cas_task",
+        target_id=str(task_id),
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+    )
+    db.commit()
+    return DL302CASTaskOut(**task)
+
+
+@router.post("/cas/tasks/{task_id}/resume", response_model=DL302CASTaskOut, dependencies=[Depends(require_permissions(TASK_WRITE))])
+def post_dl302_cas_task_resume(
+    request: Request,
+    task_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DL302CASTaskOut:
+    task = resume_dl302_cas_task(task_id)
+    audit.write_audit_log(
+        db,
+        actor_user_id=current.user.id,
+        action="dl302.cas.resume",
+        target_type="dl302_cas_task",
+        target_id=str(task_id),
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+    )
+    db.commit()
+    return DL302CASTaskOut(**task)
+
+
+@router.post("/cas/tasks/{task_id}/cancel", response_model=DL302CASTaskOut, dependencies=[Depends(require_permissions(TASK_WRITE))])
+def post_dl302_cas_task_cancel(
+    request: Request,
+    task_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DL302CASTaskOut:
+    task = cancel_dl302_cas_task(task_id)
+    audit.write_audit_log(
+        db,
+        actor_user_id=current.user.id,
+        action="dl302.cas.cancel",
+        target_type="dl302_cas_task",
+        target_id=str(task_id),
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+    )
+    db.commit()
+    return DL302CASTaskOut(**task)

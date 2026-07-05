@@ -6,13 +6,16 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-SyncEndpointType = Literal["local", "openlist"]
+SyncEndpointType = Literal["local", "openlist", "netdisk"]
 SyncMode = Literal["one_way", "two_way"]
 
 
 class SyncEndpoint(BaseModel):
     type: SyncEndpointType
     path: str = Field(min_length=1)
+    account_id: int | None = None
+    account_name: str | None = None
+    drive_type: str | None = None
 
 
 class SyncStrategy(BaseModel):

@@ -55,6 +55,20 @@ class DirectoryScanError(RuntimeError):
         self.fid = str(fid or "")
 
 
+def _build_target_paths(savepath: str, relative_dir_paths: list[str] | None, *, recursive_savepath: bool) -> list[tuple[str, bool]]:
+    normalized_savepath = _normalize_parent_path(savepath)
+    target_paths: list[tuple[str, bool]] = [(normalized_savepath, bool(recursive_savepath))]
+    seen_paths = {normalized_savepath}
+    for raw in relative_dir_paths or []:
+        relative = str(raw or "").strip().strip("/")
+        full_path = normalized_savepath if not relative else _join_full_path(normalized_savepath, relative)
+        if full_path in seen_paths:
+            continue
+        seen_paths.add(full_path)
+        target_paths.append((full_path, True))
+    return target_paths
+
+
 def trigger_drive_account_lsdir_scan(account_id: int, source: str) -> bool:
     account_key = int(account_id)
     with _running_accounts_lock:
@@ -100,15 +114,7 @@ def trigger_drive_account_lsdir_targeted_scan(
 ) -> bool:
     account_key = int(account_id)
     normalized_savepath = _normalize_parent_path(savepath)
-    target_paths: list[tuple[str, bool]] = [(normalized_savepath, bool(recursive_savepath))]
-    seen_paths = {normalized_savepath}
-    for raw in relative_dir_paths or []:
-        relative = str(raw or "").strip().strip("/")
-        full_path = normalized_savepath if not relative else _join_full_path(normalized_savepath, relative)
-        if full_path in seen_paths:
-            continue
-        seen_paths.add(full_path)
-        target_paths.append((full_path, True))
+    target_paths = _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
 
     with _running_accounts_lock:
         if account_key in _running_accounts:
@@ -129,6 +135,75 @@ def trigger_drive_account_lsdir_targeted_scan(
     )
     thread.start()
     return True
+
+
+def refresh_drive_account_lsdir_paths(
+    account_id: int,
+    *,
+    savepath: str,
+    relative_dir_paths: list[str] | None,
+    source: str,
+    recursive_savepath: bool = False,
+) -> ScanStats:
+    account_key = int(account_id)
+    normalized_savepath = _normalize_parent_path(savepath)
+    target_paths = _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
+
+    with _running_accounts_lock:
+        if account_key in _running_accounts:
+            raise RuntimeError(f"drive account lsdir targeted scan busy account_id={account_key} savepath={normalized_savepath}")
+        _running_accounts.add(account_key)
+
+    started_at = time.monotonic()
+    failed_fid: str | None = None
+    stats = ScanStats()
+    try:
+        context = _load_scan_account_context(account_id=account_key, source=source, scan_label="sync targeted scan")
+        if context is None:
+            raise RuntimeError(f"drive account unavailable account_id={account_key}")
+        adapter = AdapterFactory.create_adapter(
+            context.drive_type,
+            context.runtime_cookie,
+            config=context.runtime_config,
+            account_name=context.account_name,
+        )
+        if adapter is None:
+            raise RuntimeError(f"drive account adapter unavailable account_id={account_key} drive_type={context.drive_type}")
+        if not getattr(adapter, "is_active", False):
+            ok = adapter.init()
+            if not ok:
+                raise RuntimeError(f"drive account adapter init failed account_id={account_key} drive_type={context.drive_type}")
+        with SessionLocal() as db:
+            purge_expired_drive_account_lsdir_cache(db)
+            db.commit()
+        stats = _refresh_account_paths(account_id=context.account_id, drive_type=context.drive_type, adapter=adapter, target_paths=target_paths)
+        with SessionLocal() as db:
+            _trigger_dl302_strm_after_scan(db=db, source=f"{source}.sync_targeted")
+            db.commit()
+        return stats
+    except Exception as exc:
+        failed_fid = getattr(exc, "fid", None) or failed_fid
+        logger.exception(
+            "drive account lsdir sync targeted scan failed account_id=%s source=%s failed_fid=%s target_paths=%s",
+            account_key,
+            source,
+            failed_fid,
+            [path for path, _recursive in target_paths],
+        )
+        raise
+    finally:
+        with _running_accounts_lock:
+            _running_accounts.discard(account_key)
+        logger.info(
+            "drive account lsdir sync targeted scan finished account_id=%s source=%s scanned_dirs=%s cached_items=%s duration_ms=%s failed_fid=%s target_paths=%s",
+            account_key,
+            source,
+            stats.scanned_dirs,
+            stats.cached_items,
+            int((time.monotonic() - started_at) * 1000),
+            failed_fid or "",
+            [path for path, _recursive in target_paths],
+        )
 
 
 def _scan_drive_account_worker(account_id: int, source: str) -> None:

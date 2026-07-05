@@ -9,7 +9,7 @@ from sqlalchemy import select
 from app.core.logging import setup_logging
 from app.core.permission_seed import PERMISSIONS_SEED
 from app.core.security import hash_password
-from app.db.session import SessionLocal
+from app.db.uow import unit_of_work
 from app.models.permission import Permission
 from app.models.role import Role
 from app.models.user import User
@@ -44,7 +44,8 @@ def ensure_admin(
 ) -> tuple[bool, bool]:
     ensure_password_policy(password)
 
-    with SessionLocal() as db:
+    with unit_of_work() as uow:
+        db = uow.session
         perms_by_code: dict[str, Permission] = {}
         for code, name in PERMISSIONS_SEED:
             permission = db.execute(select(Permission).where(Permission.code == code)).scalars().first()
@@ -84,8 +85,6 @@ def ensure_admin(
         user.roles = [admin_role]
         if activate:
             user.is_active = True
-
-        db.commit()
         return created, password_reset
 
 

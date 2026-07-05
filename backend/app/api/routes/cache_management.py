@@ -57,7 +57,11 @@ def _proxy_image_cfg() -> ProxyImageCacheConfig:
     ttl = max(int(settings.media_proxy_image_cache_ttl_seconds or 0), 1)
     return ProxyImageCacheConfig(
         enabled=bool(settings.media_proxy_image_cache_enabled),
-        cache_dir=resolve_proxy_image_cache_dir(database_url=settings.database_url, explicit_dir=settings.media_proxy_image_cache_dir),
+        cache_dir=resolve_proxy_image_cache_dir(
+            app_data_dir=settings.resolved_app_data_dir,
+            database_url=settings.database_url,
+            explicit_dir=settings.media_proxy_image_cache_dir,
+        ),
         ttl_seconds=ttl,
         max_file_bytes=int(settings.media_proxy_image_cache_max_file_bytes or 0),
         max_total_bytes=int(settings.media_proxy_image_cache_max_total_bytes or 0),

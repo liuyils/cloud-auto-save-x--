@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 import logging
@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.schemas.drive_account import DriveAccountCreateIn, DriveAccountOut, DriveAccountStatusIn, DriveAccountUpdateIn, DriveTypeOut
 from app.schemas.drive_account_auth import DriveAccountCaptchaSubmitIn, DriveAccountSmsSubmitIn
 from app.schemas.drive_account_probe_scheduler import DriveAccountProbeSchedulerSettingOut, DriveAccountProbeSchedulerSettingUpdateIn
+from app.extensions.adapters.adapter_factory import AdapterFactory
 from app.extensions.adapters.drive_auth import DriveAuthRequired
 from app.extensions.adapters.aliyun_adapter import AliyunAdapter
 from app.extensions.runtime.adapter_registry import AdapterRegistry
@@ -22,6 +23,7 @@ from app.services import audit
 from app.services.drive_accounts import (
     create_drive_account,
     delete_drive_account,
+    get_drive_account,
     list_drive_accounts,
     merge_runtime_account_config,
     probe_drive_account,
@@ -34,6 +36,7 @@ from app.services.drive_accounts import (
     update_drive_account,
 )
 from app.services.drive_account_lsdir_scan import trigger_drive_account_lsdir_scan_if_stale
+from app.services.drive_account_signin_jobs import get_drive_account_signin_job, submit_drive_account_signin_job
 from app.thirdparty.dl302_grpc_client import reload_dl302
 
 router = APIRouter()
@@ -42,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 def _reload_dl302_if_needed(drive_type: str | None) -> None:
-    if str(drive_type or "") not in {"115", "cloud189", "cloud139"}:
+    if str(drive_type or "") not in {"115", "cloud189", "cloud139", "quark", "uc"}:
         return
     ok, msg = reload_dl302()
     if not ok:
@@ -58,6 +61,18 @@ def _trigger_lsdir_scan_if_active(account: DriveAccount, *, source: str) -> None
     if str(getattr(account, "runtime_status", "") or "") != "active":
         return
     trigger_drive_account_lsdir_scan_if_stale(int(account.id), source=source)
+
+
+def _resolve_qrcode_auth_adapter(drive_type: str):
+    normalized = str(drive_type or "").strip().lower()
+    if normalized == "aliyun":
+        return AliyunAdapter, "aliyun"
+    adapter_class = AdapterFactory.ADAPTER_MAP.get(normalized)
+    if adapter_class is None:
+        return None, normalized
+    if hasattr(adapter_class, "start_tv_qrcode_auth") and hasattr(adapter_class, "poll_tv_qrcode_auth"):
+        return adapter_class, "tv"
+    return None, normalized
 
 
 
@@ -227,18 +242,40 @@ def post_account_auth_qrcode_start(request: Request, account_id: int, current: C
     account = db.get(DriveAccount, account_id)
     if account is None:
         raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
-    if account.drive_type != "aliyun":
+    adapter_class, adapter_mode = _resolve_qrcode_auth_adapter(account.drive_type)
+    if adapter_class is None:
         raise bad_request("DRIVE_ACCOUNT_AUTH_UNSUPPORTED", "当前账号不支持扫码认证")
-    resp = AliyunAdapter.generate_qrcode()
-    if not isinstance(resp, dict) or not resp.get("success"):
-        raise bad_request("DRIVE_ACCOUNT_AUTH_FAILED", "生成二维码失败", detail=str((resp or {}).get("message") or ""))
-    data = resp.get("data") or {}
+    if adapter_mode == "aliyun":
+        resp = AliyunAdapter.generate_qrcode()
+        if not isinstance(resp, dict) or not resp.get("success"):
+            raise bad_request("DRIVE_ACCOUNT_AUTH_FAILED", "生成二维码失败", detail=str((resp or {}).get("message") or ""))
+        data = resp.get("data") or {}
+        session_adapter = {"t": data.get("t") or "", "ck": data.get("ck") or ""}
+        session_payload = {"qrcode_url": data.get("qrCodeUrl") or "", "status": "NEW"}
+    else:
+        config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
+        resp = adapter_class.start_tv_qrcode_auth(config)
+        if not isinstance(resp, dict) or not resp.get("success"):
+            raise bad_request("DRIVE_ACCOUNT_AUTH_FAILED", "生成 TV 二维码失败", detail=str((resp or {}).get("message") or ""))
+        data = resp.get("data") or {}
+        session_adapter = {
+            "device_id": str(data.get("device_id") or config.get("device_id") or ""),
+            "query_token": str(data.get("query_token") or config.get("query_token") or ""),
+        }
+        session_payload = {
+            "qrcode_url": data.get("qrcode_url") or "",
+            "qrcode_image": data.get("qrcode_image") or data.get("qrcode_url") or "",
+            "status": str(data.get("status") or "NEW"),
+            "message": str(data.get("message") or "等待扫码"),
+            "device_id": session_adapter["device_id"],
+            "query_token": session_adapter["query_token"],
+        }
     session = create_auth_session(
         account_id=account.id,
         drive_type=account.drive_type,
         method="qrcode",
-        adapter={"t": data.get("t") or "", "ck": data.get("ck") or ""},
-        payload={"qrcode_url": data.get("qrCodeUrl") or "", "status": "NEW"},
+        adapter=session_adapter,
+        payload=session_payload,
     )
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_start', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
@@ -252,28 +289,71 @@ def post_account_auth_qrcode_poll(request: Request, session_id: str, current: Cu
         raise not_found("DRIVE_ACCOUNT_AUTH_SESSION_NOT_FOUND", "认证会话已失效")
     if session.method != "qrcode":
         raise bad_request("DRIVE_ACCOUNT_AUTH_METHOD_MISMATCH", "认证方式不匹配")
-    meta = session.adapter or {}
-    t = str(meta.get("t") or "")
-    ck = str(meta.get("ck") or "")
-    resp = AliyunAdapter.query_qrcode_status(t, ck)
-    if not isinstance(resp, dict) or not resp.get("success"):
-        raise bad_request("DRIVE_ACCOUNT_AUTH_FAILED", "查询二维码状态失败", detail=str((resp or {}).get("message") or ""))
-    data = resp.get("data") or {}
-    if str(data.get("status") or "") == "CONFIRMED" and str(data.get("refresh_token") or ""):
-        delete_auth_session(session_id)
-        account = db.get(DriveAccount, session.account_id)
-        if account is None:
-            raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
-        config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
-        config["refresh_token"] = str(data.get("refresh_token") or "")
-        update_drive_account(db, account.id, config=config)
-        account = probe_drive_account(db, account.id)
-        audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_confirm', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
-        db.commit()
-        db.refresh(account)
-        _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.auth_qrcode_confirm")
-        return _out(account)
-    session.payload.update({"status": str(data.get("status") or ""), "message": str(data.get("message") or "")})
+    adapter_class, adapter_mode = _resolve_qrcode_auth_adapter(session.drive_type)
+    if adapter_class is None:
+        raise bad_request("DRIVE_ACCOUNT_AUTH_UNSUPPORTED", "当前账号不支持扫码认证")
+    if adapter_mode == "aliyun":
+        meta = session.adapter or {}
+        t = str(meta.get("t") or "")
+        ck = str(meta.get("ck") or "")
+        resp = AliyunAdapter.query_qrcode_status(t, ck)
+        if not isinstance(resp, dict) or not resp.get("success"):
+            raise bad_request("DRIVE_ACCOUNT_AUTH_FAILED", "查询二维码状态失败", detail=str((resp or {}).get("message") or ""))
+        data = resp.get("data") or {}
+        if str(data.get("status") or "") == "CONFIRMED" and str(data.get("refresh_token") or ""):
+            delete_auth_session(session_id)
+            account = db.get(DriveAccount, session.account_id)
+            if account is None:
+                raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
+            config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
+            config["refresh_token"] = str(data.get("refresh_token") or "")
+            update_drive_account(db, account.id, config=config)
+            db.commit()
+            account = probe_drive_account(db, account.id)
+            audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_confirm', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
+            db.commit()
+            db.refresh(account)
+            _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.auth_qrcode_confirm")
+            return _out(account)
+        session.payload.update({"status": str(data.get("status") or ""), "message": str(data.get("message") or "")})
+    else:
+        resp = adapter_class.poll_tv_qrcode_auth(session.adapter or {})
+        if not isinstance(resp, dict) or not resp.get("success"):
+            raise bad_request("DRIVE_ACCOUNT_AUTH_FAILED", "查询 TV 二维码状态失败", detail=str((resp or {}).get("message") or ""))
+        data = resp.get("data") or {}
+        session.payload.update(
+            {
+                "status": str(data.get("status") or session.payload.get("status") or ""),
+                "message": str(data.get("message") or session.payload.get("message") or ""),
+                "device_id": str(data.get("device_id") or (session.adapter or {}).get("device_id") or ""),
+                "query_token": str(data.get("query_token") or (session.adapter or {}).get("query_token") or ""),
+            }
+        )
+        if data.get("qrcode_url") or data.get("qrcode_image"):
+            session.payload["qrcode_url"] = str(data.get("qrcode_url") or data.get("qrcode_image") or "")
+            session.payload["qrcode_image"] = str(data.get("qrcode_image") or data.get("qrcode_url") or "")
+        session.adapter = {
+            **dict(session.adapter or {}),
+            "device_id": session.payload.get("device_id") or "",
+            "query_token": session.payload.get("query_token") or "",
+        }
+        if str(data.get("status") or "") == "CONFIRMED" and str(data.get("refresh_token") or ""):
+            delete_auth_session(session_id)
+            account = db.get(DriveAccount, session.account_id)
+            if account is None:
+                raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
+            config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
+            config["refresh_token"] = str(data.get("refresh_token") or "")
+            if str(data.get("device_id") or "").strip():
+                config["device_id"] = str(data.get("device_id") or "").strip()
+            if str(data.get("query_token") or "").strip():
+                config["query_token"] = str(data.get("query_token") or "").strip()
+            update_drive_account(db, account.id, config=config)
+            db.commit()
+            db.refresh(account)
+            audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_confirm', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True, detail="tv_credentials_saved")
+            db.commit()
+            return _out(account)
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_poll', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     raise ApiError(
@@ -332,6 +412,7 @@ def post_account_auth_captcha_submit(request: Request, session_id: str, payload:
     if account is None:
         raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
     update_drive_account(db, session.account_id, config=merge_runtime_account_config(account, adapter.export_runtime_config()))
+    db.commit()
     account = probe_drive_account(db, session.account_id)
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_captcha', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
@@ -369,6 +450,7 @@ def post_account_auth_sms_submit(request: Request, session_id: str, payload: Dri
         raise not_found("DRIVE_ACCOUNT_NOT_FOUND", "驱动账号不存在")
     config_snapshot = merge_runtime_account_config(account, adapter.export_runtime_config())
     update_drive_account(db, session.account_id, config=config_snapshot)
+    db.commit()
     try:
         account = probe_drive_account(db, session.account_id)
     except ApiError as exc:
@@ -403,7 +485,28 @@ def post_account_auth_sms_submit(request: Request, session_id: str, payload: Dri
 
 
 @router.post('/{account_id}/sign-in', dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_WRITE))])
-def post_account_sign_in(request: Request, account_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def post_account_sign_in(
+    request: Request,
+    account_id: int,
+    async_mode: bool = Query(False, alias="async"),
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if async_mode:
+        get_drive_account(db, account_id)
+        job = submit_drive_account_signin_job(int(account_id))
+        audit.write_audit_log(
+            db,
+            actor_user_id=current.user.id,
+            action='drive_account.sign_in.submit',
+            target_type='drive_account',
+            target_id=str(account_id),
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get('user-agent'),
+            success=True,
+        )
+        db.commit()
+        return {"ok": True, "async": True, **job}
     try:
         result = sign_in_drive_account(db, account_id)
         audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.sign_in', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
@@ -437,6 +540,11 @@ def post_account_sign_in(request: Request, account_id: int, current: CurrentUser
         )
         db.commit()
         raise ApiError(code="DRIVE_ACCOUNT_SIGN_IN_FAILED", message="签到失败", http_status=500, detail=str(e))
+
+
+@router.get('/sign-in-jobs/{job_id}', dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_WRITE))])
+def get_account_sign_in_job(job_id: str):
+    return get_drive_account_signin_job(job_id)
 
 
 @router.post('/refresh-profiles', response_model=list[DriveAccountOut], dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_WRITE))])

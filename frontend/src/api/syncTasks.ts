@@ -1,6 +1,7 @@
 import { http } from '@/api/http'
 import type { PathBrowseResponse } from '@/types/pathBrowse'
-import type { SyncExecutionItem, SyncTaskItem } from '@/types/syncTasks'
+import type { DriveBrowseResponse } from '@/types/tasks'
+import type { SyncExecutionFilePage, SyncExecutionItem, SyncTaskItem } from '@/types/syncTasks'
 
 export async function fetchSyncTasks() {
   const { data } = await http.get<SyncTaskItem[]>('/sync-tasks')
@@ -10,8 +11,8 @@ export async function fetchSyncTasks() {
 export async function createSyncTask(payload: {
   name: string
   enabled: boolean
-  source: { type: string; path: string }
-  target: { type: string; path: string }
+  source: { type: string; path: string; account_id?: number | null }
+  target: { type: string; path: string; account_id?: number | null }
   mode: string
   strategy: Record<string, any>
   drama_task_uids?: string[]
@@ -26,8 +27,8 @@ export async function updateSyncTask(
   payload: Partial<{
     name: string
     enabled: boolean
-    source: { type: string; path: string }
-    target: { type: string; path: string }
+    source: { type: string; path: string; account_id?: number | null }
+    target: { type: string; path: string; account_id?: number | null }
     mode: string
     strategy: Record<string, any>
     drama_task_uids: string[]
@@ -48,10 +49,11 @@ export async function fetchSyncExecutions(syncTaskId: number) {
   return data
 }
 
-export async function fetchSyncExecutionLatest(syncTaskId: number, payload?: { max_log_chars?: number }) {
+export async function fetchSyncExecutionLatest(syncTaskId: number, payload?: { max_log_chars?: number; min_started_at?: string }) {
   const max_log_chars = payload?.max_log_chars != null ? Number(payload.max_log_chars) : 0
   const params: Record<string, any> = {}
   if (max_log_chars > 0) params.max_log_chars = max_log_chars
+  if (payload?.min_started_at) params.min_started_at = String(payload.min_started_at)
   const { data } = await http.get<SyncExecutionItem | null>(`/sync-tasks/${syncTaskId}/executions/latest`, { params })
   return data
 }
@@ -59,7 +61,7 @@ export async function fetchSyncExecutionLatest(syncTaskId: number, payload?: { m
 export async function fetchSyncExecutionFiles(syncTaskId: number, executionId: number, payload?: { offset?: number; limit?: number }) {
   const offset = Number(payload?.offset || 0) || 0
   const limit = Number(payload?.limit || 500) || 500
-  const { data } = await http.get<any[]>(`/sync-tasks/${syncTaskId}/executions/${executionId}/files`, { params: { offset, limit } })
+  const { data } = await http.get<SyncExecutionFilePage>(`/sync-tasks/${syncTaskId}/executions/${executionId}/files`, { params: { offset, limit } })
   return data
 }
 
@@ -75,5 +77,10 @@ export async function cancelSyncExecution(syncTaskId: number, executionId: numbe
 
 export async function browseLocalSync(payload: { path: string; max_items?: number }) {
   const { data } = await http.post<PathBrowseResponse>('/sync-tasks/local/browse', payload)
+  return data
+}
+
+export async function browseNetdiskSync(payload: { dir_path: string; account_name?: string | null; max_items?: number }) {
+  const { data } = await http.post<DriveBrowseResponse>('/sync-tasks/netdisk/browse', payload)
   return data
 }

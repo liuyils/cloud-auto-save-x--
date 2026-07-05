@@ -76,6 +76,28 @@ def _nested_value(target: dict[str, Any], path: str) -> Any:
     return node
 
 
+def _sync_endpoint_lines(title: str, endpoint: dict[str, Any]) -> list[str]:
+    lines = [f"{title}: {endpoint.get('type') or '-'}"]
+    account_name = str(endpoint.get("account_name") or "").strip()
+    if account_name:
+        lines.append(f"   账号: {account_name}")
+    base_path = str(endpoint.get("base_path") or "").strip()
+    if base_path:
+        lines.append(f"   302_path: {_short_text(base_path, 84)}")
+    lines.append(f"   {_short_text(endpoint.get('path') or '-', 88)}")
+    return lines
+
+
+def _sync_stats_line(stats: dict[str, Any]) -> str | None:
+    total = int(stats.get("total_files") or 0)
+    done = int(stats.get("done_files") or 0)
+    changed = int(stats.get("changed_files") or 0)
+    deleted = int(stats.get("deleted_files") or 0)
+    if total <= 0 and done <= 0 and changed <= 0 and deleted <= 0:
+        return None
+    return f"📈 统计: 已处理 {done} / 总计 {total} · 变更 {changed} · 删除 {deleted}"
+
+
 def home_message() -> str:
     return (
         "TG 控制台已就绪\n\n"
@@ -208,9 +230,11 @@ def sync_tasks_message(payload: dict[str, Any]) -> str:
         source = item.get("source", {}) or {}
         target = item.get("target", {}) or {}
         if source.get("path"):
-            lines.append(f"📥 {_short_text(source.get('path') or '-', 68)}")
+            source_account = f" [{source.get('account_name')}]" if source.get("account_name") else ""
+            lines.append(f"📥 {source.get('type') or '-'}{source_account} {_short_text(source.get('path') or '-', 56)}")
         if target.get("path"):
-            lines.append(f"📤 {_short_text(target.get('path') or '-', 68)}")
+            target_account = f" [{target.get('account_name')}]" if target.get("account_name") else ""
+            lines.append(f"📤 {target.get('type') or '-'}{target_account} {_short_text(target.get('path') or '-', 56)}")
     lines.append("")
     lines.append(f"共 {payload.get('total', 0)} 条")
     return truncate("\n".join(lines))
@@ -218,26 +242,39 @@ def sync_tasks_message(payload: dict[str, Any]) -> str:
 
 def sync_detail_message(item: dict[str, Any]) -> str:
     execution = item.get("latest_execution") or {}
+    stats = execution.get("stats") if isinstance(execution.get("stats"), dict) else {}
+    recent_files = item.get("recent_files") or []
     linked_drama = item.get("drama_task_names") or item.get("drama_task_uids") or []
     status_text = "🟢 启用" if item.get("enabled") else "⚪ 停用"
     source = item.get("source", {}) or {}
     target = item.get("target", {}) or {}
     exec_status = str(execution.get("status") or "-")
+    exec_stage = str(execution.get("stage") or "-")
     exec_message = _short_text(execution.get("message") or "-", 72)
     lines = [
         f"🔄 同步详情 · #{item.get('id')}",
         f"📝 {_short_text(item.get('name') or '-', 72)}",
         f"🏷️ {item.get('mode') or '-'} · {status_text}",
         "",
-        f"📥 源: {source.get('type') or '-'}",
-        f"   {_short_text(source.get('path') or '-', 88)}",
-        f"📤 目标: {target.get('type') or '-'}",
-        f"   {_short_text(target.get('path') or '-', 88)}",
+        *_sync_endpoint_lines("📥 源", source),
+        *_sync_endpoint_lines("📤 目标", target),
         f"🎬 关联追剧: {_short_text(', '.join(linked_drama) or '-', 88)}",
         "",
         f"🚦 最近执行: {exec_status}",
+        f"🧭 当前阶段: {exec_stage}",
         f"📣 执行说明: {exec_message}",
     ]
+    stats_line = _sync_stats_line(stats)
+    if stats_line:
+        lines.append(stats_line)
+    if recent_files:
+        lines.append("")
+        lines.append("🗂️ 最近文件")
+        for row in recent_files[:5]:
+            status = str(row.get("status") or "-")
+            path = _short_text(row.get("path") or "-", 52)
+            message = _short_text(row.get("message") or "-", 32)
+            lines.append(f"• {status} · {path} · {message}")
     return truncate("\n".join(lines))
 
 

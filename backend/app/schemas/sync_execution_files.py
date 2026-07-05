@@ -16,3 +16,9 @@ class SyncExecutionFileOut(BaseModel):
     updated_at: datetime
     created_at: datetime
 
+
+class SyncExecutionFilePageOut(BaseModel):
+    items: list[SyncExecutionFileOut]
+    total: int
+    offset: int
+    limit: int

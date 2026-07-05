@@ -69,6 +69,11 @@ def _normalize_name(name: str, ignore_extension: bool) -> str:
     return normalized
 
 
+def _has_file_extension(name: str) -> bool:
+    _base, ext = os.path.splitext(str(name or "").strip())
+    return len(str(ext or "")) > 1
+
+
 def _is_dir(payload: dict[str, Any]) -> bool:
     if payload.get("is_dir") is not None:
         return bool(payload.get("is_dir"))
@@ -544,6 +549,9 @@ class DramaTaskExecutor:
                 continue
             if _normalize_name(name, ignore_extension) in dest_file_names:
                 continue
+            if not _has_file_extension(name):
+                self._line(f"跳过: 无扩展名文件 {name}")
+                continue
             if self._is_history_transferred(origin_name=name, target_name=name):
                 self._line(f"跳过: 历史已转存 origin={name} target={name}")
                 continue
@@ -559,6 +567,9 @@ class DramaTaskExecutor:
             fid = _get_fid(raw)
             name = _get_name(raw)
             if not fid or not name:
+                continue
+            if not _has_file_extension(name):
+                self._line(f"跳过: 无扩展名文件 {name}")
                 continue
             result.append(raw)
         return result

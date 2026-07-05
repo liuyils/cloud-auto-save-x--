@@ -151,6 +151,7 @@ export type DriveBrowseResponse = {
   account_name: string
   drive_type?: string | null
   dir_path: string
+  base_path?: string | null
   exists: boolean
   pdir_fid?: string | null
   items: DriveBrowseItem[]

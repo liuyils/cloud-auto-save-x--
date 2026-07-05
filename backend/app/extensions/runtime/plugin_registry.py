@@ -14,6 +14,28 @@ class PluginRegistry:
     def __init__(self, db: Session):
         self.db = db
 
+    @staticmethod
+    def _definition_snapshot(definition: PluginDefinition) -> dict[str, Any]:
+        return {
+            "id": int(getattr(definition, "id", 0) or 0),
+            "plugin_key": str(getattr(definition, "plugin_key", "") or ""),
+            "module_name": str(getattr(definition, "module_name", "") or ""),
+            "source_type": str(getattr(definition, "source_type", "") or ""),
+            "version": str(getattr(definition, "version", "") or "") or None,
+            "installed": bool(getattr(definition, "installed", False)),
+        }
+
+    @staticmethod
+    def _config_snapshot(config: Any) -> dict[str, Any]:
+        return {
+            "id": int(getattr(config, "id", 0) or 0),
+            "enabled": bool(getattr(config, "enabled", False)),
+            "priority": int(getattr(config, "priority", 0) or 0),
+            "runtime_status": str(getattr(config, "runtime_status", "") or "") or None,
+            "last_error": str(getattr(config, "last_error", "") or "") or None,
+            "last_checked_at": getattr(config, "last_checked_at", None),
+        }
+
     def load_active_plugins(self) -> list[dict[str, Any]]:
         rows = (
             self.db.execute(
@@ -39,9 +61,15 @@ class PluginRegistry:
                 config.runtime_status = 'active' if getattr(plugin, 'is_active', False) else 'inactive'
                 config.last_error = None
                 config.last_checked_at = now
-                items.append({'definition': definition, 'config': config, 'instance': plugin})
+                items.append(
+                    {
+                        'definition': self._definition_snapshot(definition),
+                        'config': self._config_snapshot(config),
+                        'instance': plugin,
+                    }
+                )
             except Exception as exc:
                 config.runtime_status = 'error'
                 config.last_error = str(exc)
                 config.last_checked_at = now
-        return sorted(items, key=lambda item: item['config'].priority)
+        return sorted(items, key=lambda item: int((item.get('config') or {}).get('priority') or 0))

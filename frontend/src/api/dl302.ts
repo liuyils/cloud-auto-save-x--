@@ -1,5 +1,5 @@
 import { http } from '@/api/http'
-import type { DL302Config, DL302StrmGenerateResult, DL302SupportedDriver } from '@/types/dl302'
+import type { DL302CASTask, DL302CASTaskItem, DL302CASTaskListResult, DL302CasGenerateResult, DL302Config, DL302StrmGenerateResult, DL302SupportedDriver } from '@/types/dl302'
 
 export async function fetchDL302SupportedDrivers() {
   const { data } = await http.get<DL302SupportedDriver[]>('/dl302/drivers')
@@ -15,6 +15,8 @@ export async function patchDL302Config(payload: {
   proxy_url?: string | null
   proxy_path_offset?: number | null
   intranet_cidrs?: string[] | null
+  auto_balance?: boolean | null
+  copy_download_mode?: '0' | '1' | null
   strm_enabled?: boolean | null
   strm_mode?: 'auto' | 'independent' | null
   strm_root_dir?: string | null
@@ -26,5 +28,40 @@ export async function patchDL302Config(payload: {
 
 export async function generateDL302Strm(payload?: { mode?: 'auto' | 'independent'; persist_prefix_if_empty?: boolean }) {
   const { data } = await http.post<DL302StrmGenerateResult>('/dl302/strm/generate', payload || {})
+  return data
+}
+
+export async function submitDL302CasTask(accountId: number) {
+  const { data } = await http.post<DL302CasGenerateResult>(`/dl302/cas/accounts/${accountId}/tasks`)
+  return data
+}
+
+export async function fetchDL302CasTasks(accountId: number) {
+  const { data } = await http.get<DL302CASTaskListResult>(`/dl302/cas/accounts/${accountId}/tasks`)
+  return data
+}
+
+export async function fetchDL302CasTask(taskId: string) {
+  const { data } = await http.get<DL302CASTask>(`/dl302/cas/tasks/${taskId}`)
+  return data
+}
+
+export async function fetchDL302CasTaskItems(taskId: string) {
+  const { data } = await http.get<DL302CASTaskItem[]>(`/dl302/cas/tasks/${taskId}/items`)
+  return data
+}
+
+export async function pauseDL302CasTask(taskId: string) {
+  const { data } = await http.post<DL302CASTask>(`/dl302/cas/tasks/${taskId}/pause`)
+  return data
+}
+
+export async function resumeDL302CasTask(taskId: string) {
+  const { data } = await http.post<DL302CASTask>(`/dl302/cas/tasks/${taskId}/resume`)
+  return data
+}
+
+export async function cancelDL302CasTask(taskId: string) {
+  const { data } = await http.post<DL302CASTask>(`/dl302/cas/tasks/${taskId}/cancel`)
   return data
 }

@@ -9,7 +9,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, is_lock_error
 from app.models.task import Task
 from app.models.tmdb_media_cache import TMDBMediaCache
 from app.services.tmdb_settings import get_or_create_tmdb_setting, get_tmdb_runtime_config
@@ -40,7 +40,7 @@ def _touch_last_accessed_at_best_effort(*, row_id: int, accessed_at: datetime) -
                 db.commit()
             return
         except OperationalError as exc:
-            if "database is locked" in str(exc).lower() and attempt < 3:
+            if is_lock_error(exc) and attempt < 3:
                 import time
 
                 time.sleep(0.05 * attempt)

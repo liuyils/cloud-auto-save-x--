@@ -740,7 +740,7 @@ class Pan123Adapter(BaseCloudDriveAdapter):
             parent_id = 0
         params = {
             "driveId": "0",
-            "limit": "100",
+            "limit": "1000",
             "next": "0",
             "orderBy": "file_id",
             "orderDirection": "desc",

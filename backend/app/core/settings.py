@@ -4,8 +4,9 @@ import json
 import os
 from pathlib import Path
 import secrets
+from urllib.parse import quote_plus
 
-from pydantic import AnyUrl
+from pydantic import AnyUrl, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,6 +71,21 @@ class Settings(BaseSettings):
     media_proxy_image_cache_max_total_bytes: int = 512 * 1024 * 1024
     media_proxy_image_cache_dir: str | None = None
 
+    app_data_dir: str = "./data"
+
+    db_driver: str = "sqlite3"
+    database_url_override: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    db_echo: bool = False
+
+    sqlite_path: str = "./data/app.db"
+
+    db_host: str = "127.0.0.1"
+    db_port: int = 3306
+    db_name: str = "xxm"
+    db_user: str = "root"
+    db_password: str = ""
+    db_charset: str = "utf8mb4"
+
     tasks_share_preview_batch_cache_ttl_seconds: int = 300
     tasks_share_preview_batch_cache_max_entries: int = 2000
     tasks_share_preview_batch_db_cache_ttl_seconds: int = 6 * 60 * 60
@@ -98,11 +114,41 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        if os.getenv("XXM_TESTING", "").strip() == "1":
-            override = os.getenv("DATABASE_URL", "").strip()
-            if override:
-                return override
-        return "sqlite:///./data/app.db"
+        override = str(self.database_url_override or "").strip()
+        if override:
+            return override
+
+        driver = self.normalized_db_driver
+        if driver == "mysql":
+            user = quote_plus(str(self.db_user or "").strip())
+            password = quote_plus(str(self.db_password or ""))
+            auth = user if not password else f"{user}:{password}"
+            host = str(self.db_host or "127.0.0.1").strip() or "127.0.0.1"
+            name = str(self.db_name or "xxm").strip() or "xxm"
+            charset = str(self.db_charset or "utf8mb4").strip() or "utf8mb4"
+            return f"mysql+pymysql://{auth}@{host}:{int(self.db_port or 3306)}/{name}?charset={charset}"
+
+        sqlite_path = self.resolved_sqlite_path
+        return f"sqlite:///{sqlite_path}"
+
+    @property
+    def normalized_db_driver(self) -> str:
+        raw = str(self.db_driver or "").strip().lower()
+        if raw in {"mysql", "mysql+pymysql"}:
+            return "mysql"
+        return "sqlite3"
+
+    @property
+    def resolved_app_data_dir(self) -> str:
+        raw = str(self.app_data_dir or "").strip() or "./data"
+        return str((Path(__file__).resolve().parents[2] / raw).resolve()) if not os.path.isabs(raw) else raw
+
+    @property
+    def resolved_sqlite_path(self) -> str:
+        raw = str(self.sqlite_path or "./data/app.db").strip() or "./data/app.db"
+        if os.path.isabs(raw):
+            return raw
+        return str((Path(__file__).resolve().parents[2] / raw).resolve())
 
     def model_post_init(self, __context) -> None:
         secrets_data = _load_or_init_secrets()

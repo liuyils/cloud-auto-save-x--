@@ -2,6 +2,7 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
+  browseNetdiskSync,
   browseLocalSync,
   cancelSyncExecution,
   createSyncTask,
@@ -12,6 +13,7 @@ import {
   fetchSyncTasks,
   updateSyncTask,
 } from '@/api/syncTasks'
+import { fetchDriveAccounts } from '@/api/extensions'
 import { fetchTasks } from '@/api/tasks'
 import { fetchSyncPlugins } from '@/api/extensions'
 import { SYNC_RUN, SYNC_WRITE } from '@/constants/permissions'
@@ -19,9 +21,9 @@ import { useIsMobile } from '@/composables/useIsMobile'
 import { useAuthStore } from '@/stores/auth'
 import { browseOpenList } from '@/api/openlist'
 import type { PathBrowseItem, PathBrowsePath } from '@/types/pathBrowse'
-import type { SyncExecutionItem, SyncMode, SyncTaskItem } from '@/types/syncTasks'
-import type { TaskItem } from '@/types/tasks'
-import type { PluginItem } from '@/types/extensions'
+import type { SyncExecutionFileItem, SyncExecutionItem, SyncMode, SyncTaskItem } from '@/types/syncTasks'
+import type { DriveBrowseItem, DriveBrowsePath, TaskItem } from '@/types/tasks'
+import type { DriveAccountItem, PluginItem } from '@/types/extensions'
 
 const auth = useAuthStore()
 const canWrite = computed(() => auth.permissions.includes(SYNC_WRITE))
@@ -34,6 +36,9 @@ const tasks = ref<SyncTaskItem[]>([])
 const executionsMap = ref(new Map<number, SyncExecutionItem[]>())
 const dramaTasks = ref<TaskItem[]>([])
 const plugins = ref<PluginItem[]>([])
+const driveAccounts = ref<DriveAccountItem[]>([])
+
+const SUPPORTED_NETDISK_DRIVE_TYPES = ['115', 'cloud139', 'cloud189'] as const
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? {}))
@@ -61,6 +66,11 @@ const runStatsGridStyle = computed(() => ({
 const transferStyle = computed(() => ({ width: '100%', minWidth: isMobile.value ? '520px' : '740px' }))
 const runEventsTableHeight = computed(() => (isMobile.value ? '50vh' : 360))
 const runTreeStyle = computed(() => ({ maxHeight: isMobile.value ? '50vh' : '360px', overflow: 'auto' }))
+const runFileCurrentOffset = computed(() => Math.max(0, (Number(runFilePage.page) - 1) * Number(runFilePage.pageSize)))
+const runFileDisplayStart = computed(() => (runFilePage.items.length > 0 ? runFileCurrentOffset.value + 1 : 0))
+const runFileDisplayEnd = computed(() => runFileCurrentOffset.value + runFilePage.items.length)
+const runFileUsingLiveFallback = computed(() => runFilePage.items.length === 0 && runFileLiveItems.value.length > 0)
+const runFileDisplayItems = computed(() => (runFileUsingLiveFallback.value ? runFileLiveItems.value : runFilePage.items))
 
 const dramaTransferData = computed(() =>
   dramaTasks.value.map((t) => ({
@@ -97,10 +107,12 @@ const drawer = reactive({
   name: '',
   enabled: true,
   mode: 'one_way' as SyncMode,
-  sourceType: 'openlist',
+  sourceType: 'netdisk',
   sourcePath: '/',
-  targetType: 'openlist',
+  sourceAccountId: null as number | null,
+  targetType: 'netdisk',
   targetPath: '/',
+  targetAccountId: null as number | null,
   dramaTaskUids: [] as string[],
   addition: {} as Record<string, any>,
   overwrite: false,
@@ -139,15 +151,23 @@ const runFileStats = reactive({
   deleted_files: 0,
   skipped_files: 0,
   failed_files: 0,
-  events: [] as SyncFileEvent[],
 })
+
+const runFilePage = reactive({
+  loading: false,
+  total: 0,
+  page: 1,
+  pageSize: 100,
+  items: [] as SyncFileEvent[],
+  executionId: 0,
+})
+const runFileLiveItems = ref<SyncFileEvent[]>([])
 
 const runFileView = ref<'list' | 'tree'>('list')
 let runPollTimer: any = null
 let runPollInFlight = false
 let runPollDelayMs = 3000
-let runFileIndex: Map<string, number> = new Map()
-let runFileLoadedExecutionId = 0
+let runFilePageRequestSeq = 0
 const runFileTreeRef = ref<any>(null)
 const runFileTreeExpandedKeys = ref<string[]>([])
 
@@ -163,7 +183,8 @@ const pathPicker = reactive({
   visible: false,
   loading: false,
   endpoint: 'source' as 'source' | 'target',
-  endpointType: 'openlist' as 'openlist' | 'local',
+  endpointType: 'openlist' as 'openlist' | 'local' | 'netdisk',
+  basePath: '/',
   dirPath: '',
   exists: true,
   paths: [] as PathBrowsePath[],
@@ -176,7 +197,8 @@ function endpointText(ep: { type: string; path: string } | null | undefined) {
   if (!ep) return '-'
   const tp = String(ep.type || '').trim() || '-'
   const p = String(ep.path || '').trim() || '-'
-  return `${tp}:${p}`
+  const account = String((ep as any).account_name || '').trim()
+  return account ? `${tp}[${account}]:${p}` : `${tp}:${p}`
 }
 
 function normalizeOpenListPath(value: string) {
@@ -191,6 +213,72 @@ function normalizeLocalRelative(value: string) {
     .trim()
     .replace(/\\/g, '/')
     .replace(/^\/+/, '')
+}
+
+function normalizeNetdiskPath(value: string) {
+  let p = String(value || '').trim().replace(/\\/g, '/')
+  if (!p) return '/'
+  if (!p.startsWith('/')) p = `/${p}`
+  return p.replace(/\/+/g, '/')
+}
+
+function joinNetdiskPath(base: string, name: string) {
+  const root = normalizeNetdiskPath(base)
+  const cleanName = String(name || '').replace(/^\/+/, '')
+  if (!cleanName) return root
+  return root === '/' ? `/${cleanName}` : `${root}/${cleanName}`
+}
+
+function clampNetdiskPathToBase(path: string, basePath: string) {
+  const normalizedBase = normalizeNetdiskPath(basePath || '/')
+  const normalizedPath = normalizeNetdiskPath(path || normalizedBase)
+  if (normalizedBase === '/') return normalizedPath
+  if (normalizedPath === normalizedBase || normalizedPath.startsWith(`${normalizedBase}/`)) return normalizedPath
+  return normalizedBase
+}
+
+function currentNetdiskBasePath() {
+  return normalizeNetdiskPath(pathPicker.basePath || '/')
+}
+
+const availableNetdiskAccounts = computed(() =>
+  [...driveAccounts.value]
+    .filter((item) => Boolean(item.enabled) && SUPPORTED_NETDISK_DRIVE_TYPES.includes(item.drive_type as any))
+    .sort((a, b) => {
+      const ad = a.is_default ? 0 : 1
+      const bd = b.is_default ? 0 : 1
+      if (ad !== bd) return ad - bd
+      return String(a.name || '').localeCompare(String(b.name || ''))
+    }),
+)
+
+function defaultNetdiskAccountId() {
+  const first = availableNetdiskAccounts.value[0]
+  return first ? Number(first.id) || null : null
+}
+
+function endpointAccountId(endpoint: 'source' | 'target') {
+  return endpoint === 'source' ? drawer.sourceAccountId : drawer.targetAccountId
+}
+
+function endpointAccount(endpoint: 'source' | 'target') {
+  const accountId = endpointAccountId(endpoint)
+  return availableNetdiskAccounts.value.find((item) => Number(item.id) === Number(accountId || 0)) || null
+}
+
+function isNetdiskType(tp: string) {
+  return String(tp || '') === 'netdisk'
+}
+
+function isOpenListType(tp: string) {
+  return String(tp || '') === 'openlist'
+}
+
+function isTypeOptionDisabled(endpoint: 'source' | 'target', option: 'openlist' | 'local' | 'netdisk') {
+  const otherType = endpoint === 'source' ? String(drawer.targetType) : String(drawer.sourceType)
+  if (option === 'netdisk' && otherType === 'openlist') return true
+  if (option === 'openlist' && otherType === 'netdisk') return true
+  return false
 }
 
 function formatTs(value: any) {
@@ -263,6 +351,7 @@ async function refreshPathPicker() {
   pathPicker.loading = true
   try {
     if (pathPicker.endpointType === 'openlist') {
+      pathPicker.basePath = '/'
       const data = await browseOpenList({ path: normalizeOpenListPath(pathPicker.dirPath), max_items: 500 })
       pathPicker.dirPath = String(data.dir_path || '/')
       pathPicker.exists = Boolean(data.exists)
@@ -271,6 +360,43 @@ async function refreshPathPicker() {
       sortPickerItems(pathPicker.sortBy, pathPicker.sortOrder)
       return
     }
+    if (pathPicker.endpointType === 'netdisk') {
+      const account = endpointAccount(pathPicker.endpoint)
+      if (!account) {
+        ElMessage.warning('请先选择网盘账号')
+        pathPicker.exists = false
+        pathPicker.paths = []
+        pathPicker.items = []
+        return
+      }
+      const data = await browseNetdiskSync({
+        dir_path: normalizeNetdiskPath(pathPicker.dirPath),
+        account_name: account.name,
+        max_items: 500,
+      })
+      const basePath = normalizeNetdiskPath(String(data.base_path || '/'))
+      const currentPath = clampNetdiskPathToBase(String(data.dir_path || basePath), basePath)
+      const items = ((data.items || []) as DriveBrowseItem[]).map((item) => ({
+        name: String(item.name || ''),
+        path: joinNetdiskPath(currentPath, String(item.name || '')),
+        is_dir: Boolean(item.is_dir),
+        updated_at: item.updated_at,
+        size: item.size ?? null,
+      }))
+      const rawPaths = ((data.paths || []) as DriveBrowsePath[]).map((item, idx, arr) => ({
+        name: String(item.name || ''),
+        path: clampNetdiskPathToBase(`/${arr.slice(0, idx + 1).map((part) => String(part.name || '')).filter(Boolean).join('/')}`, basePath),
+      }))
+      const paths = rawPaths.filter((item) => item.path !== basePath)
+      pathPicker.basePath = basePath
+      pathPicker.dirPath = currentPath
+      pathPicker.exists = Boolean(data.exists)
+      pathPicker.paths = paths
+      pathPicker.items = items
+      sortPickerItems(pathPicker.sortBy, pathPicker.sortOrder)
+      return
+    }
+    pathPicker.basePath = '/'
     const data = await browseLocalSync({ path: normalizeLocalRelative(pathPicker.dirPath), max_items: 500 })
     pathPicker.dirPath = String(data.dir_path || '')
     pathPicker.exists = Boolean(data.exists)
@@ -284,15 +410,25 @@ async function refreshPathPicker() {
 
 async function openPathPicker(endpoint: 'source' | 'target') {
   const tp = endpoint === 'source' ? String(drawer.sourceType) : String(drawer.targetType)
+  if (tp === 'netdisk' && !endpointAccount(endpoint)) {
+    ElMessage.warning('请先选择网盘账号')
+    return
+  }
   pathPicker.endpoint = endpoint
-  pathPicker.endpointType = tp === 'local' ? 'local' : 'openlist'
+  pathPicker.endpointType = tp === 'local' ? 'local' : tp === 'netdisk' ? 'netdisk' : 'openlist'
   pathPicker.sortBy = 'file_name'
   pathPicker.sortOrder = 'asc'
 
   if (pathPicker.endpointType === 'openlist') {
+    pathPicker.basePath = '/'
     const current = endpoint === 'source' ? drawer.sourcePath : drawer.targetPath
     pathPicker.dirPath = normalizeOpenListPath(String(current || '/'))
+  } else if (pathPicker.endpointType === 'netdisk') {
+    const current = endpoint === 'source' ? drawer.sourcePath : drawer.targetPath
+    pathPicker.basePath = '/'
+    pathPicker.dirPath = normalizeNetdiskPath(String(current || '/'))
   } else {
+    pathPicker.basePath = '/'
     const current = endpoint === 'source' ? drawer.sourcePath : drawer.targetPath
     pathPicker.dirPath = normalizeLocalRelative(String(current || ''))
   }
@@ -315,6 +451,7 @@ async function pickCrumb(path: string) {
 function useCurrentPickerPath(withTaskname: boolean) {
   let base = String(pathPicker.dirPath || '').trim()
   if (pathPicker.endpointType === 'openlist') base = normalizeOpenListPath(base)
+  else if (pathPicker.endpointType === 'netdisk') base = clampNetdiskPathToBase(base, currentNetdiskBasePath())
   else base = normalizeLocalRelative(base)
 
   if (pathPicker.endpointType === 'local' && !base) {
@@ -325,7 +462,10 @@ function useCurrentPickerPath(withTaskname: boolean) {
   let finalPath = base
   if (withTaskname) {
     const n = sanitizeFolderName(drawer.name)
-    if (n) finalPath = `${base}/${n}`.replace(/\/+/g, '/')
+    if (n) {
+      if (pathPicker.endpointType === 'netdisk') finalPath = joinNetdiskPath(base, n)
+      else finalPath = (base ? `${base}/${n}` : n).replace(/\/+/g, '/')
+    }
   }
 
   if (pathPicker.endpoint === 'source') drawer.sourcePath = finalPath
@@ -334,20 +474,22 @@ function useCurrentPickerPath(withTaskname: boolean) {
 }
 
 async function pickerGoRoot() {
-  pathPicker.dirPath = pathPicker.endpointType === 'openlist' ? '/' : ''
+  pathPicker.dirPath = pathPicker.endpointType === 'local' ? '' : pathPicker.endpointType === 'netdisk' ? currentNetdiskBasePath() : '/'
   await refreshPathPicker()
 }
 
 async function pickerGoBack() {
-  if (pathPicker.endpointType === 'openlist') {
-    const p = normalizeOpenListPath(pathPicker.dirPath)
-    if (p === '/' || !p) {
+  if (pathPicker.endpointType === 'openlist' || pathPicker.endpointType === 'netdisk') {
+    const p = pathPicker.endpointType === 'netdisk' ? clampNetdiskPathToBase(pathPicker.dirPath, currentNetdiskBasePath()) : normalizeOpenListPath(pathPicker.dirPath)
+    const rootPath = pathPicker.endpointType === 'netdisk' ? currentNetdiskBasePath() : '/'
+    if (p === rootPath || !p) {
       await pickerGoRoot()
       return
     }
     const segs = p.split('/').filter(Boolean)
     segs.pop()
-    pathPicker.dirPath = segs.length ? `/${segs.join('/')}` : '/'
+    const nextPath = segs.length ? `/${segs.join('/')}` : rootPath
+    pathPicker.dirPath = pathPicker.endpointType === 'netdisk' ? clampNetdiskPathToBase(nextPath, rootPath) : nextPath
     await refreshPathPicker()
     return
   }
@@ -360,6 +502,25 @@ async function pickerGoBack() {
   segs.pop()
   pathPicker.dirPath = segs.join('/')
   await refreshPathPicker()
+}
+
+async function syncNetdiskEndpointPath(endpoint: 'source' | 'target') {
+  const account = endpointAccount(endpoint)
+  if (!account) return
+  const current = endpoint === 'source' ? drawer.sourcePath : drawer.targetPath
+  const data = await browseNetdiskSync({
+    dir_path: normalizeNetdiskPath(String(current || '/')),
+    account_name: account.name,
+    max_items: 1,
+  })
+  const basePath = normalizeNetdiskPath(String(data.base_path || '/'))
+  const normalizedPath = clampNetdiskPathToBase(String(current || basePath), basePath)
+  if (endpoint === 'source') drawer.sourcePath = normalizedPath
+  else drawer.targetPath = normalizedPath
+  if (pathPicker.visible && pathPicker.endpoint === endpoint && pathPicker.endpointType === 'netdisk') {
+    pathPicker.basePath = basePath
+    pathPicker.dirPath = normalizedPath
+  }
 }
 
 function modeText(mode: string) {
@@ -490,14 +651,16 @@ async function confirmStopTask(row: SyncTaskItem) {
 async function loadData() {
   loading.value = true
   try {
-    const [data, taskRows, pluginRows] = await Promise.all([
+    const [data, taskRows, pluginRows, accountRows] = await Promise.all([
       fetchSyncTasks(),
       fetchTasks().catch(() => [] as TaskItem[]),
       fetchSyncPlugins().catch(() => [] as PluginItem[]),
+      fetchDriveAccounts().catch(() => [] as DriveAccountItem[]),
     ])
     tasks.value = data
     dramaTasks.value = (taskRows || []).filter((t) => String(t.task_type || '') === 'drama')
     plugins.value = pluginRows || []
+    driveAccounts.value = accountRows || []
     const mapping = new Map<number, SyncExecutionItem[]>()
     await Promise.all(
       data.map(async (t) => {
@@ -529,10 +692,12 @@ function openCreate() {
   drawer.name = ''
   drawer.enabled = true
   drawer.mode = 'one_way'
-  drawer.sourceType = 'openlist'
+  drawer.sourceType = 'netdisk'
   drawer.sourcePath = '/'
-  drawer.targetType = 'openlist'
+  drawer.sourceAccountId = defaultNetdiskAccountId()
+  drawer.targetType = 'netdisk'
   drawer.targetPath = '/'
+  drawer.targetAccountId = defaultNetdiskAccountId()
   drawer.dramaTaskUids = []
   drawer.addition = {}
   drawer.overwrite = false
@@ -553,8 +718,10 @@ function openEdit(row: SyncTaskItem) {
   drawer.mode = row.mode
   drawer.sourceType = row.source.type
   drawer.sourcePath = row.source.path
+  drawer.sourceAccountId = row.source.account_id ?? null
   drawer.targetType = row.target.type
   drawer.targetPath = row.target.path
+  drawer.targetAccountId = row.target.account_id ?? null
   drawer.dramaTaskUids = [...(row.drama_task_uids || [])]
   drawer.addition = clone((row as any).addition || {})
   drawer.overwrite = Boolean(row.strategy?.overwrite)
@@ -594,14 +761,37 @@ async function submitDrawer() {
     ElMessage.error('请输入任务名称')
     return
   }
+  if (
+    (isNetdiskType(drawer.sourceType) && isOpenListType(drawer.targetType)) ||
+    (isOpenListType(drawer.sourceType) && isNetdiskType(drawer.targetType))
+  ) {
+    ElMessage.error('暂不支持网盘与 OpenList 混合同步')
+    return
+  }
+  if (isNetdiskType(drawer.sourceType) && !drawer.sourceAccountId) {
+    ElMessage.error('请选择源网盘账号')
+    return
+  }
+  if (isNetdiskType(drawer.targetType) && !drawer.targetAccountId) {
+    ElMessage.error('请选择目标网盘账号')
+    return
+  }
   submitting.value = true
   try {
     const payload = {
       name: drawer.name.trim(),
       enabled: Boolean(drawer.enabled),
       mode: drawer.mode,
-      source: { type: String(drawer.sourceType), path: String(drawer.sourcePath || '') },
-      target: { type: String(drawer.targetType), path: String(drawer.targetPath || '') },
+      source: {
+        type: String(drawer.sourceType),
+        path: String(drawer.sourcePath || ''),
+        account_id: isNetdiskType(drawer.sourceType) ? Number(drawer.sourceAccountId) || null : null,
+      },
+      target: {
+        type: String(drawer.targetType),
+        path: String(drawer.targetPath || ''),
+        account_id: isNetdiskType(drawer.targetType) ? Number(drawer.targetAccountId) || null : null,
+      },
       drama_task_uids: [...(drawer.dramaTaskUids || [])],
       addition: clone(drawer.addition || {}),
       strategy: {
@@ -680,69 +870,60 @@ function resetRunFileStats() {
   runFileStats.deleted_files = 0
   runFileStats.skipped_files = 0
   runFileStats.failed_files = 0
-  runFileStats.events = []
-  runFileIndex = new Map()
-  runFileLoadedExecutionId = 0
+  runFilePage.loading = false
+  runFilePage.total = 0
+  runFilePage.page = 1
+  runFilePage.items = []
+  runFilePage.executionId = 0
+  runFileLiveItems.value = []
   runFileTreeExpandedKeys.value = []
 }
 
-function upsertFileEvent(item: SyncFileEvent) {
+function mapRunFileRow(row: SyncExecutionFileItem | SyncFileEvent | any): SyncFileEvent {
+  return {
+    ts: String(row?.updated_at || row?.created_at || row?.ts || ''),
+    action: String(row?.action || ''),
+    status: String(row?.status || ''),
+    path: String(row?.path || ''),
+    size: row?.size != null ? Number(row.size) : undefined,
+    message: row?.message != null ? String(row.message) : undefined,
+  }
+}
+
+function updateRunFilePageEvent(item: SyncFileEvent) {
   const key = String(item.path || '')
   if (!key) return
-  const idx = runFileIndex.get(key)
-  if (idx === undefined) {
-    runFileIndex.set(key, runFileStats.events.length)
-    runFileStats.events = [...runFileStats.events, item]
+  const idx = runFilePage.items.findIndex((row) => String(row.path || '') === key)
+  if (idx < 0) return
+  const prev = runFilePage.items[idx]
+  runFilePage.items.splice(idx, 1, {
+    ...prev,
+    ...item,
+    size: item.size === undefined ? prev.size : item.size,
+    message: item.message === undefined ? prev.message : item.message,
+  })
+}
+
+function upsertRunFileLiveEvent(item: SyncFileEvent) {
+  const key = String(item.path || '')
+  if (!key) return
+  const rows = [...runFileLiveItems.value]
+  const idx = rows.findIndex((row) => String(row.path || '') === key)
+  if (idx < 0) {
+    rows.unshift(item)
+    runFileLiveItems.value = rows.slice(0, 200)
     return
   }
-  const prev = runFileStats.events[idx]
-  const next = { ...prev, ...item } as SyncFileEvent
-  if (item.size === undefined) next.size = prev.size
-  if (item.message === undefined) next.message = prev.message
-  runFileStats.events.splice(idx, 1, next)
-}
-
-function parsePercentMessage(value: any) {
-  const s = String(value || '').trim()
-  if (!s.endsWith('%')) return null
-  const raw = s.slice(0, -1).trim()
-  const n = Number(raw)
-  if (!Number.isFinite(n)) return null
-  return Math.max(0, Math.min(100, n))
-}
-
-function fileEventRank(item: SyncFileEvent) {
-  const st = String(item?.status || '')
-  const pct = parsePercentMessage(item?.message)
-  if (st === 'syncing' && pct != null) return 0
-  if (st === 'syncing') return 1
-  if (st === 'failed') return 2
-  if (st === 'pending') return 3
-  if (st === 'success') return 4
-  if (st === 'skipped') return 5
-  return 9
-}
-
-const runFileEventsSorted = computed(() => {
-  const rows = runFileStats.events || []
-  const indexed = rows.map((it) => {
-    const key = String(it?.path || '')
-    const idx = runFileIndex.get(key)
-    return { it, idx: idx === undefined ? 1e12 : idx }
+  const prev = rows[idx]
+  rows.splice(idx, 1)
+  rows.unshift({
+    ...prev,
+    ...item,
+    size: item.size === undefined ? prev.size : item.size,
+    message: item.message === undefined ? prev.message : item.message,
   })
-  indexed.sort((a, b) => {
-    const ra = fileEventRank(a.it)
-    const rb = fileEventRank(b.it)
-    if (ra !== rb) return ra - rb
-    if (ra === 0) {
-      const pa = parsePercentMessage(a.it.message) ?? -1
-      const pb = parsePercentMessage(b.it.message) ?? -1
-      if (pa !== pb) return pb - pa
-    }
-    return a.idx - b.idx
-  })
-  return indexed.map((x) => x.it)
-})
+  runFileLiveItems.value = rows.slice(0, 200)
+}
 
 function applyStatsObject(stats: any) {
   if (!stats || typeof stats !== 'object') return
@@ -752,21 +933,6 @@ function applyStatsObject(stats: any) {
   if (stats.deleted_files != null) runFileStats.deleted_files = Number(stats.deleted_files) || 0
   if (stats.skipped_files != null) runFileStats.skipped_files = Number(stats.skipped_files) || 0
   if (stats.failed_files != null) runFileStats.failed_files = Number(stats.failed_files) || 0
-
-  const recent = Array.isArray(stats.recent_events) ? (stats.recent_events as any[]) : null
-  if (recent) {
-    const list = recent
-      .map((it) => ({
-        ts: String(it?.ts || ''),
-        action: String(it?.action || ''),
-        status: String(it?.status || ''),
-        path: String(it?.path || ''),
-        size: it?.size != null ? Number(it.size) : undefined,
-        message: it?.message != null ? String(it.message) : undefined,
-      }))
-      .filter((it) => it.path)
-    for (const it of list) upsertFileEvent(it)
-  }
 }
 
 function applyProgressPayload(payload: any) {
@@ -780,48 +946,69 @@ function applyProgressPayload(payload: any) {
 
   const evt = payload.event
   if (evt && typeof evt === 'object') {
-    const item: SyncFileEvent = {
-      ts: String(evt.ts || ''),
-      action: String(evt.action || ''),
-      status: String(evt.status || ''),
-      path: String(evt.path || ''),
-      size: evt.size != null ? Number(evt.size) : undefined,
-      message: evt.message != null ? String(evt.message) : undefined,
-    }
+    const item = mapRunFileRow(evt)
     if (item.path) {
-      upsertFileEvent(item)
+      upsertRunFileLiveEvent(item)
+      updateRunFilePageEvent(item)
     }
   }
 }
 
-async function loadExecutionFiles(syncTaskId: number, executionId: number) {
-  if (!executionId || executionId === runFileLoadedExecutionId) return
-  runFileLoadedExecutionId = executionId
-  let offset = 0
-  const limit = 1000
-  while (true) {
-    const rows = await fetchSyncExecutionFiles(syncTaskId, executionId, { offset, limit })
-    if (!Array.isArray(rows) || rows.length === 0) break
-    for (const r of rows) {
-      upsertFileEvent({
-        ts: String(r?.updated_at || r?.created_at || ''),
-        action: String(r?.action || ''),
-        status: String(r?.status || ''),
-        path: String(r?.path || ''),
-        size: r?.size != null ? Number(r.size) : undefined,
-        message: r?.message != null ? String(r.message) : undefined,
-      })
+function mergeExecutionSnapshot(syncTaskId: number, exe: SyncExecutionItem | null | undefined) {
+  if (!exe || !syncTaskId) return
+  const next = new Map(executionsMap.value)
+  const list = [...(next.get(syncTaskId) || [])]
+  const idx = list.findIndex((x) => Number(x?.id) === Number(exe.id))
+  if (idx >= 0) list.splice(idx, 1, exe)
+  else list.unshift(exe)
+  list.sort((a, b) => Date.parse(String(b.started_at || '')) - Date.parse(String(a.started_at || '')))
+  next.set(syncTaskId, list)
+  executionsMap.value = next
+}
+
+async function loadExecutionFilesPage(syncTaskId: number, executionId: number, options?: { resetPage?: boolean }) {
+  if (!syncTaskId || !executionId) {
+    runFilePage.items = []
+    runFilePage.total = 0
+    runFilePage.executionId = 0
+    return
+  }
+
+  if (options?.resetPage) runFilePage.page = 1
+
+  const requestSeq = ++runFilePageRequestSeq
+  runFilePage.loading = true
+  try {
+    const offset = Math.max(0, (Number(runFilePage.page) - 1) * Number(runFilePage.pageSize))
+    const data = await fetchSyncExecutionFiles(syncTaskId, executionId, {
+      offset,
+      limit: Number(runFilePage.pageSize) || 100,
+    })
+    if (requestSeq !== runFilePageRequestSeq) return
+
+    const total = Number(data?.total) || 0
+    const size = Number(data?.limit) || Number(runFilePage.pageSize) || 100
+    const maxPage = total > 0 ? Math.ceil(total / size) : 1
+    if (runFilePage.page > maxPage) {
+      runFilePage.page = maxPage
+      return await loadExecutionFilesPage(syncTaskId, executionId)
     }
-    offset += rows.length
-    if (rows.length < limit) break
-    if (offset >= 20000) break
-    await new Promise((r) => setTimeout(r, 0))
+
+    runFilePage.total = total
+    runFilePage.executionId = executionId
+    runFilePage.items = Array.isArray(data?.items) ? data.items.map((row) => mapRunFileRow(row)).filter((row) => row.path) : []
+  } finally {
+    if (requestSeq === runFilePageRequestSeq) runFilePage.loading = false
   }
 }
 
-async function refreshLatestExecution(syncTaskId: number) {
-  const exe = await fetchSyncExecutionLatest(syncTaskId, { max_log_chars: 200000 })
+async function refreshLatestExecution(syncTaskId: number, options?: { minStartedAt?: string }) {
+  const exe = await fetchSyncExecutionLatest(syncTaskId, {
+    max_log_chars: 200000,
+    min_started_at: options?.minStartedAt || undefined,
+  })
   if (!exe) return null
+  mergeExecutionSnapshot(syncTaskId, exe)
   runLogDialog.status = String(exe.status || '')
   runLogDialog.stage = String(exe.stage || '')
   runLogDialog.message = String(exe.message || '')
@@ -829,8 +1016,28 @@ async function refreshLatestExecution(syncTaskId: number) {
   runLogDialog.executionId = Number(exe.id) || 0
   if (exe.run_log) runLogDialog.content = String(exe.run_log || '')
   applyStatsObject(exe.stats)
-  if (exe.id) await loadExecutionFiles(syncTaskId, Number(exe.id))
+  if (exe.id) {
+    const currentExecutionId = Number(exe.id) || 0
+    const needResetPage = currentExecutionId !== Number(runFilePage.executionId || 0)
+    await loadExecutionFilesPage(syncTaskId, currentExecutionId, { resetPage: needResetPage })
+  }
   return exe
+}
+
+async function recoverRunDialogFromBackend(syncTaskId: number) {
+  const minStartedAt = String(runLogDialog.startedAt || '')
+  const exe = await refreshLatestExecution(syncTaskId, {
+    minStartedAt: minStartedAt || undefined,
+  }).catch(() => null)
+  if (!exe) return false
+  const status = String(exe.status || '')
+  if (status === 'running' && !exe.finished_at) {
+    runLogDialog.status = 'running'
+    runLogDialog.message = String(exe.message || '')
+    startRunPoll(syncTaskId)
+    return true
+  }
+  return false
 }
 
 function stopRunPoll() {
@@ -881,7 +1088,7 @@ function startRunPoll(syncTaskId: number) {
 }
 
 const runFileTreeData = computed(() => {
-  const allPaths = runFileStats.events.map((e) => String(e.path || '')).filter(Boolean)
+  const allPaths = runFileDisplayItems.value.map((e) => String(e.path || '')).filter(Boolean)
   const allLocal = allPaths.length > 0 && allPaths.every((p) => p === 'data/sync' || p.startsWith('data/sync/'))
   const rootLabel = allLocal ? '/data/sync' : '/'
   const stripPrefix = allLocal ? 'data/sync/' : ''
@@ -910,7 +1117,7 @@ const runFileTreeData = computed(() => {
 
   ensureDir('')
 
-  for (const e of runFileStats.events) {
+  for (const e of runFileDisplayItems.value) {
     let p = String(e.path || '').replace(/^\/+/, '')
     if (stripPrefix && p.startsWith(stripPrefix)) p = p.slice(stripPrefix.length)
     const segs = p.split('/').filter(Boolean)
@@ -957,6 +1164,24 @@ function onRunFileTreeCollapse(data: any) {
   const key = String(data?.key || '')
   if (!key) return
   runFileTreeExpandedKeys.value = runFileTreeExpandedKeys.value.filter((k) => k !== key)
+}
+
+async function refreshRunFilePage() {
+  const syncTaskId = Number(runLogDialog.syncTaskId) || 0
+  const executionId = Number(runLogDialog.executionId || runFilePage.executionId) || 0
+  if (!syncTaskId || !executionId) return
+  await loadExecutionFilesPage(syncTaskId, executionId)
+}
+
+async function onRunFilePageChange(page: number) {
+  runFilePage.page = Math.max(1, Number(page) || 1)
+  await refreshRunFilePage().catch(() => null)
+}
+
+async function onRunFilePageSizeChange(size: number) {
+  runFilePage.pageSize = Math.max(20, Number(size) || 100)
+  runFilePage.page = 1
+  await refreshRunFilePage().catch(() => null)
 }
 
 async function onRunLogDialogClosed() {
@@ -1020,6 +1245,10 @@ async function runSync(row: SyncTaskItem) {
         await loadData()
         return await runSync(row)
       }
+      if (await recoverRunDialogFromBackend(row.id)) {
+        ElMessage.warning('流式连接已中断，已切换为轮询状态')
+        return
+      }
       const text = await response.text().catch(() => '')
       runLogDialog.status = 'failed'
       runLogDialog.message = text || `HTTP ${response.status}`
@@ -1060,7 +1289,9 @@ async function runSync(row: SyncTaskItem) {
             loadedOnce = true
             ;(async () => {
               for (let i = 0; i < 10; i += 1) {
-                const exe = await refreshLatestExecution(row.id).catch(() => null)
+                const exe = await refreshLatestExecution(row.id, {
+                  minStartedAt: String(runLogDialog.startedAt || data?.started_at || ''),
+                }).catch(() => null)
                 if (exe && exe.id) break
                 await new Promise((r) => setTimeout(r, 200))
               }
@@ -1081,10 +1312,16 @@ async function runSync(row: SyncTaskItem) {
           continue
         }
         if (parsed.eventType === 'done') {
-          runLogDialog.status = String(data?.status || '')
-          runLogDialog.message = String(data?.message || '')
           const exe = data?.execution || null
           const eid = Number(exe?.id) || 0
+          const status = String(data?.status || '')
+          if (status === 'failed' && !eid && await recoverRunDialogFromBackend(row.id)) {
+            ElMessage.warning('执行流异常，已切换为轮询状态')
+            runLogController = null
+            return
+          }
+          runLogDialog.status = status
+          runLogDialog.message = String(data?.message || '')
           if (eid) runLogDialog.executionId = eid
           if (!runLogDialog.stage) {
             const s = String(exe?.stage || '')
@@ -1104,10 +1341,20 @@ async function runSync(row: SyncTaskItem) {
         }
       }
     }
-    if (runLogDialog.status === 'running') await loadData()
+    if (runLogDialog.status === 'running') {
+      if (await recoverRunDialogFromBackend(row.id)) {
+        ElMessage.warning('流式连接已结束，已切换为轮询状态')
+        return
+      }
+      await loadData()
+    }
   } catch (e: any) {
     if (e?.name === 'AbortError') {
       if (runLogClosing) return
+      return
+    }
+    if (await recoverRunDialogFromBackend(row.id)) {
+      ElMessage.warning('流式连接异常，已切换为轮询状态')
       return
     }
     runLogDialog.status = 'failed'
@@ -1128,7 +1375,7 @@ async function cancelRunTask() {
   if (runLogDialog.status !== 'running') return
   if (String(runLogDialog.stage || '') === 'aborting') return
   const syncTaskId = Number(runLogDialog.syncTaskId) || 0
-  const executionId = Number(runLogDialog.executionId || runFileLoadedExecutionId) || 0
+  const executionId = Number(runLogDialog.executionId || runFilePage.executionId) || 0
   if (!syncTaskId || !executionId) {
     ElMessage.warning('尚未获取执行ID，请稍后再试')
     return
@@ -1142,6 +1389,56 @@ async function cancelRunTask() {
     ElMessage.error(e?.message || '停止失败')
   }
 }
+
+watch(
+  () => drawer.sourceType,
+  (tp) => {
+    if (tp === 'netdisk') {
+      drawer.sourcePath = normalizeNetdiskPath(drawer.sourcePath)
+      return
+    }
+    drawer.sourceAccountId = null
+    drawer.sourcePath = tp === 'local' ? normalizeLocalRelative(drawer.sourcePath) : normalizeOpenListPath(drawer.sourcePath)
+  },
+)
+
+watch(
+  () => drawer.targetType,
+  (tp) => {
+    if (tp === 'netdisk') {
+      drawer.targetPath = normalizeNetdiskPath(drawer.targetPath)
+      return
+    }
+    drawer.targetAccountId = null
+    drawer.targetPath = tp === 'local' ? normalizeLocalRelative(drawer.targetPath) : normalizeOpenListPath(drawer.targetPath)
+  },
+)
+
+watch(
+  () => drawer.sourceAccountId,
+  () => {
+    if (drawer.sourceType !== 'netdisk') return
+    if (!drawer.sourceAccountId) drawer.sourcePath = '/'
+    else syncNetdiskEndpointPath('source').catch(() => null)
+    if (pathPicker.visible && pathPicker.endpoint === 'source' && pathPicker.endpointType === 'netdisk') {
+      pathPicker.dirPath = normalizeNetdiskPath(drawer.sourcePath || '/')
+      refreshPathPicker().catch(() => null)
+    }
+  },
+)
+
+watch(
+  () => drawer.targetAccountId,
+  () => {
+    if (drawer.targetType !== 'netdisk') return
+    if (!drawer.targetAccountId) drawer.targetPath = '/'
+    else syncNetdiskEndpointPath('target').catch(() => null)
+    if (pathPicker.visible && pathPicker.endpoint === 'target' && pathPicker.endpointType === 'netdisk') {
+      pathPicker.dirPath = normalizeNetdiskPath(drawer.targetPath || '/')
+      refreshPathPicker().catch(() => null)
+    }
+  },
+)
 
 onMounted(loadData)
 </script>
@@ -1340,12 +1637,22 @@ onMounted(loadData)
           <el-divider content-position="left">源端点</el-divider>
           <el-form-item label="类型">
             <el-select v-model="drawer.sourceType" :style="{ width: isMobile ? '100%' : '180px' }">
-              <el-option label="OpenList" value="openlist" />
+              <el-option label="OpenList" value="openlist" :disabled="isTypeOptionDisabled('source', 'openlist')" />
               <el-option label="本地" value="local" />
+              <el-option label="网盘" value="netdisk" :disabled="isTypeOptionDisabled('source', 'netdisk')" />
             </el-select>
           </el-form-item>
+          <el-form-item v-if="drawer.sourceType === 'netdisk'" label="网盘账号">
+            <el-select v-model="drawer.sourceAccountId" filterable clearable placeholder="选择源网盘账号" style="width: 100%">
+              <el-option v-for="item in availableNetdiskAccounts" :key="item.id" :label="`${item.name} (${item.drive_type})`" :value="item.id" />
+            </el-select>
+            <div style="color: var(--el-text-color-secondary); font-size: 12px; margin-top: 6px">仅允许选择该账号 302_path 下的目录。</div>
+          </el-form-item>
           <el-form-item label="路径">
-            <el-input v-model="drawer.sourcePath" placeholder="OpenList: /xxx  本地: 相对 data/sync 的路径">
+            <el-input
+              v-model="drawer.sourcePath"
+              :placeholder="drawer.sourceType === 'netdisk' ? '网盘: /目录路径' : drawer.sourceType === 'local' ? '相对 data/sync 的路径' : 'OpenList: /xxx'"
+            >
               <template #append>
                 <el-button @click="openPathPicker('source')">选择</el-button>
               </template>
@@ -1355,12 +1662,22 @@ onMounted(loadData)
           <el-divider content-position="left">目标端点</el-divider>
           <el-form-item label="类型">
             <el-select v-model="drawer.targetType" :style="{ width: isMobile ? '100%' : '180px' }">
-              <el-option label="OpenList" value="openlist" />
+              <el-option label="OpenList" value="openlist" :disabled="isTypeOptionDisabled('target', 'openlist')" />
               <el-option label="本地" value="local" />
+              <el-option label="网盘" value="netdisk" :disabled="isTypeOptionDisabled('target', 'netdisk')" />
             </el-select>
           </el-form-item>
+          <el-form-item v-if="drawer.targetType === 'netdisk'" label="网盘账号">
+            <el-select v-model="drawer.targetAccountId" filterable clearable placeholder="选择目标网盘账号" style="width: 100%">
+              <el-option v-for="item in availableNetdiskAccounts" :key="item.id" :label="`${item.name} (${item.drive_type})`" :value="item.id" />
+            </el-select>
+            <div style="color: var(--el-text-color-secondary); font-size: 12px; margin-top: 6px">仅允许选择该账号 302_path 下的目录。</div>
+          </el-form-item>
           <el-form-item label="路径">
-            <el-input v-model="drawer.targetPath" placeholder="OpenList: /xxx  本地: 相对 data/sync 的路径">
+            <el-input
+              v-model="drawer.targetPath"
+              :placeholder="drawer.targetType === 'netdisk' ? '网盘: /目录路径' : drawer.targetType === 'local' ? '相对 data/sync 的路径' : 'OpenList: /xxx'"
+            >
               <template #append>
                 <el-button @click="openPathPicker('target')">选择</el-button>
               </template>
@@ -1462,15 +1779,37 @@ onMounted(loadData)
           <el-button v-if="pathPicker.paths.length" @click="pickerGoBack">返回上级</el-button>
           <el-button type="primary" @click="useCurrentPickerPath(false)">使用当前文件夹</el-button>
           <el-button v-if="drawer.name.trim()" type="primary" @click="useCurrentPickerPath(true)">使用当前文件夹/{{ drawer.name.trim() }}</el-button>
-          <el-tag type="info">{{ pathPicker.endpointType === 'openlist' ? 'OpenList' : '本地 data/sync' }}</el-tag>
+          <el-tag type="info">{{
+            pathPicker.endpointType === 'openlist' ? 'OpenList' : pathPicker.endpointType === 'netdisk' ? '网盘' : '本地 data/sync'
+          }}</el-tag>
+          <el-tag v-if="pathPicker.endpointType === 'netdisk' && endpointAccount(pathPicker.endpoint)" type="success">
+            {{ endpointAccount(pathPicker.endpoint)?.name }}
+          </el-tag>
+          <el-tag v-if="pathPicker.endpointType === 'netdisk'" type="warning">
+            限制在 {{ currentNetdiskBasePath() }}
+          </el-tag>
           <el-tag v-if="!pathPicker.exists" type="danger">不存在</el-tag>
         </div>
         <div style="color: var(--el-text-color-secondary); margin-top: 10px">
-          当前路径：{{ pathPicker.endpointType === 'openlist' ? normalizeOpenListPath(pathPicker.dirPath) : pathPicker.dirPath ? `data/sync/${pathPicker.dirPath}` : 'data/sync' }}
+          当前路径：{{
+            pathPicker.endpointType === 'openlist'
+              ? normalizeOpenListPath(pathPicker.dirPath)
+              : pathPicker.endpointType === 'netdisk'
+                ? clampNetdiskPathToBase(pathPicker.dirPath, currentNetdiskBasePath())
+                : pathPicker.dirPath
+                  ? `data/sync/${pathPicker.dirPath}`
+                  : 'data/sync'
+          }}
         </div>
         <el-breadcrumb v-if="pathPicker.paths.length" separator="/" style="margin-top: 10px">
           <el-breadcrumb-item>
-            <a href="#" @click.prevent="pickerGoRoot">{{ pathPicker.endpointType === 'openlist' ? '/' : 'data/sync' }}</a>
+            <a href="#" @click.prevent="pickerGoRoot">{{
+              pathPicker.endpointType === 'local'
+                ? 'data/sync'
+                : pathPicker.endpointType === 'netdisk'
+                  ? currentNetdiskBasePath()
+                  : '/'
+            }}</a>
           </el-breadcrumb-item>
           <el-breadcrumb-item v-for="(p, idx) in pathPicker.paths" :key="p.path">
             <a v-if="idx !== pathPicker.paths.length - 1" href="#" @click.prevent="pickCrumb(p.path)">{{ p.name }}</a>
@@ -1546,7 +1885,11 @@ onMounted(loadData)
       </div>
 
       <div style="display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 8px">
-        <div style="color: var(--el-text-color-secondary)">{{ runFileStats.done_files }}/{{ runFileStats.total_files }} 文件</div>
+        <div style="color: var(--el-text-color-secondary)">
+          {{ runFileStats.done_files }}/{{ runFileStats.total_files }} 文件
+          <span v-if="runFilePage.total > 0">，当前显示 {{ runFileDisplayStart }}-{{ runFileDisplayEnd }}</span>
+          <span v-else-if="runFileUsingLiveFallback">，当前显示流式实时文件状态</span>
+        </div>
         <el-radio-group v-model="runFileView" size="small">
           <el-radio-button label="list">列表</el-radio-button>
           <el-radio-button label="tree">树形</el-radio-button>
@@ -1555,7 +1898,7 @@ onMounted(loadData)
       <el-progress :percentage="toPercent(runFileStats.done_files, runFileStats.total_files)" :stroke-width="10" style="margin-bottom: 12px" />
 
       <div v-if="runFileView === 'list'">
-        <el-table :data="runFileEventsSorted" size="small" style="width: 100%" :height="runEventsTableHeight">
+        <el-table v-loading="runFilePage.loading" :data="runFileDisplayItems" size="small" style="width: 100%" :height="runEventsTableHeight">
           <el-table-column label="状态" width="90">
             <template #default="{ row }">
               <el-tag v-if="row.status === 'success'" type="success" size="small">OK</el-tag>
@@ -1583,9 +1926,13 @@ onMounted(loadData)
         </el-table>
       </div>
       <div v-else>
+        <div style="color: var(--el-text-color-secondary); font-size: 12px; margin-bottom: 8px">
+          {{ runFileUsingLiveFallback ? '树形视图正在展示流式实时文件状态。' : '树形视图展示当前页文件明细。' }}
+        </div>
         <el-tree
           ref="runFileTreeRef"
           :data="runFileTreeData"
+          v-loading="runFilePage.loading"
           node-key="key"
           :expand-on-click-node="false"
           :default-expanded-keys="runFileTreeExpandedKeys"
@@ -1617,6 +1964,19 @@ onMounted(loadData)
             </el-tag>
           </template>
         </el-tree>
+      </div>
+
+      <div v-if="runFilePage.total > 0" style="display: flex; justify-content: flex-end; margin-top: 12px">
+        <el-pagination
+          background
+          :current-page="runFilePage.page"
+          :page-size="runFilePage.pageSize"
+          :page-sizes="[50, 100, 200, 500]"
+          :total="runFilePage.total"
+          layout="total, sizes, prev, pager, next"
+          @current-change="onRunFilePageChange"
+          @size-change="onRunFilePageSizeChange"
+        />
       </div>
 
       <el-divider content-position="left">原始日志</el-divider>

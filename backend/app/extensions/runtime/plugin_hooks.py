@@ -9,6 +9,16 @@ from typing import Any
 _capture_lock = threading.RLock()
 
 
+def _meta_value(payload: Any, key: str, default=None):
+    if isinstance(payload, dict):
+        return payload.get(key, default)
+    return getattr(payload, key, default)
+
+
+def plugin_key_from_definition(definition: Any) -> str:
+    return str(_meta_value(definition, "plugin_key", "") or "").strip()
+
+
 class _LineWriter:
     def __init__(self, emit_line, prefix: str):
         self.emit_line = emit_line
@@ -69,7 +79,7 @@ class PluginHookRunner:
         for item in plugins:
             plugin = item['instance']
             definition = item.get("definition")
-            key = getattr(definition, "plugin_key", None) or ""
+            key = plugin_key_from_definition(definition)
             prefix = f"[{key}] " if key else ""
             if not getattr(plugin, 'is_active', False):
                 if emit_line is not None and key:
@@ -96,7 +106,7 @@ class PluginHookRunner:
         for item in plugins:
             plugin = item['instance']
             definition = item.get("definition")
-            key = getattr(definition, "plugin_key", None) or ""
+            key = plugin_key_from_definition(definition)
             prefix = f"[{key}] " if key else ""
             if not getattr(plugin, 'is_active', False):
                 if emit_line is not None and key:
@@ -122,7 +132,7 @@ class PluginHookRunner:
         for item in plugins:
             plugin = item['instance']
             definition = item.get("definition")
-            key = getattr(definition, "plugin_key", None) or ""
+            key = plugin_key_from_definition(definition)
             prefix = f"[{key}] " if key else ""
             if not getattr(plugin, 'is_active', False):
                 if emit_line is not None and key:

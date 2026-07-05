@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
 
+import { fetchDL302Config, patchDL302Config } from '@/api/dl302'
 import { deleteMagicRegexRule, fetchMagicRegexRules, upsertMagicRegexRule } from '@/api/magicRegex'
 import { fetchOpenListConfig, patchOpenListConfig } from '@/api/openlist'
 import { fetchResourceSearchSources, patchResourceSearchSource } from '@/api/resourceSearch'
@@ -62,6 +63,7 @@ const saveRuleConfig = reactive({
   loading: false,
   saving: false,
   enableSkipTransferredHistory: false,
+  copyDownloadMode: '0' as '0' | '1',
 })
 
 const builtinKeySet = computed(() => new Set(rules.value.filter((r) => r.built_in).map((r) => r.key)))
@@ -161,11 +163,16 @@ function applySaveRuleConfig(data: SaveRuleConfig) {
   saveRuleConfig.enableSkipTransferredHistory = Boolean(data.enable_skip_transferred_history)
 }
 
+function applyDL302SyncConfig(data: { copy_download_mode?: '0' | '1' | null }) {
+  saveRuleConfig.copyDownloadMode = data.copy_download_mode === '1' ? '1' : '0'
+}
+
 async function refreshSaveRuleConfig() {
   saveRuleConfig.loading = true
   try {
-    const data = await fetchSaveRuleConfig()
+    const [data, dl302Config] = await Promise.all([fetchSaveRuleConfig(), fetchDL302Config()])
     applySaveRuleConfig(data)
+    applyDL302SyncConfig(dl302Config)
   } finally {
     saveRuleConfig.loading = false
   }
@@ -203,10 +210,16 @@ async function saveSaveRuleConfig() {
   if (!canWrite.value) return
   saveRuleConfig.saving = true
   try {
-    const data = await patchSaveRuleConfig({
-      enable_skip_transferred_history: Boolean(saveRuleConfig.enableSkipTransferredHistory),
-    })
+    const [data, dl302Config] = await Promise.all([
+      patchSaveRuleConfig({
+        enable_skip_transferred_history: Boolean(saveRuleConfig.enableSkipTransferredHistory),
+      }),
+      patchDL302Config({
+        copy_download_mode: saveRuleConfig.copyDownloadMode,
+      }),
+    ])
     applySaveRuleConfig(data)
+    applyDL302SyncConfig(dl302Config)
     ElMessage.success('已保存')
   } finally {
     saveRuleConfig.saving = false
@@ -462,6 +475,40 @@ onMounted(() => {
               </template>
             </el-table-column>
           </el-table>
+        </el-card>
+      </el-tab-pane>
+
+      <el-tab-pane label="同步设置" name="sync_settings">
+        <el-card class="page__card" shadow="never">
+          <template #header>
+            <div class="card__header">
+              <div>同步方式</div>
+              <div>
+                <el-button text :loading="saveRuleConfig.loading" @click="refreshSaveRuleConfig">刷新</el-button>
+                <el-button type="primary" :loading="saveRuleConfig.saving" :disabled="!canWrite" @click="saveSaveRuleConfig">保存</el-button>
+              </div>
+            </div>
+          </template>
+          <el-form label-position="top" :disabled="saveRuleConfig.loading">
+            <el-form-item label="复制方式">
+              <div class="setting-field">
+                <el-select v-model="saveRuleConfig.copyDownloadMode" :disabled="!canWrite" class="setting-field__select">
+                  <el-option label="流式" value="0" />
+                  <el-option label="下载" value="1" />
+                </el-select>
+                <div class="setting-help">
+                  <div class="setting-help__item">
+                    <span class="setting-help__label">流式</span>
+                    <span>不占用本地空间；无法秒传。</span>
+                  </div>
+                  <div class="setting-help__item">
+                    <span class="setting-help__label">下载</span>
+                    <span>先下载到本地临时文件，再按目标网盘规则计算并检测秒传；会占用本地空间，但可以实现秒传。</span>
+                  </div>
+                </div>
+              </div>
+            </el-form-item>
+          </el-form>
         </el-card>
       </el-tab-pane>
 
@@ -721,5 +768,43 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.setting-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+}
+
+.setting-field__select {
+  width: 240px;
+}
+
+.setting-help {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  line-height: 1.7;
+  box-sizing: border-box;
+}
+
+.setting-help__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.setting-help__label {
+  min-width: 32px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
 }
 </style>

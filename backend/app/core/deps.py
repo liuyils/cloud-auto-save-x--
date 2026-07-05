@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import forbidden, unauthorized
 from app.core.security import decode_access_token
-from app.db.session import SessionLocal, get_db
+from app.db.session import SessionLocal, get_db, session_scope
 from app.models.permission import Permission
 from app.models.role import Role
 from app.models.user import User
@@ -101,6 +101,7 @@ def get_current_user_scoped(
             raise unauthorized("AUTH_INVALID_USER", "账号不可用")
 
         roles, permissions = _load_permissions(db, user.id)
+        db.expunge(user)
         current = CurrentUser(user=user, roles=roles, permissions=permissions)
         request.state.current_user = current
         return current

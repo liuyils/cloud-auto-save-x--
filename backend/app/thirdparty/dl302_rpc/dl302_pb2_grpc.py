@@ -49,6 +49,61 @@ class Dl302ServiceStub:
                 request_serializer=dl302__pb2.ResolveRequest.SerializeToString,
                 response_deserializer=dl302__pb2.ResolveResponse.FromString,
                 _registered_method=True)
+        self.SubmitCASTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/SubmitCASTask',
+                request_serializer=dl302__pb2.SubmitCASTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CASTaskResponse.FromString,
+                _registered_method=True)
+        self.GetCASTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/GetCASTask',
+                request_serializer=dl302__pb2.GetCASTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CASTaskResponse.FromString,
+                _registered_method=True)
+        self.ListCASTasks = channel.unary_unary(
+                '/dl302.v1.Dl302Service/ListCASTasks',
+                request_serializer=dl302__pb2.ListCASTasksRequest.SerializeToString,
+                response_deserializer=dl302__pb2.ListCASTasksResponse.FromString,
+                _registered_method=True)
+        self.ListCASTaskItems = channel.unary_unary(
+                '/dl302.v1.Dl302Service/ListCASTaskItems',
+                request_serializer=dl302__pb2.GetCASTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.ListCASTaskItemsResponse.FromString,
+                _registered_method=True)
+        self.PauseCASTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/PauseCASTask',
+                request_serializer=dl302__pb2.GetCASTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CASTaskResponse.FromString,
+                _registered_method=True)
+        self.ResumeCASTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/ResumeCASTask',
+                request_serializer=dl302__pb2.GetCASTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CASTaskResponse.FromString,
+                _registered_method=True)
+        self.CancelCASTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/CancelCASTask',
+                request_serializer=dl302__pb2.GetCASTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CASTaskResponse.FromString,
+                _registered_method=True)
+        self.SubmitCopyTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/SubmitCopyTask',
+                request_serializer=dl302__pb2.CopyTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CopyTaskResponse.FromString,
+                _registered_method=True)
+        self.GetCopyTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/GetCopyTask',
+                request_serializer=dl302__pb2.GetCopyTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CopyTaskResponse.FromString,
+                _registered_method=True)
+        self.ListCopyTaskItems = channel.unary_unary(
+                '/dl302.v1.Dl302Service/ListCopyTaskItems',
+                request_serializer=dl302__pb2.GetCopyTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.ListCopyTaskItemsResponse.FromString,
+                _registered_method=True)
+        self.CancelCopyTask = channel.unary_unary(
+                '/dl302.v1.Dl302Service/CancelCopyTask',
+                request_serializer=dl302__pb2.GetCopyTaskRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CopyTaskResponse.FromString,
+                _registered_method=True)
 
 
 class Dl302ServiceServicer:
@@ -72,6 +127,72 @@ class Dl302ServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SubmitCASTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCASTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListCASTasks(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListCASTaskItems(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PauseCASTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ResumeCASTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CancelCASTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SubmitCopyTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCopyTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListCopyTaskItems(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CancelCopyTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_Dl302ServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +210,61 @@ def add_Dl302ServiceServicer_to_server(servicer, server):
                     servicer.Resolve,
                     request_deserializer=dl302__pb2.ResolveRequest.FromString,
                     response_serializer=dl302__pb2.ResolveResponse.SerializeToString,
+            ),
+            'SubmitCASTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitCASTask,
+                    request_deserializer=dl302__pb2.SubmitCASTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CASTaskResponse.SerializeToString,
+            ),
+            'GetCASTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCASTask,
+                    request_deserializer=dl302__pb2.GetCASTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CASTaskResponse.SerializeToString,
+            ),
+            'ListCASTasks': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListCASTasks,
+                    request_deserializer=dl302__pb2.ListCASTasksRequest.FromString,
+                    response_serializer=dl302__pb2.ListCASTasksResponse.SerializeToString,
+            ),
+            'ListCASTaskItems': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListCASTaskItems,
+                    request_deserializer=dl302__pb2.GetCASTaskRequest.FromString,
+                    response_serializer=dl302__pb2.ListCASTaskItemsResponse.SerializeToString,
+            ),
+            'PauseCASTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.PauseCASTask,
+                    request_deserializer=dl302__pb2.GetCASTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CASTaskResponse.SerializeToString,
+            ),
+            'ResumeCASTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResumeCASTask,
+                    request_deserializer=dl302__pb2.GetCASTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CASTaskResponse.SerializeToString,
+            ),
+            'CancelCASTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelCASTask,
+                    request_deserializer=dl302__pb2.GetCASTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CASTaskResponse.SerializeToString,
+            ),
+            'SubmitCopyTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitCopyTask,
+                    request_deserializer=dl302__pb2.CopyTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CopyTaskResponse.SerializeToString,
+            ),
+            'GetCopyTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCopyTask,
+                    request_deserializer=dl302__pb2.GetCopyTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CopyTaskResponse.SerializeToString,
+            ),
+            'ListCopyTaskItems': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListCopyTaskItems,
+                    request_deserializer=dl302__pb2.GetCopyTaskRequest.FromString,
+                    response_serializer=dl302__pb2.ListCopyTaskItemsResponse.SerializeToString,
+            ),
+            'CancelCopyTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelCopyTask,
+                    request_deserializer=dl302__pb2.GetCopyTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CopyTaskResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +348,303 @@ class Dl302Service:
             '/dl302.v1.Dl302Service/Resolve',
             dl302__pb2.ResolveRequest.SerializeToString,
             dl302__pb2.ResolveResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitCASTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/SubmitCASTask',
+            dl302__pb2.SubmitCASTaskRequest.SerializeToString,
+            dl302__pb2.CASTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCASTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/GetCASTask',
+            dl302__pb2.GetCASTaskRequest.SerializeToString,
+            dl302__pb2.CASTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListCASTasks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/ListCASTasks',
+            dl302__pb2.ListCASTasksRequest.SerializeToString,
+            dl302__pb2.ListCASTasksResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListCASTaskItems(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/ListCASTaskItems',
+            dl302__pb2.GetCASTaskRequest.SerializeToString,
+            dl302__pb2.ListCASTaskItemsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PauseCASTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/PauseCASTask',
+            dl302__pb2.GetCASTaskRequest.SerializeToString,
+            dl302__pb2.CASTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResumeCASTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/ResumeCASTask',
+            dl302__pb2.GetCASTaskRequest.SerializeToString,
+            dl302__pb2.CASTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CancelCASTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/CancelCASTask',
+            dl302__pb2.GetCASTaskRequest.SerializeToString,
+            dl302__pb2.CASTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitCopyTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/SubmitCopyTask',
+            dl302__pb2.CopyTaskRequest.SerializeToString,
+            dl302__pb2.CopyTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCopyTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/GetCopyTask',
+            dl302__pb2.GetCopyTaskRequest.SerializeToString,
+            dl302__pb2.CopyTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListCopyTaskItems(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/ListCopyTaskItems',
+            dl302__pb2.GetCopyTaskRequest.SerializeToString,
+            dl302__pb2.ListCopyTaskItemsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CancelCopyTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/CancelCopyTask',
+            dl302__pb2.GetCopyTaskRequest.SerializeToString,
+            dl302__pb2.CopyTaskResponse.FromString,
             options,
             channel_credentials,
             insecure,

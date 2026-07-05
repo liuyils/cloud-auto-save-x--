@@ -118,6 +118,7 @@ def get_proxy_image(request: Request, url: str = Query(..., min_length=8, max_le
         cfg = ProxyImageCacheConfig(
             enabled=bool(settings.media_proxy_image_cache_enabled),
             cache_dir=resolve_proxy_image_cache_dir(
+                app_data_dir=settings.resolved_app_data_dir,
                 database_url=settings.database_url,
                 explicit_dir=settings.media_proxy_image_cache_dir,
             ),

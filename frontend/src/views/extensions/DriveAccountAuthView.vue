@@ -33,10 +33,19 @@ type ApiErrorBody = {
 
 const route = useRoute()
 const router = useRouter()
+const TV_QRCODE_DRIVES = ['quark', 'uc']
+const QRCODE_DRIVES = ['aliyun', ...TV_QRCODE_DRIVES]
 
 const accountId = computed(() => Number(route.params.accountId || 0))
 const driveType = computed(() => String(route.query.drive_type || payload.value.drive_type || '').trim().toLowerCase())
-const canStartQrcode = computed(() => driveType.value === 'aliyun')
+const canStartQrcode = computed(() => QRCODE_DRIVES.includes(driveType.value))
+const isTvQrcodeDrive = computed(() => TV_QRCODE_DRIVES.includes(driveType.value))
+const qrcodeButtonText = computed(() => (isTvQrcodeDrive.value ? 'TV 扫码登录' : '扫码登录'))
+const qrcodeAlertTitle = computed(() =>
+  isTvQrcodeDrive.value ? '请使用对应 TV 客户端扫描二维码完成登录。' : '请使用手机扫描二维码完成登录。',
+)
+const qrcodeSuccessMessage = computed(() => (isTvQrcodeDrive.value ? 'TV 凭据已保存' : '扫码成功，账号已登录'))
+const qrcodeImageSrc = computed(() => String(payload.value.qrcode_image || payload.value.qrcode_url || '').trim())
 
 const loading = ref(false)
 const account = ref<DriveAccountItem | null>(null)
@@ -82,8 +91,23 @@ async function startFlow() {
     try {
       const result = await startDriveAccountAuth(accountId.value)
       account.value = result
-      ElMessage.success('账号已登录，无需二次认证')
-      await router.replace('/extensions/drives')
+      if (String(result?.runtime_status || '').trim().toLowerCase() === 'active') {
+        ElMessage.success('账号已登录，无需二次认证')
+        await router.replace('/extensions/drives')
+        return
+      }
+      payload.value = {
+        ...payload.value,
+        drive_type: driveType.value || String(result?.drive_type || ''),
+        status: String(result?.runtime_status || ''),
+        message: String(result?.last_error || '当前账号未完成登录'),
+      }
+      if (canStartQrcode.value) {
+        method.value = 'qrcode'
+        ElMessage.info('当前账号可继续使用扫码登录')
+        return
+      }
+      throw new Error(String(result?.last_error || '当前账号未完成登录'))
     } catch (e) {
       const challenge = parseChallengeFromError(e)
       if (!challenge) throw e
@@ -104,7 +128,7 @@ async function startQrcodeFlow() {
     const resp = await startDriveAccountQrcodeAuth(accountId.value)
     method.value = 'qrcode'
     sessionId.value = String(resp.session_id || '')
-    payload.value = { ...(resp.payload || {}), drive_type: 'aliyun' }
+    payload.value = { ...(resp.payload || {}), drive_type: String(resp.drive_type || driveType.value || '') }
     startAutoPoll()
   } finally {
     loading.value = false
@@ -176,7 +200,7 @@ async function pollQrcodeOnce() {
   try {
     const res = await pollDriveAccountQrcodeAuth(sessionId.value)
     account.value = res
-    ElMessage.success('扫码成功，账号已登录')
+    ElMessage.success(qrcodeSuccessMessage.value)
     stopPoll()
     await router.replace('/extensions/drives')
   } catch (e) {
@@ -203,6 +227,7 @@ function startAutoPoll() {
 onMounted(() => {
   const qSession = String(route.query.session_id || '')
   const qMethod = String(route.query.method || '') as AuthMethod
+  const autoQrcode = String(route.query.start_qrcode || '') === '1'
   if (qSession && qMethod) {
     sessionId.value = qSession
     method.value = qMethod
@@ -215,6 +240,11 @@ onMounted(() => {
       .finally(() => {
         loading.value = false
       })
+    return
+  }
+  if (autoQrcode && canStartQrcode.value) {
+    method.value = 'qrcode'
+    startQrcodeFlow()
     return
   }
   startFlow()
@@ -232,7 +262,7 @@ onBeforeUnmount(stopPoll)
       <div class="toolbar__right">
         <el-button @click="router.replace('/extensions/drives')">返回列表</el-button>
         <el-button type="primary" @click="startFlow">重新检测</el-button>
-        <el-button v-if="method !== 'qrcode' && canStartQrcode" @click="startQrcodeFlow">扫码登录</el-button>
+        <el-button v-if="method !== 'qrcode' && canStartQrcode" @click="startQrcodeFlow">{{ qrcodeButtonText }}</el-button>
       </div>
     </div>
 
@@ -281,11 +311,11 @@ onBeforeUnmount(stopPoll)
       </template>
 
       <template v-else>
-        <el-alert type="info" show-icon :closable="false" title="请使用手机扫描二维码完成登录。" style="margin-bottom: 16px" />
+        <el-alert type="info" show-icon :closable="false" :title="qrcodeAlertTitle" style="margin-bottom: 16px" />
         <div class="auth-grid">
           <div class="auth-left">
-            <img v-if="payload.qrcode_url" class="qrcode-img" :src="payload.qrcode_url" alt="qrcode" />
-            <div v-else class="auth-empty">未获取到二维码，可点击“扫码登录”。</div>
+            <img v-if="qrcodeImageSrc" class="qrcode-img" :src="qrcodeImageSrc" alt="qrcode" />
+            <div v-else class="auth-empty">未获取到二维码，可点击“TV 扫码登录”或“扫码登录”。</div>
           </div>
           <div class="auth-right">
             <div class="auth-meta">
@@ -293,10 +323,25 @@ onBeforeUnmount(stopPoll)
                 <span class="auth-meta__label">状态</span>
                 <span class="auth-meta__value">{{ payload.message || payload.status || '-' }}</span>
               </div>
+              <div v-if="isTvQrcodeDrive" class="auth-meta__row">
+                <span class="auth-meta__label">设备 ID</span>
+                <span class="auth-meta__value auth-meta__break">{{ payload.device_id || '-' }}</span>
+              </div>
+              <div v-if="isTvQrcodeDrive" class="auth-meta__row">
+                <span class="auth-meta__label">查询令牌</span>
+                <span class="auth-meta__value auth-meta__break">{{ payload.query_token || '-' }}</span>
+              </div>
             </div>
             <div class="auth-actions">
               <el-button :loading="qrcodePolling" type="primary" @click="pollQrcodeOnce">刷新状态</el-button>
             </div>
+            <el-alert
+              v-if="isTvQrcodeDrive"
+              type="warning"
+              show-icon
+              :closable="false"
+              title="当前仅保存 TV 凭据，账号实际运行仍以 Cookie 为准。"
+            />
           </div>
         </div>
       </template>
@@ -364,6 +409,11 @@ onBeforeUnmount(stopPoll)
   display: flex;
   justify-content: space-between;
   gap: 12px;
+}
+
+.auth-meta__break {
+  word-break: break-all;
+  text-align: right;
 }
 
 .auth-meta__label {

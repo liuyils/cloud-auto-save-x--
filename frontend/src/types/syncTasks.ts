@@ -1,10 +1,13 @@
-export type SyncEndpointType = 'local' | 'openlist'
+export type SyncEndpointType = 'local' | 'openlist' | 'netdisk'
 
 export type SyncMode = 'one_way' | 'two_way'
 
 export type SyncEndpoint = {
   type: SyncEndpointType
   path: string
+  account_id?: number | null
+  account_name?: string | null
+  drive_type?: string | null
 }
 
 export type SyncStrategy = {
@@ -29,6 +32,25 @@ export type SyncExecutionItem = {
   cancel_requested_at?: string | null
   cancel_requested_by?: number | null
   cancel_message?: string | null
+}
+
+export type SyncExecutionFileItem = {
+  id: number
+  sync_execution_id: number
+  path: string
+  action: string
+  status: string
+  size?: number | null
+  message?: string | null
+  updated_at: string
+  created_at: string
+}
+
+export type SyncExecutionFilePage = {
+  items: SyncExecutionFileItem[]
+  total: number
+  offset: number
+  limit: number
 }
 
 export type SyncTaskItem = {

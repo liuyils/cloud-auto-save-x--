@@ -23,6 +23,7 @@ from app.core.errors import ApiError, bad_request
 from app.db.session import SessionLocal
 from app.extensions.runtime.execution_log import ExecutionLog
 from app.extensions.runtime.plugin_hooks import PluginHookRunner
+from app.extensions.runtime.sync_executor_dl302 import Dl302SyncExecutor
 from app.extensions.runtime.sync_plugin_loader import sync_sync_plugin_definitions
 from app.extensions.runtime.sync_plugin_registry import SyncPluginRegistry
 from app.models.sync_execution import SyncExecution
@@ -36,7 +37,7 @@ from app.services.openlist_client_factory import get_openlist_client
 logger = logging.getLogger(__name__)
 
 
-EndpointType = Literal["local", "openlist"]
+EndpointType = Literal["local", "openlist", "netdisk"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,13 +191,25 @@ def _conflict_path(rel: str, ts: str) -> str:
 
 
 class SyncExecutor:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session | None):
         self.db = db
         self._openlist_client = None
 
+    @staticmethod
+    def _read_with_session(loader):
+        with SessionLocal() as db:
+            return loader(db)
+
+    @staticmethod
+    def _write_with_session(writer):
+        with SessionLocal() as db:
+            result = writer(db)
+            db.commit()
+            return result
+
     def _get_openlist_client(self):
         if self._openlist_client is None:
-            self._openlist_client = get_openlist_client(self.db)
+            self._openlist_client = self._read_with_session(lambda db: get_openlist_client(db))
         return self._openlist_client
 
     def run_sync_task(
@@ -218,6 +231,8 @@ class SyncExecutor:
 
         source = Endpoint(type=str(task.source_type or "").strip(), path=str(task.source_path or "").strip())
         target = Endpoint(type=str(task.target_type or "").strip(), path=str(task.target_path or "").strip())
+        if "netdisk" in {source.type, target.type}:
+            return Dl302SyncExecutor(self.db).run_sync_task(task, log=log, strategy_override=strategy_override)
         mode = str(getattr(task, "mode", "") or "one_way").strip() or "one_way"
         if source.type == "openlist" or target.type == "openlist":
             self._get_openlist_client()
@@ -250,10 +265,8 @@ class SyncExecutor:
         lock_owner = f"{os.getpid()}:{threading.get_ident()}"
         try:
             lock_now = datetime.now()
-            self.db.add(SyncTaskLock(sync_task_id=task_id, locked_at=lock_now, owner=lock_owner))
-            self.db.commit()
+            self._write_with_session(lambda db: db.add(SyncTaskLock(sync_task_id=task_id, locked_at=lock_now, owner=lock_owner)))
         except IntegrityError:
-            self.db.rollback()
             raise ApiError(code="SYNC_TASK_RUNNING", message="同步任务正在执行", http_status=409, detail=str(task_id))
 
         def _release_lock() -> None:
@@ -265,6 +278,15 @@ class SyncExecutor:
                 pass
 
         now = datetime.now()
+        initial_stats: dict[str, Any] = {
+            "total_files": 0,
+            "done_files": 0,
+            "copied_files": 0,
+            "deleted_files": 0,
+            "skipped_files": 0,
+            "failed_files": 0,
+            "recent_events": [],
+        }
         execution = SyncExecution(
             sync_task_id=task_id,
             status="running",
@@ -273,24 +295,15 @@ class SyncExecutor:
             created_at=now,
             heartbeat_at=now,
         )
-        execution.stats_json = json.dumps(
-            {
-                "total_files": 0,
-                "done_files": 0,
-                "copied_files": 0,
-                "deleted_files": 0,
-                "skipped_files": 0,
-                "failed_files": 0,
-                "recent_events": [],
-            },
-            ensure_ascii=False,
-        )
+        execution.stats_json = json.dumps(initial_stats, ensure_ascii=False)
         try:
-            self.db.add(execution)
-            self.db.flush()
-            self.db.commit()
+            def _create_execution(db: Session) -> None:
+                db.add(execution)
+                db.flush()
+                db.expunge(execution)
+
+            self._write_with_session(_create_execution)
         except Exception:
-            self.db.rollback()
             _release_lock()
             raise
         if logger.isEnabledFor(logging.DEBUG):
@@ -298,44 +311,70 @@ class SyncExecutor:
 
         cancel_checker = _CancelChecker(int(execution.id))
 
+        def persist_execution_state(*, stats_payload: dict[str, Any] | None = None, message: str | None = None) -> None:
+            values: dict[str, Any] = {
+                "stage": log.stage,
+                "heartbeat_at": datetime.now(),
+                "run_log": log.render(),
+            }
+            if stats_payload is not None:
+                values["stats_json"] = json.dumps(stats_payload, ensure_ascii=False)
+            if message is not None:
+                values["message"] = str(message)
+            with SessionLocal() as w:
+                w.execute(update(SyncExecution).where(SyncExecution.id == int(execution.id)).values(**values))
+                w.commit()
+
         try:
+            persist_execution_state(stats_payload=initial_stats)
             cancel_checker.raise_if_cancelled()
             log.set_stage("scan")
             log.section("扫描文件")
+            persist_execution_state(stats_payload=initial_stats)
 
             if target.type == "openlist":
                 try:
                     client = self._get_openlist_client()
                     log.line(f"确保目标目录存在: {_join_openlist(target.path, '')}")
                     self._ensure_openlist_abs_dir(client, target.path, log=log)
+                    persist_execution_state(stats_payload=initial_stats)
                 except Exception as e:
                     log.line(f"目标目录创建失败: type=openlist path={target.path} err={str(e).strip() or type(e).__name__}")
+                    persist_execution_state(stats_payload=initial_stats)
             if mode == "two_way" and source.type == "openlist":
                 try:
                     client = self._get_openlist_client()
                     log.line(f"确保源目录存在: {_join_openlist(source.path, '')}")
                     self._ensure_openlist_abs_dir(client, source.path, log=log)
+                    persist_execution_state(stats_payload=initial_stats)
                 except Exception as e:
                     log.line(f"源目录创建失败: type=openlist path={source.path} err={str(e).strip() or type(e).__name__}")
+                    persist_execution_state(stats_payload=initial_stats)
 
             try:
                 log.line(f"扫描源端: type={source.type} path={source.path}")
+                persist_execution_state(stats_payload=initial_stats)
                 source_map = self._scan_endpoint(source, strategy=strategy, cancel_checker=cancel_checker)
             except Exception as e:
                 log.line(f"扫描源端失败: type={source.type} path={source.path} err={str(e).strip() or type(e).__name__}")
+                persist_execution_state(stats_payload=initial_stats)
                 raise
             try:
                 log.line(f"扫描目标端: type={target.type} path={target.path}")
+                persist_execution_state(stats_payload=initial_stats)
                 target_map = self._scan_endpoint(target, strategy=strategy, cancel_checker=cancel_checker)
             except Exception as e:
                 log.line(f"扫描目标端失败: type={target.type} path={target.path} err={str(e).strip() or type(e).__name__}")
+                persist_execution_state(stats_payload=initial_stats)
                 raise
 
             log.line(f"源: {len(source_map)} 项")
             log.line(f"目标: {len(target_map)} 项")
+            persist_execution_state(stats_payload=initial_stats)
 
             log.set_stage("diff")
             log.section("生成差异")
+            persist_execution_state(stats_payload=initial_stats)
 
             actions = self._build_actions(
                 source=source,
@@ -348,6 +387,7 @@ class SyncExecutor:
             )
 
             log.line(f"动作数: {len(actions)}")
+            persist_execution_state(stats_payload=initial_stats)
             for a in actions:
                 try:
                     if str(a.get("kind") or "") != "copy":
@@ -474,23 +514,25 @@ class SyncExecutor:
 
             if file_rows and execution.id:
                 now = datetime.now()
-                self.db.execute(delete(SyncExecutionFile).where(SyncExecutionFile.sync_execution_id == int(execution.id)))
-                self.db.add_all(
-                    [
-                        SyncExecutionFile(
-                            sync_execution_id=int(execution.id),
-                            path=str(p),
-                            action=str(v.get("action") or "copy"),
-                            status=str(v.get("status") or "pending"),
-                            size=v.get("size"),
-                            message=v.get("message"),
-                            created_at=now,
-                            updated_at=now,
-                        )
-                        for p, v in file_rows.items()
-                    ]
-                )
-                self.db.commit()
+                def _persist_initial_rows(db: Session) -> None:
+                    db.execute(delete(SyncExecutionFile).where(SyncExecutionFile.sync_execution_id == int(execution.id)))
+                    db.add_all(
+                        [
+                            SyncExecutionFile(
+                                sync_execution_id=int(execution.id),
+                                path=str(p),
+                                action=str(v.get("action") or "copy"),
+                                status=str(v.get("status") or "pending"),
+                                size=v.get("size"),
+                                message=v.get("message"),
+                                created_at=now,
+                                updated_at=now,
+                            )
+                            for p, v in file_rows.items()
+                        ]
+                    )
+
+                self._write_with_session(_persist_initial_rows)
 
             last_persist = 0.0
             pending_file_updates: dict[str, dict[str, Any]] = {}
@@ -583,8 +625,11 @@ class SyncExecutor:
                 log.line("跳过: 本次无新增同步文件")
             else:
                 try:
-                    sync_sync_plugin_definitions(self.db)
-                    plugins = SyncPluginRegistry(self.db).load_active_plugins()
+                    def _load_plugins(db: Session):
+                        sync_sync_plugin_definitions(db)
+                        return SyncPluginRegistry(db).load_active_plugins()
+
+                    plugins = self._write_with_session(_load_plugins)
                     if plugins:
                         addition = {}
                         raw_addition = getattr(task, "addition_json", None)
@@ -622,14 +667,16 @@ class SyncExecutor:
                             "root",
                             data={"type": "sync_task", "uid": sync_task_data.get("uid")},
                         )
-                        file_rows_for_tree = (
-                            self.db.execute(
-                                select(SyncExecutionFile)
-                                .where(SyncExecutionFile.sync_execution_id == int(execution.id))
-                                .order_by(SyncExecutionFile.path.asc())
+                        file_rows_for_tree = self._read_with_session(
+                            lambda db: (
+                                db.execute(
+                                    select(SyncExecutionFile)
+                                    .where(SyncExecutionFile.sync_execution_id == int(execution.id))
+                                    .order_by(SyncExecutionFile.path.asc())
+                                )
+                                .scalars()
+                                .all()
                             )
-                            .scalars()
-                            .all()
                         )
                         for row in file_rows_for_tree[:5000]:
                             p = str(getattr(row, "path", "") or "").strip()
@@ -683,9 +730,9 @@ class SyncExecutor:
             execution.run_log = log.render()
             execution.message = "success"
             execution.heartbeat_at = datetime.now()
-            self.db.commit()
+            self._write_with_session(lambda db: db.merge(execution))
             _release_lock()
-            send_sync_execution_notification(self.db, task, execution)
+            self._write_with_session(lambda db: send_sync_execution_notification(db, db.get(SyncTask, task_id), db.get(SyncExecution, int(execution.id))))
             log.section("同步完成")
             return execution
         except SyncCancelled as exc:
@@ -711,7 +758,7 @@ class SyncExecutor:
             execution.run_log = log.render()
             execution.message = f"aborted: {message}"
             execution.heartbeat_at = datetime.now()
-            self.db.commit()
+            self._write_with_session(lambda db: db.merge(execution))
             _release_lock()
             return execution
         except Exception as exc:
@@ -727,9 +774,9 @@ class SyncExecutor:
             execution.run_log = log.render()
             execution.message = message
             execution.heartbeat_at = datetime.now()
-            self.db.commit()
+            self._write_with_session(lambda db: db.merge(execution))
             _release_lock()
-            send_sync_execution_notification(self.db, task, execution)
+            self._write_with_session(lambda db: send_sync_execution_notification(db, db.get(SyncTask, task_id), db.get(SyncExecution, int(execution.id))))
             raise
 
     def _load_strategy(self, task: SyncTask, *, override: dict[str, Any] | None) -> Strategy:
@@ -905,10 +952,8 @@ class SyncExecutor:
         return out
 
     def _load_baseline(self, sync_task_id: int) -> tuple[dict[str, FileMeta], dict[str, FileMeta]]:
-        rows = (
-            self.db.execute(select(SyncFileSnapshot).where(SyncFileSnapshot.sync_task_id == sync_task_id))
-            .scalars()
-            .all()
+        rows = self._read_with_session(
+            lambda db: db.execute(select(SyncFileSnapshot).where(SyncFileSnapshot.sync_task_id == sync_task_id)).scalars().all()
         )
         src: dict[str, FileMeta] = {}
         dst: dict[str, FileMeta] = {}
@@ -2060,7 +2105,6 @@ class SyncExecutor:
                     )
 
     def _persist_snapshots(self, sync_task_id: int, source_map: dict[str, FileMeta], target_map: dict[str, FileMeta]) -> None:
-        self.db.execute(delete(SyncFileSnapshot).where(SyncFileSnapshot.sync_task_id == sync_task_id))
         now = datetime.now()
         rows: list[SyncFileSnapshot] = []
         for side, mp in (("source", source_map), ("target", target_map)):
@@ -2077,5 +2121,10 @@ class SyncExecutor:
                         created_at=now,
                     )
                 )
-        self.db.add_all(rows)
-        self.db.flush()
+
+        def _persist(db: Session) -> None:
+            db.execute(delete(SyncFileSnapshot).where(SyncFileSnapshot.sync_task_id == sync_task_id))
+            db.add_all(rows)
+            db.flush()
+
+        self._write_with_session(_persist)

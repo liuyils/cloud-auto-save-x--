@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.db.session import get_db, healthcheck_sql
 
 
 router = APIRouter()
@@ -15,7 +15,7 @@ router = APIRouter()
 def health(db: Session = Depends(get_db)):
     db_connected = False
     try:
-        db.execute(text("SELECT 1"))
+        db.execute(text(healthcheck_sql()))
         db_connected = True
     except Exception:
         db_connected = False

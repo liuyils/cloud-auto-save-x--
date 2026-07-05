@@ -6,7 +6,7 @@ import time
 
 from sqlalchemy.exc import OperationalError
 
-from app.db.session import SessionLocal, is_sqlite_locked_error
+from app.db.session import SessionLocal, is_lock_error
 from app.services.telegram_bot.client import TelegramBotClient
 from app.services.telegram_bot.config import TelegramBotConfig, load_telegram_bot_config
 from app.services.telegram_bot.handlers import TelegramBotHandler
@@ -23,7 +23,7 @@ def _commit_with_retry(db, *, attempts: int = 3, base_delay: float = 0.2) -> Non
             return
         except OperationalError as exc:
             db.rollback()
-            if attempt < attempts and is_sqlite_locked_error(exc):
+            if attempt < attempts and is_lock_error(exc):
                 time.sleep(base_delay * attempt)
                 continue
             raise

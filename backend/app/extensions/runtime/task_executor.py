@@ -17,7 +17,7 @@ from app.db.session import SessionLocal
 from app.extensions.runtime.account_manager import DatabaseAccountManager
 from app.extensions.runtime.drama_executor import DramaTaskExecutor, SkipTask
 from app.extensions.runtime.execution_log import ExecutionLog
-from app.extensions.runtime.plugin_hooks import PluginHookRunner
+from app.extensions.runtime.plugin_hooks import PluginHookRunner, plugin_key_from_definition
 from app.extensions.runtime.plugin_loader import sync_plugin_definitions
 from app.extensions.runtime.plugin_registry import PluginRegistry
 from app.models.drive_account import DriveAccount
@@ -30,6 +30,12 @@ from app.services.system_settings import get_save_rule_runtime_config
 
 
 logger = logging.getLogger(__name__)
+
+
+def _plugin_meta_value(payload: Any, key: str, default=None):
+    if isinstance(payload, dict):
+        return payload.get(key, default)
+    return getattr(payload, key, default)
 
 
 def _truncate(s: str, max_len: int) -> str:
@@ -106,8 +112,32 @@ class ExecutionPayload:
 
 
 class TaskExecutor:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session | None):
         self.db = db
+
+    @staticmethod
+    def _read_with_session(loader):
+        with SessionLocal() as db:
+            return loader(db)
+
+    @staticmethod
+    def _write_with_session(writer):
+        with SessionLocal() as db:
+            result = writer(db)
+            db.commit()
+            return result
+
+    @staticmethod
+    def _persist_execution_detached(execution: TaskExecution) -> TaskExecution:
+        def _persist(db: Session) -> None:
+            db.add(execution)
+            db.flush()
+            db.expunge(execution)
+
+        with SessionLocal() as db:
+            _persist(db)
+            db.commit()
+        return execution
 
     def _trigger_targeted_lsdir_refresh(self, *, task: Task, task_data: dict[str, Any], adapter: Any, tree: Tree, log: ExecutionLog) -> None:
         if str(task_data.get("task_type") or "") != "drama":
@@ -120,7 +150,9 @@ class TaskExecutor:
         if not account_name:
             log.line("ls_dir 缓存增量刷新: 跳过（缺少 account_name）")
             return
-        account_id = self.db.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
+        account_id = self._read_with_session(
+            lambda db: db.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
+        )
         if account_id is None:
             log.line("ls_dir 缓存增量刷新: 跳过（无法解析账号）")
             return
@@ -172,10 +204,15 @@ class TaskExecutor:
         new_entries = getattr(tree, "_transferred_history_entries", None)
         if not isinstance(new_entries, list) or not new_entries:
             return
-        existing = _normalize_transferred_history(_safe_json_list(getattr(task, "transferred_history_json", None)))
-        merged = _merge_transferred_history(existing, _normalize_transferred_history(new_entries))
-        task.transferred_history_json = json.dumps(merged, ensure_ascii=False)
-        self.db.flush()
+        def _persist(db: Session) -> None:
+            row = db.get(Task, task_id)
+            if row is None:
+                return
+            existing = _normalize_transferred_history(_safe_json_list(getattr(row, "transferred_history_json", None)))
+            merged = _merge_transferred_history(existing, _normalize_transferred_history(new_entries))
+            row.transferred_history_json = json.dumps(merged, ensure_ascii=False)
+
+        self._write_with_session(_persist)
 
     def _capture_snapshot_outside_main_session(
         self,
@@ -268,30 +305,24 @@ class TaskExecutor:
 
         if not defer_plugins:
             try:
-                with SessionLocal() as pdb:
-                    sync_plugin_definitions(pdb)
-                    pdb.commit()
-            except Exception:
-                pass
-            try:
-                self.db.expire_all()
+                self._write_with_session(lambda pdb: sync_plugin_definitions(pdb))
             except Exception:
                 pass
         external_manager = account_manager is not None
         if account_manager is None:
-            account_manager = DatabaseAccountManager(self.db)
+            account_manager = self._read_with_session(lambda db: DatabaseAccountManager(db))
         task_data = self._task_to_dict(task)
         try:
             from app.services.magic_regex import get_enabled_magic_regex_map
 
-            task_data["magic_regex"] = get_enabled_magic_regex_map(self.db)
+            task_data["magic_regex"] = self._read_with_session(lambda db: get_enabled_magic_regex_map(db))
         except Exception:
             task_data["magic_regex"] = {}
 
         try:
             from app.services.tmdb_settings import get_or_create_tmdb_setting, get_tmdb_runtime_config
 
-            cfg = get_tmdb_runtime_config(get_or_create_tmdb_setting(self.db))
+            cfg = self._read_with_session(lambda db: get_tmdb_runtime_config(get_or_create_tmdb_setting(db)))
             task_data["disable_guessit_tmdb_fallback_rename"] = bool(cfg.get("disable_guessit_tmdb_fallback_rename") or False)
             task_data["guessit_tmdb_tv_rename_template"] = str(cfg.get("guessit_tmdb_tv_rename_template") or "").strip()
             task_data["guessit_tmdb_movie_rename_template"] = str(cfg.get("guessit_tmdb_movie_rename_template") or "").strip()
@@ -301,7 +332,7 @@ class TaskExecutor:
             task_data["guessit_tmdb_movie_rename_template"] = ""
 
         try:
-            save_rule_config = get_save_rule_runtime_config(self.db)
+            save_rule_config = self._read_with_session(lambda db: get_save_rule_runtime_config(db))
             task_data["skip_transferred_history_enabled"] = bool(save_rule_config.get("enable_skip_transferred_history") or False)
         except Exception:
             task_data["skip_transferred_history_enabled"] = False
@@ -319,8 +350,8 @@ class TaskExecutor:
                 try:
                     from app.services.tmdb_cache import get_tmdb_detail_cached
 
-                    configured, _detail, update_weekdays, episode_weekdays, _row = get_tmdb_detail_cached(
-                        self.db, media_type="tv", tmdb_id=tmdb_id
+                    configured, _detail, update_weekdays, episode_weekdays, _row = self._read_with_session(
+                        lambda db: get_tmdb_detail_cached(db, media_type="tv", tmdb_id=tmdb_id)
                     )
                     task_data["tmdb_configured"] = bool(configured)
                     task_data["tmdb_update_weekdays"] = update_weekdays or []
@@ -337,8 +368,8 @@ class TaskExecutor:
                 try:
                     from app.services.tmdb_cache import get_tmdb_detail_cached
 
-                    configured, detail, _weekdays, _episode_weekdays, _row = get_tmdb_detail_cached(
-                        self.db, media_type=tmdb_media_type, tmdb_id=tmdb_id
+                    configured, detail, _weekdays, _episode_weekdays, _row = self._read_with_session(
+                        lambda db: get_tmdb_detail_cached(db, media_type=tmdb_media_type, tmdb_id=tmdb_id)
                     )
                     if configured and isinstance(detail, dict):
                         task_data["tmdb_series_title"] = detail.get("name") if tmdb_media_type == "tv" else detail.get("title")
@@ -361,19 +392,17 @@ class TaskExecutor:
         plugins = []
         should_defer_plugins = bool(defer_plugins) or str(task_data.get("task_type") or "") == "drama"
         if not should_defer_plugins:
-            registry = PluginRegistry(self.db)
             log.set_stage("load_plugins")
-            # log.section("载入插件")
-            plugins = registry.load_active_plugins()
+            plugins = self._write_with_session(lambda db: PluginRegistry(db).load_active_plugins())
             if plugins:
                 # log.line("启用插件: " + ", ".join([p["definition"].plugin_key for p in plugins]))
                 for item in plugins:
                     definition = item.get("definition")
                     config = item.get("config")
                     instance = item.get("instance")
-                    key = getattr(definition, "plugin_key", None) or ""
-                    rs = getattr(config, "runtime_status", None)
-                    err = getattr(config, "last_error", None)
+                    key = plugin_key_from_definition(definition)
+                    rs = _plugin_meta_value(config, "runtime_status", None)
+                    err = _plugin_meta_value(config, "last_error", None)
                     active = bool(getattr(instance, "is_active", False))
                     meta = []
                     if rs:
@@ -391,7 +420,7 @@ class TaskExecutor:
         adapter = account_manager.get_adapter_for_task(task_data)
         if adapter is None and external_manager:
             try:
-                fallback_manager = DatabaseAccountManager(self.db)
+                fallback_manager = self._read_with_session(lambda db: DatabaseAccountManager(db))
                 fallback_manager.init_for_tasks([task_data])
                 account_manager = fallback_manager
                 adapter = account_manager.get_adapter_for_task(task_data)
@@ -420,8 +449,7 @@ class TaskExecutor:
             if not persist_execution:
                 execution.id = 0
                 return execution
-            self.db.add(execution)
-            self.db.flush()
+            self._persist_execution_detached(execution)
             return execution
 
         try:
@@ -470,9 +498,8 @@ class TaskExecutor:
                         log.section("插件执行")
                         log.line("跳过: 本次无新增文件")
                     else:
-                        registry = PluginRegistry(self.db)
                         log.set_stage("load_plugins")
-                        plugins = registry.load_active_plugins()
+                        plugins = self._write_with_session(lambda db: PluginRegistry(db).load_active_plugins())
                         log.set_stage("plugin_run")
                         log.section("插件执行")
                         if not plugins:
@@ -481,7 +508,7 @@ class TaskExecutor:
                             for item in plugins:
                                 definition = item.get("definition")
                                 instance = item.get("instance")
-                                key = getattr(definition, "plugin_key", None) or ""
+                                key = plugin_key_from_definition(definition)
                                 if not bool(getattr(instance, "is_active", False)):
                                     log.line(f"SKIP: {key}（is_active=false）")
                                     continue
@@ -497,7 +524,7 @@ class TaskExecutor:
                             for item in plugins:
                                 definition = item.get("definition")
                                 instance = item.get("instance")
-                                key = getattr(definition, "plugin_key", None) or ""
+                                key = plugin_key_from_definition(definition)
                                 if not bool(getattr(instance, "is_active", False)):
                                     log.line(f"SKIP: {key}（is_active=false）")
                                     continue
@@ -515,7 +542,7 @@ class TaskExecutor:
                         for item in plugins:
                             definition = item.get("definition")
                             instance = item.get("instance")
-                            key = getattr(definition, "plugin_key", None) or ""
+                            key = plugin_key_from_definition(definition)
                             if not bool(getattr(instance, "is_active", False)):
                                 # log.line(f"SKIP: {key}（is_active=false）")
                                 continue
@@ -531,7 +558,7 @@ class TaskExecutor:
                         for item in plugins:
                             definition = item.get("definition")
                             instance = item.get("instance")
-                            key = getattr(definition, "plugin_key", None) or ""
+                            key = plugin_key_from_definition(definition)
                             if not bool(getattr(instance, "is_active", False)):
                                 # log.line(f"SKIP: {key}（task_after, is_active=false）")
                                 continue
@@ -540,11 +567,17 @@ class TaskExecutor:
                                 continue
                             log.line(f"RUN: {key}（task_after）")
                     PluginHookRunner.task_after(plugins, [task_data], default_adapter or adapter, emit_line=log.line)
-            if str(task_data.get("task_type") or "") == "drama" and is_115_auto_update_task(self.db, task, respect_toggle=True):
+            if str(task_data.get("task_type") or "") == "drama" and self._read_with_session(
+                lambda db: is_115_auto_update_task(db, db.get(Task, task_id), respect_toggle=True) if db.get(Task, task_id) is not None else False
+            ):
                 log.set_stage("shareurl_autoupdate_after")
                 log.section("自动换链")
                 try:
-                    update_result = resolve_drama_shareurl_update(self.db, task, respect_toggle=True)
+                    update_result = self._write_with_session(
+                        lambda db: resolve_drama_shareurl_update(db, db.get(Task, task_id), respect_toggle=True)
+                        if db.get(Task, task_id) is not None
+                        else {"updated": False, "checked": False, "reason": "任务不存在"}
+                    )
                     if bool(update_result.get("updated")):
                         season = update_result.get("season")
                         episode = update_result.get("episode")
@@ -575,11 +608,6 @@ class TaskExecutor:
                     log.line(f"WARN: 自动换链失败 err={str(exc).strip() or type(exc).__name__}")
             if persist_execution and task_id > 0:
                 try:
-                    self.db.commit()
-                    try:
-                        self.db.refresh(task)
-                    except Exception:
-                        pass
                     snapshot_row_id = self._capture_snapshot_outside_main_session(
                         task=task,
                         task_data=task_data,
@@ -613,8 +641,9 @@ class TaskExecutor:
                 and allow_once
                 and bool(getattr(task, "enabled", False))
             ):
-                task.enabled = False
-                self.db.flush()
+                self._write_with_session(
+                    lambda db: setattr(db.get(Task, task_id), "enabled", False) if db.get(Task, task_id) is not None else None
+                )
                 log.line("运行一次: 本次执行成功，已自动禁用任务")
             payload = ExecutionPayload(
                 status='success',
@@ -629,9 +658,9 @@ class TaskExecutor:
                 },
                 plugins_snapshot=[
                     {
-                        'plugin_key': item['definition'].plugin_key,
-                        'enabled': item['config'].enabled,
-                        'runtime_status': item['config'].runtime_status,
+                        'plugin_key': plugin_key_from_definition(item.get('definition')),
+                        'enabled': bool(_plugin_meta_value(item.get('config'), 'enabled', False)),
+                        'runtime_status': _plugin_meta_value(item.get('config'), 'runtime_status', None),
                     }
                     for item in plugins
                 ],
@@ -658,8 +687,11 @@ class TaskExecutor:
                 and not str(getattr(task, "shareurl_ban", "") or "").strip()
             ):
                 if persist_execution and task_id > 0:
-                    task.shareurl_ban = f"阶段={stage}：{message}"
-                    self.db.flush()
+                    self._write_with_session(
+                        lambda db: setattr(db.get(Task, task_id), "shareurl_ban", f"阶段={stage}：{message}")
+                        if db.get(Task, task_id) is not None
+                        else None
+                    )
             log.section("异常")
             log.line(f"阶段={stage}: {message}")
 
@@ -682,9 +714,9 @@ class TaskExecutor:
                 },
                 plugins_snapshot=[
                     {
-                        'plugin_key': item['definition'].plugin_key,
-                        'enabled': item['config'].enabled,
-                        'runtime_status': item['config'].runtime_status,
+                        'plugin_key': plugin_key_from_definition(item.get('definition')),
+                        'enabled': bool(_plugin_meta_value(item.get('config'), 'enabled', False)),
+                        'runtime_status': _plugin_meta_value(item.get('config'), 'runtime_status', None),
                     }
                     for item in plugins
                 ],
@@ -710,8 +742,7 @@ class TaskExecutor:
             setattr(execution, "_runtime_task_data", getattr(task, "_runtime_task_data", None))
             setattr(execution, "_runtime_adapter", getattr(task, "_runtime_adapter", None))
             return execution
-        self.db.add(execution)
-        self.db.flush()
+        self._persist_execution_detached(execution)
         setattr(execution, "_snapshot_row_id", snapshot_row_id)
         setattr(execution, "_has_new_files", bool(getattr(task, "_runtime_has_new_files", False)))
         if keep_runtime_tree:

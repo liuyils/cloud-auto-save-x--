@@ -50,14 +50,14 @@ def _is_image_content_type(content_type: str | None) -> bool:
     return str(content_type).split(";", 1)[0].strip().lower().startswith("image/")
 
 
-def resolve_proxy_image_cache_dir(*, database_url: str, explicit_dir: str | None) -> str:
+def resolve_proxy_image_cache_dir(*, app_data_dir: str, database_url: str, explicit_dir: str | None) -> str:
     if explicit_dir and str(explicit_dir).strip():
         return str(explicit_dir).strip()
     if database_url.startswith("sqlite") and "///" in database_url:
         path = database_url.split("///", 1)[1]
         directory = os.path.dirname(path) or "./data"
         return os.path.join(directory, "cache", "proxy_image")
-    return os.path.join("./data", "cache", "proxy_image")
+    return os.path.join(app_data_dir, "cache", "proxy_image")
 
 
 def ensure_dir(path: str) -> bool:

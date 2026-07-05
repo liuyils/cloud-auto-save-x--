@@ -7,7 +7,7 @@ from app.models.sync_execution import SyncExecution
 from app.models.sync_execution_file import SyncExecutionFile
 
 
-def purge_old_sync_executions(db: Session, *, keep_per_task: int = 3) -> dict[str, int]:
+def purge_old_sync_executions(db: Session, *, keep_per_task: int = 1) -> dict[str, int]:
     keep = max(0, int(keep_per_task))
     if keep <= 0:
         return {"sync_tasks": 0, "deleted_executions": 0, "deleted_files": 0}
@@ -47,4 +47,3 @@ def purge_old_sync_executions(db: Session, *, keep_per_task: int = 3) -> dict[st
         deleted_executions += int(db.execute(delete(SyncExecution).where(SyncExecution.id.in_(to_delete))).rowcount or 0)
 
     return {"sync_tasks": int(touched_tasks), "deleted_executions": int(deleted_executions), "deleted_files": int(deleted_files)}
-

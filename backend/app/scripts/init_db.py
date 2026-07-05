@@ -22,7 +22,7 @@ from app.core.permissions import (
     USER_READ,
     USER_WRITE,
 )
-from app.db.session import SessionLocal
+from app.db.uow import unit_of_work
 from app.models.permission import Permission
 from app.models.role import Role
 from app.models.user import User
@@ -46,7 +46,8 @@ def main() -> None:
     ensure_password_policy(admin_password)
     ensure_password_policy(viewer_password)
 
-    with SessionLocal() as db:
+    with unit_of_work() as uow:
+        db = uow.session
         perms_by_code: dict[str, Permission] = {}
         for code, name in PERMISSIONS_SEED:
             p = db.execute(select(Permission).where(Permission.code == code)).scalars().first()
@@ -97,8 +98,6 @@ def main() -> None:
             )
             db.add(viewer_user)
         viewer_user.roles = [viewer_role]
-
-        db.commit()
 
 
 if __name__ == "__main__":

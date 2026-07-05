@@ -111,16 +111,15 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
                         running,
                     )
                     continue
+                task = tdb.get(SyncTask, int(task_id))
+                if task is None:
+                    skipped += 1
+                    continue
                 try:
-                    task = tdb.get(SyncTask, int(task_id))
-                    if task is None:
-                        skipped += 1
-                        continue
-                    execution = SyncExecutor(tdb).run_sync_task(task)
+                    execution = SyncExecutor(db=None).run_sync_task(task)
                     success += 1
                 except Exception as e:
                     failed += 1
-                    tdb.rollback()
                     logger.warning(
                         "同步任务执行失败 sync_task_id=%s uid=%s name=%s err=%s",
                         task_id,
@@ -180,19 +179,17 @@ def _run_sync_tasks_by_uids(sync_uids: list[str], source: str) -> None:
                 if running is not None:
                     logger.info("跳过同步任务（正在运行） uid=%s name=%s", task_uid, task_name)
                     continue
+                task = tdb.get(SyncTask, int(task_id))
+                if task is None:
+                    continue
                 try:
-                    task = tdb.get(SyncTask, int(task_id))
-                    if task is None:
-                        continue
-                    execution = SyncExecutor(tdb).run_sync_task(task)
+                    execution = SyncExecutor(db=None).run_sync_task(task)
                     logger.info(
                         "同步任务执行完成 uid=%s status=%s",
                         task_uid,
                         str(getattr(execution, "status", "") or ""),
                     )
                 except Exception as e:
-                    tdb.rollback()
                     logger.warning("同步任务执行失败 uid=%s name=%s err=%s", task_uid, task_name, str(e).strip() or type(e).__name__)
     except Exception as e:
         logger.exception("直接触发同步任务异常 sync_uids=%s source=%s err=%s", sync_uids, source, str(e).strip() or type(e).__name__)
-

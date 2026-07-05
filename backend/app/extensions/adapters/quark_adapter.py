@@ -6,6 +6,8 @@
 import sys
 import os
 import logging
+import hashlib
+import time
 from typing import Dict, List, Tuple, Optional, Any
 
 # 添加父目录到路径，以便导入 quark_auto_save
@@ -25,6 +27,10 @@ class QuarkAdapter(BaseCloudDriveAdapter):
     CONFIG_FORMAT = "raw"
     default_config = {
         "cookie": "",
+        "refresh_token": "",
+        "device_id": "",
+        "query_token": "",
+        "302_path": "",
     }
     config_fields = [
         {
@@ -35,11 +41,62 @@ class QuarkAdapter(BaseCloudDriveAdapter):
             "required": True,
             "secret": True,
             "placeholder": "__puus=...; kps=...; sign=...; vcode=...",
-        }
+        },
+        {
+            "key": "refresh_token",
+            "label": "TV 刷新令牌",
+            "description": "夸克 TV 端 refresh_token；扫码成功后会自动回写，也可手动填写保存。",
+            "input_type": "textarea",
+            "required": False,
+            "secret": True,
+            "placeholder": "refresh_token",
+        },
+        {
+            "key": "device_id",
+            "label": "TV 设备 ID",
+            "description": "夸克 TV 登录签名所需 device_id；为空时发起扫码会自动生成。",
+            "input_type": "text",
+            "required": False,
+            "secret": False,
+            "placeholder": "自动生成或手动填写",
+        },
+        {
+            "key": "query_token",
+            "label": "TV 查询令牌",
+            "description": "夸克 TV 扫码轮询使用的 query_token；支持手动保存以续接未完成登录。",
+            "input_type": "textarea",
+            "required": False,
+            "secret": True,
+            "placeholder": "query_token",
+        },
+        {
+            "key": "302_path",
+            "label": "302代理基础路径",
+            "description": "302/STRM 生成使用的媒体根目录（网盘内路径）。",
+            "input_type": "text",
+            "required": True,
+            "secret": False,
+            "placeholder": "/",
+        },
     ]
     BASE_URL = "https://drive-pc.quark.cn"
     BASE_URL_APP = "https://drive-m.quark.cn"
     USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/3.14.2 Chrome/112.0.5615.165 Electron/24.1.3.8 Safari/537.36 Channel/pckk_other_ch"
+    TV_API_BASE_URL = "https://open-api-drive.quark.cn"
+    TV_CODE_API_BASE_URL = "http://api.extscreen.com/quarkdrive"
+    TV_CLIENT_ID = "d3194e61504e493eb6222857bccfed94"
+    TV_SIGN_KEY = "kw2dvtd7p4t3pjl2d9ed9yc8yej8kw2d"
+    TV_APP_VER = "1.8.2.2"
+    TV_CHANNEL = "GENERAL"
+    TV_USER_AGENT = "Mozilla/5.0 (Linux; U; Android 13; zh-cn; M2004J7AC Build/UKQ1.231108.001) AppleWebKit/533.1 (KHTML, like Gecko) Mobile Safari/533.1"
+    TV_DEVICE_BRAND = "Xiaomi"
+    TV_PLATFORM = "tv"
+    TV_DEVICE_NAME = "M2004J7AC"
+    TV_DEVICE_MODEL = "M2004J7AC"
+    TV_BUILD_DEVICE = "M2004J7AC"
+    TV_BUILD_PRODUCT = "M2004J7AC"
+    TV_DEVICE_GPU = "Adreno (TM) 550"
+    TV_ACTIVITY_RECT = "{}"
 
     def __init__(
         self,
@@ -51,6 +108,243 @@ class QuarkAdapter(BaseCloudDriveAdapter):
     ):
         super().__init__(cookie, index, config=config, no_login=no_login)
         self.mparam = self._match_mparam_form_cookie(cookie)
+        self.refresh_token = str(self.config.get("refresh_token") or "").strip()
+        self.device_id = self._normalize_device_id(self.config.get("device_id"))
+        self.query_token = str(self.config.get("query_token") or "").strip()
+
+    @staticmethod
+    def _clean_message(payload: dict[str, Any] | None, default: str) -> str:
+        body = payload or {}
+        for key in ("message", "msg", "error_info", "error", "status_text"):
+            value = str(body.get(key) or "").strip()
+            if value:
+                return value
+        data = body.get("data")
+        if isinstance(data, dict):
+            for key in ("message", "msg", "error_info", "error"):
+                value = str(data.get(key) or "").strip()
+                if value:
+                    return value
+        return default
+
+    @staticmethod
+    def _normalize_device_id(value: Any) -> str:
+        return str(value or "").strip()
+
+    @classmethod
+    def _ensure_tv_device_id(cls, config: dict[str, Any] | None) -> str:
+        device_id = cls._normalize_device_id((config or {}).get("device_id"))
+        if device_id:
+            return device_id
+        raw = f"{time.time_ns()}:{cls.DRIVE_TYPE}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _tv_req_sign(cls, method: str, pathname: str, device_id: str) -> tuple[str, str, str]:
+        timestamp = str(int(time.time() * 1000))
+        req_id = hashlib.md5(f"{device_id}{timestamp}".encode("utf-8")).hexdigest()
+        token_raw = f"{method.upper()}&{pathname}&{timestamp}&{cls.TV_SIGN_KEY}"
+        token = hashlib.sha256(token_raw.encode("utf-8")).hexdigest()
+        return timestamp, token, req_id
+
+    @classmethod
+    def _tv_base_query(cls, *, device_id: str, access_token: str = "") -> dict[str, str]:
+        return {
+            "req_id": hashlib.md5(f"{device_id}{int(time.time() * 1000)}".encode("utf-8")).hexdigest(),
+            "access_token": access_token,
+            "app_ver": cls.TV_APP_VER,
+            "device_id": device_id,
+            "device_brand": cls.TV_DEVICE_BRAND,
+            "platform": cls.TV_PLATFORM,
+            "device_name": cls.TV_DEVICE_NAME,
+            "device_model": cls.TV_DEVICE_MODEL,
+            "build_device": cls.TV_BUILD_DEVICE,
+            "build_product": cls.TV_BUILD_PRODUCT,
+            "device_gpu": cls.TV_DEVICE_GPU,
+            "activity_rect": cls.TV_ACTIVITY_RECT,
+            "channel": cls.TV_CHANNEL,
+        }
+
+    @classmethod
+    def _tv_api_request(
+        cls,
+        method: str,
+        pathname: str,
+        *,
+        device_id: str,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        access_token: str = "",
+    ) -> dict[str, Any]:
+        import requests
+
+        tm, token, req_id = cls._tv_req_sign(method, pathname, device_id)
+        query = cls._tv_base_query(device_id=device_id, access_token=access_token)
+        query["req_id"] = req_id
+        if params:
+            for key, value in params.items():
+                if value is None:
+                    continue
+                query[key] = value
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": cls.TV_USER_AGENT,
+            "x-pan-tm": tm,
+            "x-pan-token": token,
+            "x-pan-client-id": cls.TV_CLIENT_ID,
+        }
+        response = requests.request(
+            method.upper(),
+            f"{cls.TV_API_BASE_URL}{pathname}",
+            headers=headers,
+            params=query,
+            json=json_body,
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("TV 登录接口响应格式错误")
+        errno = payload.get("errno")
+        error_info = str(payload.get("error_info") or "").strip()
+        status = payload.get("status")
+        if isinstance(errno, int) and errno != 0:
+            raise RuntimeError(error_info or cls._clean_message(payload, "TV 登录接口返回错误"))
+        if isinstance(status, int) and status >= 400:
+            raise RuntimeError(error_info or cls._clean_message(payload, "TV 登录接口请求失败"))
+        return payload
+
+    @classmethod
+    def _tv_exchange_token(cls, *, device_id: str, value: str, is_refresh: bool) -> dict[str, Any]:
+        import requests
+
+        pathname = "/token"
+        _, _, req_id = cls._tv_req_sign("POST", pathname, device_id)
+        body = cls._tv_base_query(device_id=device_id)
+        body["req_id"] = req_id
+        if is_refresh:
+            body["refresh_token"] = value
+        else:
+            body["code"] = value
+        response = requests.post(
+            f"{cls.TV_CODE_API_BASE_URL}{pathname}",
+            json=body,
+            timeout=30,
+            headers={"Content-Type": "application/json", "User-Agent": cls.TV_USER_AGENT},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("TV 换取令牌响应格式错误")
+        if int(payload.get("code") or 0) != 200:
+            raise RuntimeError(cls._clean_message(payload, "TV 换取令牌失败"))
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("TV 换取令牌缺少 data")
+        refresh_token = str(data.get("refresh_token") or "").strip()
+        if not refresh_token:
+            raise RuntimeError("TV 换取令牌失败：refresh_token 为空")
+        return data
+
+    @classmethod
+    def start_tv_qrcode_auth(cls, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        runtime_config = cls.normalize_config(config)
+        device_id = cls._ensure_tv_device_id(runtime_config)
+        payload = cls._tv_api_request(
+            "GET",
+            "/oauth/authorize",
+            device_id=device_id,
+            params={
+                "auth_type": "code",
+                "client_id": cls.TV_CLIENT_ID,
+                "scope": "netdisk",
+                "qrcode": "1",
+                "qr_width": "460",
+                "qr_height": "460",
+            },
+        )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        qr_data = str(payload.get("qr_data") or data.get("qr_data") or data.get("qrData") or "").strip()
+        query_token = str(payload.get("query_token") or data.get("query_token") or data.get("queryToken") or "").strip()
+        if not qr_data or not query_token:
+            return {"success": False, "message": cls._clean_message(payload, "生成夸克 TV 二维码失败")}
+        image_src = qr_data if qr_data.startswith("data:image/") else f"data:image/jpeg;base64,{qr_data}"
+        return {
+            "success": True,
+            "data": {
+                "status": "NEW",
+                "message": "等待扫码",
+                "device_id": device_id,
+                "query_token": query_token,
+                "qrcode_url": image_src,
+                "qrcode_image": image_src,
+            },
+        }
+
+    @classmethod
+    def poll_tv_qrcode_auth(cls, session_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        meta = dict(session_meta or {})
+        device_id = cls._normalize_device_id(meta.get("device_id"))
+        query_token = str(meta.get("query_token") or "").strip()
+        if not device_id:
+            return {"success": False, "message": "缺少 TV 设备 ID"}
+        if not query_token:
+            return {"success": False, "message": "缺少 TV 查询令牌"}
+        try:
+            payload = cls._tv_api_request(
+                "GET",
+                "/oauth/code",
+                device_id=device_id,
+                params={
+                    "client_id": cls.TV_CLIENT_ID,
+                    "scope": "netdisk",
+                    "query_token": query_token,
+                },
+            )
+        except Exception as exc:
+            message = str(exc).strip() or "等待扫码确认"
+            lowered = message.lower()
+            status = "PENDING"
+            if "expired" in lowered or "过期" in message:
+                status = "EXPIRED"
+            elif "cancel" in lowered or "取消" in message:
+                status = "CANCELED"
+            return {
+                "success": True,
+                "data": {
+                    "status": status,
+                    "message": message,
+                    "device_id": device_id,
+                    "query_token": query_token,
+                },
+            }
+        code_value = payload.get("code")
+        if not isinstance(code_value, str):
+            data = payload.get("data")
+            code_value = str((data or {}).get("code") or "") if isinstance(data, dict) else ""
+        code_value = code_value.strip()
+        if not code_value:
+            return {
+                "success": True,
+                "data": {
+                    "status": "PENDING",
+                    "message": cls._clean_message(payload, "等待扫码确认"),
+                    "device_id": device_id,
+                    "query_token": query_token,
+                },
+            }
+        token_data = cls._tv_exchange_token(device_id=device_id, value=code_value, is_refresh=False)
+        return {
+            "success": True,
+            "data": {
+                "status": "CONFIRMED",
+                "message": "TV 凭据已保存",
+                "refresh_token": str(token_data.get("refresh_token") or "").strip(),
+                "access_token": str(token_data.get("access_token") or "").strip(),
+                "device_id": device_id,
+                "query_token": query_token,
+            },
+        }
 
     def _match_mparam_form_cookie(self, cookie: str) -> Dict:
         """从 cookie 中提取移动端参数"""
@@ -82,8 +376,6 @@ class QuarkAdapter(BaseCloudDriveAdapter):
     def _send_request(self, method: str, url: str, **kwargs):
         """发送 HTTP 请求"""
         import requests
-        import random
-        from datetime import datetime
         self._throttle_request()
         
         headers = {
@@ -137,6 +429,8 @@ class QuarkAdapter(BaseCloudDriveAdapter):
 
     def init(self) -> Any:
         """初始化账户"""
+        if not str(self.cookie or "").strip() and self._has_tv_credentials():
+            raise RuntimeError("当前仅支持保存/扫码 TV 凭据，账号运行仍需 Cookie")
         account_info = self.get_account_info()
         if account_info:
             self.is_active = True
@@ -144,6 +438,9 @@ class QuarkAdapter(BaseCloudDriveAdapter):
             return account_info
         else:
             return False
+
+    def _has_tv_credentials(self) -> bool:
+        return any((self.refresh_token, self.device_id, self.query_token))
 
     def get_account_info(self) -> Any:
         """获取账户信息"""
@@ -264,7 +561,7 @@ class QuarkAdapter(BaseCloudDriveAdapter):
                 "uc_param_str": "",
                 "pdir_fid": pdir_fid if pdir_fid else "0",
                 "_page": page,
-                "_size": "50",
+                "_size": "1000",
                 "_fetch_total": "1",
                 "_fetch_sub_dirs": "0",
                 "_sort": "file_type:asc,updated_at:desc",
@@ -567,3 +864,11 @@ class QuarkAdapter(BaseCloudDriveAdapter):
         set_cookie = response.cookies.get_dict()
         cookie_str = "; ".join([f"{key}={value}" for key, value in set_cookie.items()])
         return response.json(), cookie_str
+
+    def export_runtime_config(self) -> dict[str, Any]:
+        payload = dict(self.config)
+        payload["cookie"] = str(self.cookie or "").strip()
+        payload["refresh_token"] = self.refresh_token
+        payload["device_id"] = self.device_id
+        payload["query_token"] = self.query_token
+        return self.normalize_config(payload)
