@@ -50,6 +50,10 @@ class DriveAccountOut(BaseModel):
     last_checked_at: datetime | None = None
     profile_updated_at: datetime | None = None
     last_error: str | None = None
+    has_302_path: bool = False
+    lsdir_cache_base_path: str | None = None
+    lsdir_cache_file_total: int = 0
+    lsdir_cache_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -61,3 +65,11 @@ class DriveTypeOut(BaseModel):
     config_format: str = "raw"
     default_config: dict[str, Any] = {}
     config_fields: list[dict[str, Any]] = []
+
+
+class DriveAccountLsdirCacheRefreshOut(BaseModel):
+    account_id: int
+    cleared: int = 0
+    queued: bool = False
+    base_path: str | None = None
+    reason: str | None = None

@@ -47,8 +47,20 @@ export type DriveAccountItem = {
   last_checked_at?: string | null
   profile_updated_at?: string | null
   last_error?: string | null
+  has_302_path?: boolean
+  lsdir_cache_base_path?: string | null
+  lsdir_cache_file_total?: number
+  lsdir_cache_updated_at?: string | null
   created_at: string
   updated_at: string
+}
+
+export type DriveAccountLsdirCacheRefreshResult = {
+  account_id: number
+  cleared: number
+  queued: boolean
+  base_path?: string | null
+  reason?: string | null
 }
 
 export type PluginItem = {

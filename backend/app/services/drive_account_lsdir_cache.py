@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.drive_account_lsdir_cache import DriveAccountLsdirCache
@@ -380,4 +380,36 @@ def get_drive_account_lsdir_cache_subtree_freshness(db: Session, *, account_id: 
         "expires_at": expires_at,
         "is_fresh": bool(expires_at and expires_at > now),
         "total": int(total or 0),
+    }
+
+
+def get_drive_account_lsdir_cache_subtree_stats(db: Session, *, account_id: int, full_path: str) -> dict[str, Any]:
+    normalized_path = _normalize_parent_path(full_path)
+    filters = [DriveAccountLsdirCache.account_id == int(account_id)]
+    if normalized_path != "/":
+        like_prefix = f"{normalized_path}/%"
+        filters.append((DriveAccountLsdirCache.full_path == normalized_path) | (DriveAccountLsdirCache.full_path.like(like_prefix)))
+
+    scanned_at, expires_at, entry_total, file_total, dir_total = (
+        db.execute(
+            select(
+                func.max(DriveAccountLsdirCache.scanned_at),
+                func.max(DriveAccountLsdirCache.expires_at),
+                func.count(DriveAccountLsdirCache.id),
+                func.coalesce(func.sum(case((DriveAccountLsdirCache.is_dir.is_(False), 1), else_=0)), 0),
+                func.coalesce(func.sum(case((DriveAccountLsdirCache.is_dir.is_(True), 1), else_=0)), 0),
+            ).where(*filters)
+        )
+        .one()
+    )
+    now = _utcnow()
+    return {
+        "account_id": int(account_id),
+        "full_path": normalized_path,
+        "scanned_at": scanned_at,
+        "expires_at": expires_at,
+        "is_fresh": bool(expires_at and expires_at > now),
+        "entry_total": int(entry_total or 0),
+        "file_total": int(file_total or 0),
+        "dir_total": int(dir_total or 0),
     }

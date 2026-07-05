@@ -14,6 +14,7 @@ from app.extensions.adapters.adapter_factory import AdapterFactory
 from app.extensions.runtime.adapter_registry import AdapterRegistry
 from app.models.drive_account import DriveAccount
 from app.services.drive_account_lsdir_cache import (
+    delete_drive_account_lsdir_cache_by_account,
     delete_drive_account_lsdir_cache_by_path,
     delete_drive_account_lsdir_cache_subtree_by_path,
     get_drive_account_lsdir_cache_freshness,
@@ -23,6 +24,7 @@ from app.services.drive_account_lsdir_cache import (
     _normalize_parent_path,
     upsert_drive_account_lsdir_items,
 )
+from app.services.dl302_settings import extract_dl302_media_base_path
 from app.services.dl302_strm import maybe_auto_generate_dl302_strm
 
 
@@ -135,6 +137,63 @@ def trigger_drive_account_lsdir_targeted_scan(
     )
     thread.start()
     return True
+
+
+def rebuild_drive_account_lsdir_cache_for_current_302_path(account_id: int, source: str) -> dict[str, Any]:
+    account_key = int(account_id)
+    with SessionLocal() as db:
+        account = db.get(DriveAccount, account_key)
+        if account is None:
+            return {
+                "account_id": account_key,
+                "cleared": 0,
+                "queued": False,
+                "base_path": None,
+                "reason": "account_not_found",
+            }
+        base_path = extract_dl302_media_base_path(account)
+        cleared = delete_drive_account_lsdir_cache_by_account(db, account_key)
+        db.commit()
+
+    if not base_path:
+        logger.info(
+            "drive account lsdir rebuild skipped: missing 302_path account_id=%s source=%s cleared=%s",
+            account_key,
+            source,
+            cleared,
+        )
+        return {
+            "account_id": account_key,
+            "cleared": int(cleared or 0),
+            "queued": False,
+            "base_path": None,
+            "reason": "missing_302_path",
+        }
+
+    queued = trigger_drive_account_lsdir_targeted_scan(
+        account_key,
+        savepath=base_path,
+        relative_dir_paths=None,
+        recursive_savepath=True,
+        source=source,
+    )
+    reason = "queued" if queued else "running"
+    logger.info(
+        "drive account lsdir rebuild requested account_id=%s source=%s cleared=%s queued=%s base_path=%s reason=%s",
+        account_key,
+        source,
+        cleared,
+        queued,
+        base_path,
+        reason,
+    )
+    return {
+        "account_id": account_key,
+        "cleared": int(cleared or 0),
+        "queued": bool(queued),
+        "base_path": str(base_path),
+        "reason": reason,
+    }
 
 
 def refresh_drive_account_lsdir_paths(

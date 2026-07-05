@@ -1,5 +1,5 @@
 import { http } from '@/api/http'
-import type { DriveAccountItem, DriveTypeItem, PluginItem } from '@/types/extensions'
+import type { DriveAccountItem, DriveAccountLsdirCacheRefreshResult, DriveTypeItem, PluginItem } from '@/types/extensions'
 
 export async function fetchDriveAccounts() {
   const { data } = await http.get<DriveAccountItem[]>('/drive-accounts')
@@ -58,6 +58,11 @@ export async function probeDriveAccount(accountId: number, options?: { silentToa
   const headers: Record<string, string> = {}
   if (options?.silentToast) headers['X-Silent-Toast'] = '1'
   const { data } = await http.post<DriveAccountItem>(`/drive-accounts/${accountId}/probe`, null, { headers })
+  return data
+}
+
+export async function refreshDriveAccountLsdirCache(accountId: number) {
+  const { data } = await http.post<DriveAccountLsdirCacheRefreshResult>(`/drive-accounts/${accountId}/lsdir-cache/refresh`)
   return data
 }
 

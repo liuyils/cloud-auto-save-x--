@@ -27,6 +27,8 @@ const runtimeTag = computed<TagProps['type']>(() => {
   if (props.account.runtime_status === 'error') return 'danger'
   return 'info'
 })
+
+const hasLsdirCache = computed(() => Boolean(props.account.has_302_path))
 </script>
 
 <template>
@@ -79,6 +81,14 @@ const runtimeTag = computed<TagProps['type']>(() => {
       </template>
     </div>
 
+    <div class="account-card__cache" :class="{ 'account-card__cache--placeholder': !hasLsdirCache }">
+      <template v-if="hasLsdirCache">
+        <span>302 路径：{{ account.lsdir_cache_base_path || account.config?.['302_path'] || '-' }}</span>
+        <span>缓存文件：{{ account.lsdir_cache_file_total ?? 0 }}</span>
+      </template>
+      <span v-else aria-hidden="true">&nbsp;</span>
+    </div>
+
     <div class="account-card__footer">
       <span>最近刷新：{{ formatDateTime(account.profile_updated_at || account.last_checked_at) }}</span>
       <span v-if="account.last_error" class="account-card__error">{{ account.last_error }}</span>
@@ -97,5 +107,20 @@ const runtimeTag = computed<TagProps['type']>(() => {
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.account-card__cache {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 12px;
+  min-height: 20px;
+  align-items: center;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.account-card__cache--placeholder {
+  visibility: hidden;
 }
 </style>

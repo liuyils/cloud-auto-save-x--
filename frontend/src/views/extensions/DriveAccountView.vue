@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import axios, { type AxiosError } from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElNotification } from 'element-plus'
+import { h } from 'vue'
 import { useRouter } from 'vue-router'
 
 import CapacityAccountCard from '@/components/dashboard/CapacityAccountCard.vue'
@@ -13,6 +14,7 @@ import {
   fetchDriveAccountProbeScheduler,
   patchDriveAccountProbeScheduler,
   probeDriveAccount,
+  refreshDriveAccountLsdirCache,
   refreshDriveAccountProfiles,
   setDriveAccountDefault,
   setDriveAccountStatus,
@@ -33,6 +35,7 @@ const router = useRouter()
 const loading = ref(false)
 const submitting = ref(false)
 const refreshing = ref(false)
+const cacheRefreshingIds = ref<number[]>([])
 const accounts = ref<DriveAccountItem[]>([])
 const driveTypes = ref<DriveTypeItem[]>([])
 const drawerVisible = ref(false)
@@ -43,16 +46,6 @@ const deleteDialog = reactive({
   visible: false,
   deleting: false,
   row: null as DriveAccountItem | null,
-})
-
-const createdDialog = reactive({
-  visible: false,
-  accountId: 0,
-  name: '',
-  driveType: '',
-  driveName: '',
-  enabled: true,
-  isDefault: false,
 })
 
 const probeScheduler = reactive({
@@ -126,6 +119,46 @@ async function handleTvQrcodeAuth(row: DriveAccountItem) {
 
 function getDriveTypeMeta(code: string) {
   return driveTypes.value.find((item) => item.code === code) || null
+}
+
+function notifyAccountCreated(payload: {
+  name: string
+  driveType: string
+  driveName: string
+  enabled: boolean
+  isDefault: boolean
+}) {
+  ElNotification({
+    title: '账号创建成功',
+    type: 'success',
+    duration: 4500,
+    message: h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } }, [
+      h('div', { style: { color: 'var(--el-text-color-primary)' } }, `已自动发起探测：${payload.name}`),
+      h(
+        'div',
+        { style: { color: 'var(--el-text-color-secondary)', fontSize: '12px' } },
+        `网盘类型：${payload.driveName} (${payload.driveType})`,
+      ),
+      h(
+        'div',
+        { style: { color: 'var(--el-text-color-secondary)', fontSize: '12px' } },
+        `状态：${payload.enabled ? '启用' : '禁用'}${payload.isDefault ? ' / 默认账号' : ''}`,
+      ),
+    ]),
+  })
+}
+
+function notifyAccountDeleted(row: DriveAccountItem) {
+  const driveName = getDriveTypeMeta(row.drive_type)?.drive_name || row.drive_type
+  ElNotification({
+    title: '账号已删除',
+    type: 'success',
+    duration: 3500,
+    message: h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } }, [
+      h('div', { style: { color: 'var(--el-text-color-primary)' } }, row.name),
+      h('div', { style: { color: 'var(--el-text-color-secondary)', fontSize: '12px' } }, `网盘类型：${driveName} (${row.drive_type})`),
+    ]),
+  })
 }
 
 function hasAnyConfigValue(configData: Record<string, any>, fields: ConfigFieldItem[]) {
@@ -255,13 +288,13 @@ async function submitForm(payload: {
         throw e
       }
       const meta = getDriveTypeMeta(payload.drive_type)
-      createdDialog.accountId = created.id
-      createdDialog.name = payload.name
-      createdDialog.driveType = payload.drive_type
-      createdDialog.driveName = meta?.drive_name || payload.drive_type
-      createdDialog.enabled = Boolean(payload.enabled)
-      createdDialog.isDefault = Boolean(payload.is_default)
-      createdDialog.visible = true
+      notifyAccountCreated({
+        name: payload.name,
+        driveType: payload.drive_type,
+        driveName: meta?.drive_name || payload.drive_type,
+        enabled: Boolean(payload.enabled),
+        isDefault: Boolean(payload.is_default),
+      })
     }
     drawerVisible.value = false
     await loadData()
@@ -306,6 +339,26 @@ async function handleProbe(row: DriveAccountItem) {
       return
     }
     throw e
+  }
+}
+
+function isCacheRefreshing(accountId: number) {
+  return cacheRefreshingIds.value.includes(accountId)
+}
+
+async function handleRefreshLsdirCache(row: DriveAccountItem) {
+  if (!canWrite.value || !row.has_302_path) return
+  cacheRefreshingIds.value = [...cacheRefreshingIds.value, row.id]
+  try {
+    const result = await refreshDriveAccountLsdirCache(row.id)
+    if (result.reason === 'running') {
+      ElMessage.info('缓存刷新任务已在后台执行中')
+    } else {
+      ElMessage.success('缓存刷新任务已提交')
+    }
+    await loadData()
+  } finally {
+    cacheRefreshingIds.value = cacheRefreshingIds.value.filter((id) => id !== row.id)
   }
 }
 
@@ -355,8 +408,9 @@ async function confirmDelete() {
   deleteDialog.deleting = true
   try {
     await deleteDriveAccount(row.id)
-    ElMessage.success('账号已删除')
-    closeDeleteDialog()
+    notifyAccountDeleted(row)
+    deleteDialog.visible = false
+    deleteDialog.row = null
     await loadData()
   } finally {
     deleteDialog.deleting = false
@@ -455,17 +509,56 @@ onMounted(loadProbeScheduler)
     <section v-if="filteredAccounts.length" class="card-grid">
       <CapacityAccountCard v-for="item in filteredAccounts" :key="item.id" :account="item">
         <template #actions>
-          <el-button v-if="canWrite" text bg @click="openEditDrawer(item)">编辑</el-button>
-          <el-button v-if="canWrite && supportsTvQrcodeAuth(item.drive_type)" text bg type="primary" @click="handleTvQrcodeAuth(item)">
-            TV 扫码登录
-          </el-button>
-          <el-button v-if="canWrite" text bg @click="handleToggle(item, !item.enabled)">
-            {{ item.enabled ? '禁用' : '启用' }}
-          </el-button>
-          <el-button v-if="canWrite && !item.is_default" text bg @click="handleSetDefault(item)">设为默认</el-button>
-          <el-button text bg @click="handleProbe(item)">探测</el-button>
-          <el-button text bg @click="handleSignIn(item)">签到</el-button>
-          <el-button v-if="canWrite" text bg type="danger" @click="openDeleteDialog(item)">删除</el-button>
+          <div class="account-card__action-grid">
+            <el-button v-if="canWrite" class="account-card__action-btn" text bg @click="openEditDrawer(item)">编辑</el-button>
+            <span v-else class="account-card__action-placeholder" aria-hidden="true" />
+
+            <el-button
+              v-if="canWrite && supportsTvQrcodeAuth(item.drive_type)"
+              class="account-card__action-btn"
+              text
+              bg
+              type="primary"
+              @click="handleTvQrcodeAuth(item)"
+            >
+              TV 扫码
+            </el-button>
+            <span v-else class="account-card__action-placeholder" aria-hidden="true" />
+
+            <el-button v-if="canWrite" class="account-card__action-btn" text bg @click="handleToggle(item, !item.enabled)">
+              {{ item.enabled ? '禁用' : '启用' }}
+            </el-button>
+            <span v-else class="account-card__action-placeholder" aria-hidden="true" />
+
+            <el-button
+              v-if="canWrite && !item.is_default"
+              class="account-card__action-btn"
+              text
+              bg
+              @click="handleSetDefault(item)"
+            >
+              设为默认
+            </el-button>
+            <span v-else class="account-card__action-placeholder" aria-hidden="true" />
+
+            <el-button
+              v-if="canWrite && item.has_302_path"
+              class="account-card__action-btn"
+              text
+              bg
+              :loading="isCacheRefreshing(item.id)"
+              @click="handleRefreshLsdirCache(item)"
+            >
+              刷新缓存
+            </el-button>
+            <span v-else class="account-card__action-placeholder" aria-hidden="true" />
+
+            <el-button class="account-card__action-btn" text bg @click="handleProbe(item)">探测</el-button>
+            <el-button class="account-card__action-btn" text bg @click="handleSignIn(item)">签到</el-button>
+
+            <el-button v-if="canWrite" class="account-card__action-btn" text bg type="danger" @click="openDeleteDialog(item)">删除</el-button>
+            <span v-else class="account-card__action-placeholder" aria-hidden="true" />
+          </div>
         </template>
       </CapacityAccountCard>
     </section>
@@ -522,35 +615,6 @@ onMounted(loadProbeScheduler)
         </el-button>
       </template>
     </el-dialog>
-
-    <el-dialog
-      v-model="createdDialog.visible"
-      width="520px"
-      :show-close="false"
-      :close-on-click-modal="false"
-    >
-      <el-result icon="success" title="账号创建成功" sub-title="已自动发起探测，稍后可在卡片上看到容量与状态更新。">
-        <template #extra>
-          <div class="created__meta">
-            <el-descriptions :column="1" border>
-              <el-descriptions-item label="账号名">{{ createdDialog.name }}</el-descriptions-item>
-              <el-descriptions-item label="网盘类型">
-                <el-tag>{{ createdDialog.driveName }}</el-tag>
-                <span class="created__sub">{{ createdDialog.driveType }}</span>
-              </el-descriptions-item>
-              <el-descriptions-item label="状态">
-                <el-tag :type="createdDialog.enabled ? 'success' : 'info'">{{ createdDialog.enabled ? '启用' : '禁用' }}</el-tag>
-                <el-tag v-if="createdDialog.isDefault" type="warning" class="created__tag">默认</el-tag>
-              </el-descriptions-item>
-            </el-descriptions>
-          </div>
-          <div class="created__actions">
-            <el-button @click="createdDialog.visible = false">关闭</el-button>
-            <el-button type="primary" @click="createdDialog.visible = false">继续添加</el-button>
-          </div>
-        </template>
-      </el-result>
-    </el-dialog>
   </div>
 </template>
 
@@ -569,22 +633,23 @@ onMounted(loadProbeScheduler)
 .del__tag {
   margin-left: 8px;
 }
-.created__meta {
+.account-card__action-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   width: 100%;
-  margin-top: 12px;
 }
-.created__sub {
-  margin-left: 8px;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
+.account-card__action-btn {
+  width: 100%;
+  margin: 0;
 }
-.created__tag {
-  margin-left: 8px;
+.account-card__action-placeholder {
+  min-height: 32px;
+  visibility: hidden;
 }
-.created__actions {
-  margin-top: 14px;
-  display: flex;
-  gap: 10px;
-  justify-content: center;
+@media (max-width: 768px) {
+  .account-card__action-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 </style>
