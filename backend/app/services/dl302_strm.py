@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote
 
 from fastapi import Request
 from sqlalchemy import select
@@ -44,6 +44,7 @@ _DRIVE_TYPE_ROUTE_MAP = {
 }
 
 _MANIFEST_PREFIX = ".dl302_strm_manifest_"
+_PATH_SEGMENT_SAFE_CHARS = "-._~"
 
 
 def load_effective_strm_config(db: Session, *, mode: str | None = None) -> dict[str, Any]:
@@ -164,7 +165,7 @@ def build_independent_strm_tree(db: Session, accounts: list[DriveAccount], prefi
 
 def render_auto_strm_url(prefix_url: str, relative_path: str) -> str:
     normalized = _normalize_relative_media_path(relative_path)
-    return f"{prefix_url.rstrip('/')}/dl/auto?path={quote(normalized, safe='/')}"
+    return _render_path_style_strm_url(prefix_url, "/dl/auto", normalized)
 
 
 def render_account_strm_url(prefix_url: str, drive_type: str, account_name: str, relative_path: str) -> str:
@@ -172,10 +173,8 @@ def render_account_strm_url(prefix_url: str, drive_type: str, account_name: str,
     if not route:
         raise ValueError(f"unsupported drive_type: {drive_type}")
     normalized = _normalize_relative_media_path(relative_path)
-    return (
-        f"{prefix_url.rstrip('/')}{route}?account={quote_plus(str(account_name or ''))}"
-        f"&path={quote(normalized, safe='/')}"
-    )
+    _ = account_name
+    return _render_path_style_strm_url(prefix_url, route, normalized)
 
 
 def rebuild_dl302_strm(
@@ -326,6 +325,26 @@ def _normalize_posix_dir(value: str) -> str:
 def _normalize_relative_media_path(value: str) -> str:
     text = _normalize_posix_dir(value)
     return text if text.startswith("/") else f"/{text}"
+
+
+def _render_path_style_strm_url(prefix_url: str, route: str, relative_path: str) -> str:
+    encoded_path = _encode_relative_media_path(relative_path)
+    return f"{prefix_url.rstrip('/')}{route}{encoded_path}"
+
+
+def _encode_relative_media_path(value: str) -> str:
+    normalized = _normalize_relative_media_path(value)
+    return "/".join(_encode_path_segment(segment) for segment in normalized.split("/"))
+
+
+def _encode_path_segment(segment: str) -> str:
+    out: list[str] = []
+    for char in str(segment or ""):
+        if char.isascii() and (not char.isalnum() and char not in _PATH_SEGMENT_SAFE_CHARS):
+            out.append(quote(char, safe=""))
+        else:
+            out.append(char)
+    return "".join(out)
 
 
 def _to_relative_media_path(full_path: str, media_base_path: str) -> str | None:
