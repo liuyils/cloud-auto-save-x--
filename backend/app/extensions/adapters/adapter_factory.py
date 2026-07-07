@@ -50,7 +50,7 @@ class AdapterFactory:
         r"pan\.xunlei\.com": "xunlei",
         r"(?:alipan|aliyundrive)\.com": "aliyun",
         r"drive\.uc\.cn": "uc",
-        r"(?:123pan|123865|123684|123952|123912)\.com": "123pan",
+        r"(?:(?:123pan|123865|123684|123952|123912)\.(?:com|cn)|(?:[A-Za-z0-9-]+\.)?share\.123pan\.cn)": "123pan",
         r"(?:cloud|m\.cloud)\.189\.cn": "cloud189",
         r"(?:yun|caiyun)\.139\.com": "cloud139",
         r"(?:www\.|app\.)?guangyapan\.com": "guangya",

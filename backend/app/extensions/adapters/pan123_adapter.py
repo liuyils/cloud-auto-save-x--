@@ -127,7 +127,7 @@ class Pan123Adapter(BaseCloudDriveAdapter):
             "placeholder": "",
         },
     ]
-    DEFAULT_BASE_URL = "https://www.123pan.com"
+    DEFAULT_BASE_URL = "https://api.123pan.com"
 
     WEB_APP_VERSION = "3"
     WEB_USER_AGENT = (
@@ -152,6 +152,8 @@ class Pan123Adapter(BaseCloudDriveAdapter):
         self._api_base = self.DEFAULT_BASE_URL
         self._share_base = self.DEFAULT_BASE_URL
         self._last_share_key = ""
+        self._last_share_url = ""
+        self._share_session_ready_key = ""
 
         self._cookie_kv = {str(k): v for k, v in self.config.items()}
         self._user_name = self._cookie_kv.get("username") or self._cookie_kv.get("userName")
@@ -338,13 +340,14 @@ class Pan123Adapter(BaseCloudDriveAdapter):
 
     def _share_request(self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None) -> Dict:
         url = f"{self._share_base}{path}"
+        self._prepare_share_session()
         headers = {
             "User-Agent": self.WEB_USER_AGENT,
-            "Referer": f"{self._share_base}/s/{self._last_share_key or ''}",
+            "Referer": self._last_share_url or f"{self._share_base}/s/{self._last_share_key or ''}",
         }
         start = time.time()
         try:
-            resp = requests.request(method, url, params=params, headers=headers, timeout=30)
+            resp = self._session.request(method, url, params=params, headers=headers, timeout=30)
             data = resp.json()
             cost_ms = int((time.time() - start) * 1000)
             if self._debug:
@@ -359,6 +362,31 @@ class Pan123Adapter(BaseCloudDriveAdapter):
             cost_ms = int((time.time() - start) * 1000)
             logger.warning(f"[123pan] share error: {method} {url} cost={cost_ms}ms err={e}")
             return {"info": {"code": 500, "message": f"请求失败: {e}", "data": None}}
+
+    def _prepare_share_session(self):
+        share_url = str(self._last_share_url or "").strip()
+        if not share_url:
+            return
+        ready_key = f"{self._share_base}|{share_url}"
+        if self._share_session_ready_key == ready_key:
+            return
+        headers = {
+            "User-Agent": self.WEB_USER_AGENT,
+            "Referer": share_url,
+        }
+        try:
+            self._session.get(share_url, headers=headers, timeout=30)
+            self._session.get(
+                "https://yun.123pan.cn/api/user/token/verify",
+                params={"flag": "true", "redirect_url": share_url},
+                headers=headers,
+                timeout=30,
+            )
+            self._share_session_ready_key = ready_key
+            if self._debug:
+                logger.debug(f"[123pan] share session prepared: base={self._share_base} share_url={share_url}")
+        except Exception as e:
+            logger.warning(f"[123pan] share session prepare failed: share_url={share_url} err={e}")
 
     def _save_cookie_string(self):
         global _global_config_saver
@@ -533,13 +561,42 @@ class Pan123Adapter(BaseCloudDriveAdapter):
         pdir_fid: Any = 0
         paths: List[Dict[str, str]] = []
 
-        parsed = urlparse(url)
+        raw_url = str(url or "").strip()
+        parsed = urlparse(raw_url)
+        netloc = str(parsed.netloc or "").strip().lower()
+        short_match = re.search(r"^/(?:s|ps)/([^/?#]+)", parsed.path or "")
+        if parsed.scheme and short_match and re.fullmatch(r"(?:www\.)?(?:123865|123912|123684|123pan)\.(?:com|cn)", netloc):
+            short_share_key = short_match.group(1).split(".")[0]
+            try:
+                resp = self._session.get(
+                    "https://www.123pan.cn/gsb/s/share-key",
+                    params={"shareKey": short_share_key},
+                    headers={
+                        "User-Agent": self.WEB_USER_AGENT,
+                        "Accept": "application/json, text/plain, */*",
+                        "Referer": raw_url,
+                    },
+                    timeout=15,
+                )
+                share_key_data = resp.json()
+                user_id = ((share_key_data.get("info") or {}).get("data") or {}).get("UserID")
+                if user_id:
+                    suffix = ""
+                    if parsed.query:
+                        suffix += f"?{parsed.query}"
+                    if parsed.fragment:
+                        suffix += f"#{parsed.fragment}"
+                    raw_url = f"https://{user_id}.share.123pan.cn/123pan/{short_share_key}{suffix}"
+                    parsed = urlparse(raw_url)
+            except Exception as e:
+                logger.warning(f"[123pan] resolve share uid failed: url={raw_url} err={e}")
+                logger.warning(f"[123pan] resolve share redirect failed: url={raw_url} err={e}")
         if parsed.scheme and parsed.netloc:
             self._share_base = f"{parsed.scheme}://{parsed.netloc}"
         qs = parse_qs(parsed.query or "")
         passcode = (qs.get("pwd") or qs.get("passcode") or [""])[0] or ""
 
-        m = re.search(r"/s/([^/?#]+)", parsed.path or "")
+        m = re.search(r"/(?:s|123pan)/([^/?#]+)", parsed.path or "")
         if m:
             share_key = m.group(1)
             share_key = share_key.split(".")[0]
@@ -562,7 +619,7 @@ class Pan123Adapter(BaseCloudDriveAdapter):
             return {"status": 404, "message": info.get("info", {}).get("message", "分享不存在"), "data": {}}
         has_pwd = bool(info.get("info", {}).get("data", {}).get("HasPwd"))
         if not has_pwd:
-            return {"status": 200, "data": {"stoken": ""}}
+            return {"status": 200, "data": {"stoken": "None"}}
         if not passcode:
             return {"status": 400, "message": "提取码不能为空", "data": {}}
         chk = self._share_request("GET", "/gsb/s/pwd-check", params={"shareKey": pwd_id, "pwd": passcode})
@@ -682,6 +739,8 @@ class Pan123Adapter(BaseCloudDriveAdapter):
         _fetch_share: int = 0,
         fetch_share_full_path: int = 0,
     ) -> Dict:
+        if stoken == "None":
+            stoken = ''
         try:
             parent_id = int(pdir_fid or 0)
         except Exception:

@@ -9,7 +9,7 @@ export function detectDriveTypeByUrl(url: string): DriveType | null {
   if (/pan\.xunlei\.com/i.test(value)) return 'xunlei'
   if (/(?:alipan|aliyundrive)\.com/i.test(value)) return 'aliyun'
   if (/drive\.uc\.cn/i.test(value)) return 'uc'
-  if (/(?:123pan|123865|123684|123952|123912)\.com/i.test(value)) return '123pan'
+  if (/(?:(?:123pan|123865|123684|123952|123912)\.com|(?:[A-Za-z0-9-]+\.)?share\.123pan\.cn)/i.test(value)) return '123pan'
   if (/(?:cloud|m\.cloud)\.189\.cn/i.test(value)) return 'cloud189'
   if (/(?:yun|caiyun)\.139\.com/i.test(value)) return 'cloud139'
   if (/(?:www\.|app\.)?guangyapan\.com/i.test(value)) return 'guangya'
