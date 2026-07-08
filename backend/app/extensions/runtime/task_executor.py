@@ -618,7 +618,16 @@ class TaskExecutor:
                     snapshot_row_id = None
             if has_new_files:
                 try:
-                    self._trigger_targeted_lsdir_refresh(task=task, task_data=task_data, adapter=adapter, tree=tree, log=log)
+                    if str(task_data.get("task_type") or "") == "drama":
+                        log.line("ls_dir 缓存增量刷新: 跳过（追剧联动后置流程将统一刷新）")
+                    else:
+                        self._trigger_targeted_lsdir_refresh(
+                            task=task,
+                            task_data=task_data,
+                            adapter=adapter,
+                            tree=tree,
+                            log=log,
+                        )
                 except Exception as exc:
                     logger.warning(
                         "任务执行后触发 ls_dir 缓存增量刷新失败 task_id=%s task_uid=%s err=%s",

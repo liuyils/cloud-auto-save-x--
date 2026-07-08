@@ -457,6 +457,8 @@ class Dl302SyncExecutor:
             relative_dir_paths=None,
             source=f"sync_executor_dl302.{label}",
             recursive_savepath=recursive,
+            wait_if_busy=True,
+            max_wait_seconds=60.0,
         )
         log.line(
             f"{label}刷新完成: scanned_dirs={int(getattr(stats, 'scanned_dirs', 0) or 0)} "
@@ -595,6 +597,12 @@ class Dl302SyncExecutor:
         stage = str(getattr(item, "stage", "") or "").strip()
         stage_label = self._stage_label(stage)
         if status == "running":
+            retry_count = int(getattr(item, "retry_count", 0) or 0)
+            last_error = str(getattr(item, "last_error", "") or "").strip()
+            if stage == "start" and retry_count > 0:
+                if last_error:
+                    return f"重试 {retry_count}: {last_error}"
+                return f"重试 {retry_count}"
             progress_percent = self._item_progress_percent(item)
             if progress_percent is not None:
                 if stage_label:

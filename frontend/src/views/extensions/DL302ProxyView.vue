@@ -47,6 +47,7 @@ const settings = reactive({
   proxy_path_offset: -1,
   intranet_cidrs_text: '',
   auto_balance: false,
+  cas_root_dir: '',
   strm_enabled: false,
   strm_mode: 'auto' as 'auto' | 'independent',
   strm_root_dir: '/strm',
@@ -72,6 +73,7 @@ function applyConfig(data: DL302Config) {
   settings.proxy_path_offset = Number.isFinite(Number(data.proxy_path_offset)) ? Number(data.proxy_path_offset) : -1
   settings.intranet_cidrs_text = Array.isArray(data.intranet_cidrs) ? data.intranet_cidrs.filter(Boolean).join('\n') : ''
   settings.auto_balance = Boolean(data.auto_balance)
+  settings.cas_root_dir = String(data.cas_root_dir || '')
   settings.strm_enabled = Boolean(data.strm_enabled)
   settings.strm_mode = data.strm_mode === 'independent' ? 'independent' : 'auto'
   settings.strm_root_dir = String(data.strm_root_dir || '/strm')
@@ -514,6 +516,20 @@ async function saveDL302Settings() {
   }
 }
 
+async function saveCasSettings() {
+  if (!canWrite.value) return
+  settings.savingProxy = true
+  try {
+    const data = await patchDL302Config({
+      cas_root_dir: settings.cas_root_dir ? String(settings.cas_root_dir).trim() : null,
+    })
+    applyConfig(data)
+    ElMessage.success('CAS 设置已保存')
+  } finally {
+    settings.savingProxy = false
+  }
+}
+
 function buildGenerateMessage(result: DL302StrmGenerateResult) {
   const parts = [
     `模式：${result.mode === 'independent' ? '独立模式' : '自动模式'}`,
@@ -557,11 +573,28 @@ onUnmounted(stopCasPoller)
 
     <section class="glass-panel dashboard-section">
       <el-tabs v-model="activeTab">
-        <el-tab-pane label="支持驱动" name="drivers">
+        <el-tab-pane label="CAS管理" name="drivers">
           <div class="tab-copy">
-            展示当前 dl302 支持的账号驱动及其账号卡片。`生成CAS数据` 会复用账号配置中的 `302_path` 作为扫描目录，仅处理目录缓存里缺少 rapid record 的视频文件；
-            处理时会下载到临时文件计算 hash，并像复制功能一样为所有支持秒传的网盘驱动执行统一预热。
+            展示当前 dl302 支持的账号驱动及其账号卡片。`生成CAS数据` 会复用账号配置中的 `302_path` 作为扫描目录，仅处理目录缓存里缺少 rapid record
+            的视频文件；生成好秒传数据后，会按目录树在本地临时目录生成 `.cas` 文件，并上传到当前账号对应网盘的 `CAS 文件生成目录（网盘目录）`。
+            处理过程中仍会像复制功能一样为所有支持秒传的网盘驱动执行统一预热。
             302 直连需要保留端口：5115/9000。5115 为统一代理端口，9000 为独立端口；不建议将 5115 直接暴露到公网，推荐使用反代服务代理 `/dl`。
+          </div>
+          <div class="form-card">
+            <el-form label-width="150px">
+              <el-form-item label="CAS 文件生成目录">
+                <div class="form-field">
+                  <el-input v-model="settings.cas_root_dir" placeholder="/cas" :disabled="!canWrite" />
+                  <div class="form-field-hint">CAS 文件上传到网盘的统一目录；所有支持驱动共用这一目标路径。</div>
+                  <div class="form-field-hint">生成时会按账号 `302_path` 的相对目录树，上传 `<原文件名>.cas` 到该目录下。</div>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :loading="settings.savingProxy" :disabled="!canWrite" @click="saveCasSettings">
+                  保存 CAS 设置
+                </el-button>
+              </el-form-item>
+            </el-form>
           </div>
           <div class="driver-group-list">
             <section v-for="driver in drivers" :key="driver.code" class="glass-panel driver-group">

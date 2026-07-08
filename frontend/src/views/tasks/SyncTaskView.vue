@@ -38,7 +38,7 @@ const dramaTasks = ref<TaskItem[]>([])
 const plugins = ref<PluginItem[]>([])
 const driveAccounts = ref<DriveAccountItem[]>([])
 
-const SUPPORTED_NETDISK_DRIVE_TYPES = ['115', 'cloud139', 'cloud189'] as const
+const SUPPORTED_NETDISK_DRIVE_TYPES = ['115', 'cloud139', 'cloud189', 'uc', 'quark'] as const
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? {}))

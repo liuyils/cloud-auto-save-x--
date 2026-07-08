@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.extensions.runtime.sync_executor import SyncExecutor
+from app.extensions.runtime.execution_log import ExecutionLog
 from app.models.sync_execution import SyncExecution
 from app.models.sync_task import SyncTask
 from app.models.sync_task_drama_link import SyncTaskDramaLink
@@ -48,6 +49,127 @@ def should_trigger_linked_sync_for_drama_execution(execution: object | None) -> 
     if " -> " in tree_summary:
         return True
     return False
+
+
+def run_linked_sync_tasks_blocking(
+    drama_task_uids: list[str],
+    *,
+    source: str,
+    log: ExecutionLog | None = None,
+) -> list[dict[str, object]]:
+    uids = _normalize_task_uids(drama_task_uids)
+    if not uids:
+        return []
+    log = log or ExecutionLog()
+
+    with SessionLocal() as db:
+        links = db.execute(select(SyncTaskDramaLink.sync_task_uid).where(SyncTaskDramaLink.task_uid.in_(uids))).scalars().all()
+        sync_uids = _normalize_task_uids([str(x) for x in links if x])
+        if not sync_uids:
+            return []
+        tasks = (
+            db.execute(select(SyncTask).where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True)).order_by(SyncTask.id.asc()))
+            .scalars()
+            .all()
+        )
+        if not tasks:
+            return []
+
+    results: list[dict[str, object]] = []
+    log.section("关联同步任务（阻塞）")
+    log.line(f"来源: {str(source or '').strip()}")
+    log.line(f"追剧任务数: {len(uids)}")
+    log.line(f"同步任务数: {len(tasks)}")
+
+    for task in tasks:
+        sync_task_id = int(getattr(task, "id", 0) or 0)
+        sync_task_uid = str(getattr(task, "uid", "") or "").strip()
+        sync_task_name = str(getattr(task, "name", "") or "").strip()
+        target_type = str(getattr(task, "target_type", "") or "").strip().lower()
+        target_account_id = int(getattr(task, "target_account_id", 0) or 0) or None
+        target_path = str(getattr(task, "target_path", "") or "").strip()
+
+        with SessionLocal() as tdb:
+            running = (
+                tdb.execute(
+                    select(SyncExecution.id).where(
+                        SyncExecution.sync_task_id == int(sync_task_id),
+                        SyncExecution.status == "running",
+                        SyncExecution.finished_at.is_(None),
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if running is not None:
+                log.line(f"跳过: {sync_task_name}（正在运行 execution_id={int(running)}）")
+                results.append(
+                    {
+                        "sync_task_id": sync_task_id,
+                        "uid": sync_task_uid,
+                        "name": sync_task_name,
+                        "status": "skipped",
+                        "execution_id": int(running),
+                        "target_type": target_type,
+                        "target_account_id": target_account_id,
+                        "target_path": target_path,
+                        "message": "running",
+                    }
+                )
+                continue
+            row = tdb.get(SyncTask, int(sync_task_id))
+            if row is None:
+                log.line(f"跳过: {sync_task_name}（任务不存在）")
+                results.append(
+                    {
+                        "sync_task_id": sync_task_id,
+                        "uid": sync_task_uid,
+                        "name": sync_task_name,
+                        "status": "skipped",
+                        "execution_id": None,
+                        "target_type": target_type,
+                        "target_account_id": target_account_id,
+                        "target_path": target_path,
+                        "message": "not_found",
+                    }
+                )
+                continue
+            try:
+                execution = SyncExecutor(db=None).run_sync_task(row, log=log)
+                execution_id = int(getattr(execution, "id", 0) or 0) or None
+                status = str(getattr(execution, "status", "") or "").strip() or "unknown"
+                message = str(getattr(execution, "message", "") or "").strip()
+                log.line(f"完成: {sync_task_name} status={status}")
+                results.append(
+                    {
+                        "sync_task_id": sync_task_id,
+                        "uid": sync_task_uid,
+                        "name": sync_task_name,
+                        "status": status,
+                        "execution_id": execution_id,
+                        "target_type": target_type,
+                        "target_account_id": target_account_id,
+                        "target_path": target_path,
+                        "message": message,
+                    }
+                )
+            except Exception as exc:
+                message = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
+                log.line(f"失败: {sync_task_name} err={message}")
+                results.append(
+                    {
+                        "sync_task_id": sync_task_id,
+                        "uid": sync_task_uid,
+                        "name": sync_task_name,
+                        "status": "failed",
+                        "execution_id": None,
+                        "target_type": target_type,
+                        "target_account_id": target_account_id,
+                        "target_path": target_path,
+                        "message": message,
+                    }
+                )
+    return results
 
 
 def _normalize_task_uids(values: list[str] | None) -> list[str]:

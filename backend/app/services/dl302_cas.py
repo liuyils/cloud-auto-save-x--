@@ -98,11 +98,78 @@ def _resolve_account(
 
 def submit_dl302_cas_task(account_id: int, db) -> dict[str, object]:
     from app.thirdparty.dl302_grpc_client import submit_cas_task
+    from app.services.dl302_settings import get_or_create_dl302_setting, load_dl302_config
 
+    config = load_dl302_config(get_or_create_dl302_setting(db))
+    if not str(config.get("cas_root_dir") or "").strip():
+        raise bad_request("DL302_CAS_ROOT_DIR_REQUIRED", "请先配置 CAS 文件生成目录")
     account = _resolve_account(account_id, db, require_media_base_path=True, require_enabled=True)
     resp = submit_cas_task(
         drive_type=str(getattr(account, "drive_type", "") or ""),
         account=str(getattr(account, "name", "") or ""),
+    )
+    return _task_to_dict(getattr(resp, "task", None))
+
+
+def submit_dl302_cas_task_delta(
+    account_id: int,
+    db,
+    *,
+    base_path: str | None = None,
+    dir_paths: list[str] | None,
+    file_paths: list[str] | None,
+) -> dict[str, object]:
+    from app.thirdparty.dl302_grpc_client import submit_cas_task_delta
+    from app.services.dl302_settings import get_or_create_dl302_setting, load_dl302_config
+
+    config = load_dl302_config(get_or_create_dl302_setting(db))
+    if not str(config.get("cas_root_dir") or "").strip():
+        raise bad_request("DL302_CAS_ROOT_DIR_REQUIRED", "请先配置 CAS 文件生成目录")
+
+    account = _resolve_account(account_id, db, require_media_base_path=True, require_enabled=True)
+    media_base_path = _extract_account_media_base_path(account) or "/"
+    effective_base_path = _normalize_media_base_path(base_path) or media_base_path
+    if media_base_path != "/" and not (
+        effective_base_path == media_base_path or effective_base_path.startswith(media_base_path + "/")
+    ):
+        raise bad_request(
+            "DL302_CAS_BASE_PATH_OUTSIDE_302_PATH",
+            f"CAS base_path 不在账号 302_path 范围内: base_path={effective_base_path} 302_path={media_base_path}",
+        )
+    input_dir_count = len([x for x in (dir_paths or []) if str(x or "").strip()])
+    input_file_count = len([x for x in (file_paths or []) if str(x or "").strip()])
+
+    def _filter_within_base(values: list[str] | None) -> list[str]:
+        out: list[str] = []
+        for raw in values or []:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if not text.startswith("/"):
+                text = "/" + text.lstrip("/")
+            if effective_base_path != "/" and text != effective_base_path and not text.startswith(effective_base_path + "/"):
+                continue
+            out.append(text)
+        return out
+
+    filtered_dirs = _filter_within_base(dir_paths)
+    filtered_files = _filter_within_base(file_paths)
+
+    if (input_dir_count > 0 or input_file_count > 0) and not filtered_dirs and not filtered_files:
+        raise bad_request(
+            "DL302_CAS_DELTA_OUTSIDE_302_PATH",
+            f"增量路径不在账号 302_path 范围内: 302_path={media_base_path}",
+        )
+
+    if len(filtered_files) > 5000:
+        raise bad_request("DL302_CAS_DELTA_TOO_LARGE", "增量文件数过大，请改用目录增量或分批提交")
+
+    resp = submit_cas_task_delta(
+        drive_type=str(getattr(account, "drive_type", "") or ""),
+        account=str(getattr(account, "name", "") or ""),
+        base_path=effective_base_path,
+        dir_paths=filtered_dirs,
+        file_paths=filtered_files,
     )
     return _task_to_dict(getattr(resp, "task", None))
 

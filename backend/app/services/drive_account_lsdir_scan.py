@@ -24,7 +24,7 @@ from app.services.drive_account_lsdir_cache import (
     _normalize_parent_path,
     upsert_drive_account_lsdir_items,
 )
-from app.services.dl302_settings import extract_dl302_media_base_path
+from app.services.dl302_settings import extract_dl302_media_base_path, get_or_create_dl302_setting, load_dl302_config
 from app.services.dl302_strm import maybe_auto_generate_dl302_strm
 
 
@@ -68,6 +68,22 @@ def _build_target_paths(savepath: str, relative_dir_paths: list[str] | None, *, 
             continue
         seen_paths.add(full_path)
         target_paths.append((full_path, True))
+    return target_paths
+
+
+def _append_cas_root_dir_target_paths(target_paths: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    with SessionLocal() as db:
+        setting = get_or_create_dl302_setting(db)
+        config = load_dl302_config(setting)
+    cas_root_dir = str(config.get("cas_root_dir") or "").strip()
+    if not cas_root_dir:
+        return target_paths
+    cas_root_dir = _normalize_parent_path(cas_root_dir)
+    if not cas_root_dir:
+        return target_paths
+    if any(path == cas_root_dir for path, _recursive in target_paths):
+        return target_paths
+    target_paths.append((cas_root_dir, True))
     return target_paths
 
 
@@ -116,7 +132,9 @@ def trigger_drive_account_lsdir_targeted_scan(
 ) -> bool:
     account_key = int(account_id)
     normalized_savepath = _normalize_parent_path(savepath)
-    target_paths = _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
+    target_paths = _append_cas_root_dir_target_paths(
+        _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
+    )
 
     with _running_accounts_lock:
         if account_key in _running_accounts:
@@ -203,15 +221,29 @@ def refresh_drive_account_lsdir_paths(
     relative_dir_paths: list[str] | None,
     source: str,
     recursive_savepath: bool = False,
+    wait_if_busy: bool = False,
+    max_wait_seconds: float = 30.0,
 ) -> ScanStats:
     account_key = int(account_id)
     normalized_savepath = _normalize_parent_path(savepath)
-    target_paths = _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
+    target_paths = _append_cas_root_dir_target_paths(
+        _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
+    )
 
-    with _running_accounts_lock:
-        if account_key in _running_accounts:
+    waited = 0.0
+    while True:
+        with _running_accounts_lock:
+            if account_key not in _running_accounts:
+                _running_accounts.add(account_key)
+                break
+        if not bool(wait_if_busy):
             raise RuntimeError(f"drive account lsdir targeted scan busy account_id={account_key} savepath={normalized_savepath}")
-        _running_accounts.add(account_key)
+        if waited >= float(max_wait_seconds or 0):
+            raise RuntimeError(
+                f"drive account lsdir targeted scan busy account_id={account_key} savepath={normalized_savepath} waited={waited}"
+            )
+        time.sleep(0.2)
+        waited += 0.2
 
     started_at = time.monotonic()
     failed_fid: str | None = None

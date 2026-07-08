@@ -25,6 +25,7 @@ DL302_STRM_ENABLED_KEY = "StrmEnabled"
 DL302_STRM_MODE_KEY = "StrmMode"
 DL302_STRM_ROOT_DIR_KEY = "StrmRootDir"
 DL302_STRM_PREFIX_URL_KEY = "StrmPrefixURL"
+DL302_CAS_ROOT_DIR_KEY = "CASRootDir"
 DL302_SUPPORTED_DRIVE_TYPES = ("115", "cloud189", "cloud139", "quark", "uc")
 DL302_STRM_MODES = ("auto", "independent")
 DL302_DEFAULT_INTRANET_CIDRS = (
@@ -77,6 +78,7 @@ def serialize_dl302_config_kv(payload: dict[str, object]) -> str:
         DL302_STRM_MODE_KEY,
         DL302_STRM_ROOT_DIR_KEY,
         DL302_STRM_PREFIX_URL_KEY,
+        DL302_CAS_ROOT_DIR_KEY,
     ):
         value = payload.get(key)
         if value is None:
@@ -108,6 +110,7 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         strm_mode = "auto"
     strm_root_dir = normalize_strm_root_dir(payload.get(DL302_STRM_ROOT_DIR_KEY)) or "/strm"
     strm_prefix_url = normalize_prefix_url(payload.get(DL302_STRM_PREFIX_URL_KEY))
+    cas_root_dir = normalize_cas_root_dir(payload.get(DL302_CAS_ROOT_DIR_KEY))
     return {
         "proxy_url": proxy_url,
         "proxy_path_offset": proxy_path_offset,
@@ -118,6 +121,7 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         "strm_mode": strm_mode,
         "strm_root_dir": strm_root_dir,
         "strm_prefix_url": strm_prefix_url,
+        "cas_root_dir": cas_root_dir,
     }
 
 
@@ -204,6 +208,26 @@ def normalize_strm_root_dir(value: object) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
+    return text.rstrip("/") or "/"
+
+
+def normalize_cas_root_dir(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not text.startswith("/"):
+        text = "/" + text.lstrip("/")
+    try:
+        path = str(PurePosixPath(text))
+    except Exception:
+        return None
+    return path.rstrip("/") or "/"
+
+
+def validate_cas_root_dir(value: object) -> str:
+    text = normalize_cas_root_dir(value)
+    if not text or not text.startswith("/"):
+        raise bad_request("DL302_CAS_ROOT_DIR_INVALID", "CASRootDir 必须是绝对路径")
     return text.rstrip("/") or "/"
 
 
@@ -319,6 +343,13 @@ def update_dl302_setting(db: Session, *, payload: dict[str, object]) -> DL302Set
             current.pop(DL302_STRM_PREFIX_URL_KEY, None)
         else:
             current[DL302_STRM_PREFIX_URL_KEY] = value
+
+    if "cas_root_dir" in payload:
+        value = payload.get("cas_root_dir")
+        if value is None:
+            current.pop(DL302_CAS_ROOT_DIR_KEY, None)
+        else:
+            current[DL302_CAS_ROOT_DIR_KEY] = validate_cas_root_dir(value)
 
     item.config_kv = serialize_dl302_config_kv(current)
     db.flush()

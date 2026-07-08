@@ -54,6 +54,11 @@ class Dl302ServiceStub:
                 request_serializer=dl302__pb2.SubmitCASTaskRequest.SerializeToString,
                 response_deserializer=dl302__pb2.CASTaskResponse.FromString,
                 _registered_method=True)
+        self.SubmitCASTaskDelta = channel.unary_unary(
+                '/dl302.v1.Dl302Service/SubmitCASTaskDelta',
+                request_serializer=dl302__pb2.SubmitCASTaskDeltaRequest.SerializeToString,
+                response_deserializer=dl302__pb2.CASTaskResponse.FromString,
+                _registered_method=True)
         self.GetCASTask = channel.unary_unary(
                 '/dl302.v1.Dl302Service/GetCASTask',
                 request_serializer=dl302__pb2.GetCASTaskRequest.SerializeToString,
@@ -128,6 +133,12 @@ class Dl302ServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def SubmitCASTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SubmitCASTaskDelta(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -214,6 +225,11 @@ def add_Dl302ServiceServicer_to_server(servicer, server):
             'SubmitCASTask': grpc.unary_unary_rpc_method_handler(
                     servicer.SubmitCASTask,
                     request_deserializer=dl302__pb2.SubmitCASTaskRequest.FromString,
+                    response_serializer=dl302__pb2.CASTaskResponse.SerializeToString,
+            ),
+            'SubmitCASTaskDelta': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitCASTaskDelta,
+                    request_deserializer=dl302__pb2.SubmitCASTaskDeltaRequest.FromString,
                     response_serializer=dl302__pb2.CASTaskResponse.SerializeToString,
             ),
             'GetCASTask': grpc.unary_unary_rpc_method_handler(
@@ -374,6 +390,33 @@ class Dl302Service:
             target,
             '/dl302.v1.Dl302Service/SubmitCASTask',
             dl302__pb2.SubmitCASTaskRequest.SerializeToString,
+            dl302__pb2.CASTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitCASTaskDelta(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dl302.v1.Dl302Service/SubmitCASTaskDelta',
+            dl302__pb2.SubmitCASTaskDeltaRequest.SerializeToString,
             dl302__pb2.CASTaskResponse.FromString,
             options,
             channel_credentials,

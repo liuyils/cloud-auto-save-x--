@@ -63,6 +63,7 @@ export type DL302Config = {
   proxy_path_offset: number
   intranet_cidrs: string[]
   auto_balance: boolean
+  cas_root_dir: string
   copy_download_mode: '0' | '1'
   strm_enabled: boolean
   strm_mode: 'auto' | 'independent'

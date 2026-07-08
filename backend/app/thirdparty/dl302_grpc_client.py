@@ -86,6 +86,25 @@ def submit_cas_task(*, drive_type: str, account: str, timeout_seconds: float = 2
     return _call_dl302_rpc("SubmitCASTask", request, timeout_seconds=timeout_seconds, fallback="submit cas task failed", retries=1)
 
 
+def submit_cas_task_delta(
+    *,
+    drive_type: str,
+    account: str,
+    base_path: str = "",
+    dir_paths: list[str] | None,
+    file_paths: list[str] | None,
+    timeout_seconds: float = 30.0,
+):
+    request = dl302_pb2.SubmitCASTaskDeltaRequest(
+        drive_type=str(drive_type or ""),
+        account=str(account or ""),
+        base_path=str(base_path or ""),
+        dir_paths=[str(item or "") for item in (dir_paths or []) if str(item or "").strip()],
+        file_paths=[str(item or "") for item in (file_paths or []) if str(item or "").strip()],
+    )
+    return _call_dl302_rpc("SubmitCASTaskDelta", request, timeout_seconds=timeout_seconds, fallback="submit cas task delta failed", retries=1)
+
+
 def get_cas_task(*, task_id: str, timeout_seconds: float = 8.0):
     request = dl302_pb2.GetCASTaskRequest(task_id=str(task_id or ""))
     return _call_dl302_rpc("GetCASTask", request, timeout_seconds=timeout_seconds, fallback="get cas task failed", retries=1)

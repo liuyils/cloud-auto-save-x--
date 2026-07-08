@@ -16,6 +16,7 @@ export async function patchDL302Config(payload: {
   proxy_path_offset?: number | null
   intranet_cidrs?: string[] | null
   auto_balance?: boolean | null
+  cas_root_dir?: string | null
   copy_download_mode?: '0' | '1' | null
   strm_enabled?: boolean | null
   strm_mode?: 'auto' | 'independent' | null

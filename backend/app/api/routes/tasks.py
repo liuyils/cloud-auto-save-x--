@@ -58,7 +58,8 @@ from app.schemas.task_repair import RepairBannedTasksOut
 from app.services import audit
 from app.services.notifications.sender import send_runtime
 from app.services.notifications.task_notify import DRAMA_NOTIFY_TITLE, build_task_section
-from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution, trigger_linked_sync_tasks_async, trigger_sync_tasks_by_sync_uids
+from app.services.drama_linked_pipeline import run_drama_linked_pipeline
+from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution, trigger_sync_tasks_by_sync_uids
 from app.services.share_preview_batch import cache_clear as _preview_batch_cache_clear
 from app.services.share_preview_batch import preview_share_batch
 from app.services.drive_browse import browse_drive_directory
@@ -700,7 +701,8 @@ def delete_task_by_id(request: Request, task_id: int, current: CurrentUser = Dep
 def post_run_task(request: Request, task_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
     task = get_task(db, task_id)
     db.close()
-    execution = TaskExecutor(db).run_task(task)
+    keep_tree = str(getattr(task, "task_type", "") or "") == "drama"
+    execution = TaskExecutor(db).run_task(task, keep_runtime_tree=keep_tree)
     with SessionLocal() as adb:
         audit.write_audit_log(adb, actor_user_id=current.user.id, action='task.run', target_type='task', target_id=str(task_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=execution.status == 'success', detail=execution.message)
         if str(getattr(task, "task_type", "") or "") == "drama":
@@ -712,7 +714,52 @@ def post_run_task(request: Request, task_id: int, current: CurrentUser = Depends
                 pass
         adb.commit()
     if str(getattr(task, "task_type", "") or "") == "drama" and should_trigger_linked_sync_for_drama_execution(execution):
-        trigger_linked_sync_tasks_async([str(getattr(task, "task_uid", "") or "")], source="api.tasks.run")
+        drama_uid = str(getattr(task, "task_uid", "") or "").strip()
+        account_name = str(getattr(task, "account_name", "") or "").strip() or str(
+            getattr(getattr(execution, "_runtime_adapter", None), "account_name", "") or ""
+        ).strip()
+        savepath = str(getattr(task, "savepath", "") or "").strip() or str(
+            (getattr(execution, "_runtime_task_data", None) or {}).get("savepath") or ""
+        ).strip()
+        tree = getattr(execution, "_runtime_tree", None)
+        changed_dirs = getattr(tree, "_changed_relative_dirs", None) if tree is not None else None
+        changed_relative_dirs = changed_dirs if isinstance(changed_dirs, list) else []
+        with SessionLocal() as tdb:
+            account_id = (
+                tdb.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
+                if account_name
+                else None
+            )
+        if drama_uid and account_id and savepath:
+            def _linked_worker() -> None:
+                log = ExecutionLog()
+                try:
+                    result = run_drama_linked_pipeline(
+                        drama_task_uid=drama_uid,
+                        drama_task_id=int(getattr(task, "id", 0) or 0) or None,
+                        drama_account_id=int(account_id),
+                        drama_savepath=savepath,
+                        changed_relative_dirs=changed_relative_dirs,
+                        source="api.tasks.run",
+                        log=log,
+                    )
+                    summary_lines = [
+                        "追剧联动后置流程完成",
+                        f"drama_uid={drama_uid}",
+                        f"sync_tasks={len(result.get('sync_results') or [])}",
+                        f"cas_tasks={len(result.get('cas_tasks') or [])}",
+                        f"strm_ok={bool((result.get('strm') or {}).get('ok'))}",
+                    ]
+                    with SessionLocal() as ndb:
+                        send_runtime(ndb, DRAMA_NOTIFY_TITLE, "\n".join(summary_lines))
+                        ndb.commit()
+                except Exception as exc:
+                    message = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
+                    with SessionLocal() as ndb:
+                        send_runtime(ndb, DRAMA_NOTIFY_TITLE, f"追剧联动后置流程失败 drama_uid={drama_uid}\nerr={message}")
+                        ndb.commit()
+
+            threading.Thread(target=_linked_worker, daemon=True).start()
     return _execution_out(execution)
 
 
@@ -752,7 +799,8 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
         try:
             with SessionLocal() as wdb:
                 wtask = get_task(wdb, task_id)
-            execution = TaskExecutor(db=None).run_task(wtask, log=log)
+            keep_tree = str(getattr(wtask, "task_type", "") or "") == "drama"
+            execution = TaskExecutor(db=None).run_task(wtask, log=log, keep_runtime_tree=keep_tree)
             snapshot_row_id = int(getattr(execution, "_snapshot_row_id", 0) or 0) or None
             if snapshot_row_id and int(getattr(execution, "id", 0) or 0) > 0:
                 try:
@@ -785,8 +833,32 @@ def post_run_task_stream(request: Request, task_id: int, current: CurrentUser = 
                 )
                 if should_trigger_linked_sync_for_drama_execution(execution):
                     uid = str(getattr(wtask, "task_uid", "") or "").strip()
-                    logger.info("追剧同步判定为 True，准备触发同步任务 uid=%s", uid)
-                    trigger_linked_sync_tasks_async([uid], source="api.tasks.run.stream")
+                    logger.info("追剧同步判定为 True，准备执行联动后置流程 uid=%s", uid)
+                    account_name = str(getattr(wtask, "account_name", "") or "").strip() or str(
+                        getattr(getattr(execution, "_runtime_adapter", None), "account_name", "") or ""
+                    ).strip()
+                    savepath = str(getattr(wtask, "savepath", "") or "").strip() or str(
+                        (getattr(execution, "_runtime_task_data", None) or {}).get("savepath") or ""
+                    ).strip()
+                    tree = getattr(execution, "_runtime_tree", None)
+                    changed_dirs = getattr(tree, "_changed_relative_dirs", None) if tree is not None else None
+                    changed_relative_dirs = changed_dirs if isinstance(changed_dirs, list) else []
+                    with SessionLocal() as tdb:
+                        account_id = (
+                            tdb.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
+                            if account_name
+                            else None
+                        )
+                    if uid and account_id and savepath:
+                        run_drama_linked_pipeline(
+                            drama_task_uid=uid,
+                            drama_task_id=int(getattr(wtask, "id", 0) or 0) or None,
+                            drama_account_id=int(account_id),
+                            drama_savepath=savepath,
+                            changed_relative_dirs=changed_relative_dirs,
+                            source="api.tasks.run.stream",
+                            log=log,
+                        )
                 else:
                     logger.warning(
                         "追剧同步判定为 False，不触发同步任务 execution.status=%s tree_summary=%s run_log 前100=%s",
@@ -938,14 +1010,6 @@ def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, cur
                         payload_sync_uids = getattr(payload, "sync_task_uids", None) or []
                         if payload_sync_uids:
                             trigger_sync_tasks_by_sync_uids(list(payload_sync_uids), source="api.tasks.run.stream.preview")
-                        # 已保存任务走关联链路：根据 shareurl 查找真实 uid
-                        elif task_uid_for_sync.startswith("preview-"):
-                            with SessionLocal() as rdb:
-                                existing = rdb.execute(select(Task.task_uid).where(Task.shareurl == str(payload.shareurl or "").strip())).scalars().first()
-                            if existing:
-                                trigger_linked_sync_tasks_async([str(existing)], source="api.tasks.run.stream.preview")
-                        elif task_uid_for_sync:
-                            trigger_linked_sync_tasks_async([task_uid_for_sync], source="api.tasks.run.stream.preview")
                 q.put(
                     (
                         "done",
