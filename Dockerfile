@@ -93,5 +93,7 @@ RUN printf '%s\n' \
     > /etc/supervisord.conf \
     && chmod +x /app/dl302
 
+    ENV TZ="Asia/Shanghai"
+
 EXPOSE 5115 5225
 CMD ["/usr/bin/supervisord","-c","/etc/supervisord.conf"]

@@ -87,7 +87,7 @@ def refresh_running_sync_execution(db: Session, execution: SyncExecution, *, try
     if isinstance(recent_events, list):
         stats["recent_events"] = list(recent_events)
     if items:
-        helper._sync_file_rows(int(execution.id), items)
+        helper._sync_file_rows(int(execution.id), items, active_only=task_status in {"pending", "running"})
 
     execution.stage = helper._map_stage(task_status)
     execution.stats_json = json.dumps(stats, ensure_ascii=False)

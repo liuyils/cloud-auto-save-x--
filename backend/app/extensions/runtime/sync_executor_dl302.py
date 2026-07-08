@@ -271,7 +271,7 @@ class Dl302SyncExecutor:
                 if isinstance(recent_events, list):
                     stats["recent_events"] = list(recent_events)
                 if fetched_items:
-                    self._sync_file_rows(int(execution.id), items)
+                    self._sync_file_rows(int(execution.id), items, active_only=task_status in {"pending", "running"})
 
                 if task_status != last_status:
                     log.set_stage(self._map_stage(task_status))
@@ -323,7 +323,7 @@ class Dl302SyncExecutor:
             recent_events = last_stats.get("recent_events")
             if isinstance(recent_events, list):
                 final_stats["recent_events"] = list(recent_events)
-            self._sync_file_rows(int(execution.id), final_items)
+            self._sync_file_rows(int(execution.id), final_items, active_only=False)
 
             final_status = str(getattr(final_resp, "status", "") or "").strip() or "failed"
             if final_status == "done":
@@ -730,13 +730,15 @@ class Dl302SyncExecutor:
             "cancelled": "aborted",
         }.get(str(status or "").strip(), "pending")
 
-    def _sync_file_rows(self, execution_id: int, items) -> None:
+    def _sync_file_rows(self, execution_id: int, items, *, active_only: bool = False) -> None:
         rows: list[dict[str, Any]] = []
         now = datetime.now()
+        active_paths: set[str] = set()
         for item in items:
             path = self._item_path(item)
             if not path:
                 continue
+            active_paths.add(path)
             rows.append(
                 {
                     "sync_execution_id": int(execution_id),
@@ -772,6 +774,18 @@ class Dl302SyncExecutor:
                     db.execute(stmt)
 
             self._write_with_session(_write_chunk)
+        if active_only:
+            missing_stmt = (
+                update(SyncExecutionFile)
+                .where(
+                    SyncExecutionFile.sync_execution_id == int(execution_id),
+                    SyncExecutionFile.status.in_(["pending", "syncing"]),
+                )
+                .values(status="success", message=None, updated_at=now)
+            )
+            if active_paths:
+                missing_stmt = missing_stmt.where(~SyncExecutionFile.path.in_(sorted(active_paths)))
+            self._write_with_session(lambda db: db.execute(missing_stmt))
 
     def _mark_inflight_rows_aborted(self, execution_id: int) -> None:
         with SessionLocal() as w:
