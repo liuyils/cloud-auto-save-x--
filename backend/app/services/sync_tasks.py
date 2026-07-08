@@ -6,7 +6,7 @@ from pathlib import Path
 import posixpath
 from typing import Any
 from datetime import datetime
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.errors import bad_request, not_found
@@ -275,10 +275,15 @@ def list_sync_execution_files(
     )
     if exe is None:
         raise not_found("SYNC_EXECUTION_NOT_FOUND", "同步执行不存在")
+    status_rank = case(
+        (SyncExecutionFile.status.in_(["syncing", "pending"]), 0),
+        (SyncExecutionFile.status == "failed", 1),
+        else_=2,
+    )
     q = (
         select(SyncExecutionFile)
         .where(SyncExecutionFile.sync_execution_id == sync_execution_id)
-        .order_by(SyncExecutionFile.path.asc())
+        .order_by(status_rank.asc(), SyncExecutionFile.updated_at.desc(), SyncExecutionFile.path.asc(), SyncExecutionFile.id.desc())
         .offset(max(0, int(offset)))
     )
     if int(limit) > 0:

@@ -61,7 +61,6 @@ def refresh_running_sync_execution(db: Session, execution: SyncExecution, *, try
                 logger.warning("sync execution cancel dl302 task failed execution_id=%s task_id=%s err=%s", int(execution.id), dl302_task_id, exc)
 
         task_resp = get_copy_task(task_id=dl302_task_id)
-        items_resp = list_copy_task_items(task_id=dl302_task_id)
     except Exception as exc:
         if _is_transient_rpc_error(exc):
             logger.warning(
@@ -76,15 +75,20 @@ def refresh_running_sync_execution(db: Session, execution: SyncExecution, *, try
         logger.warning("refresh dl302 sync execution failed execution_id=%s task_id=%s err=%s", int(execution.id), dl302_task_id, exc)
         return False
 
-    items = list(getattr(items_resp, "items", []) or [])
-    stats = helper._build_stats(task_resp, items, dl302_task_id=dl302_task_id)
+    task_status = str(getattr(task_resp, "status", "") or "").strip() or "pending"
+    total_items = int(getattr(task_resp, "total_items", 0) or 0)
+    items = []
+    if task_status in {"done", "failed", "cancelled"} or total_items <= 256:
+        items_resp = list_copy_task_items(task_id=dl302_task_id)
+        items = list(getattr(items_resp, "items", []) or [])
     prev_stats = _load_execution_stats(execution)
+    stats = helper._build_stats(task_resp, items, dl302_task_id=dl302_task_id, prev_stats=prev_stats)
     recent_events = prev_stats.get("recent_events")
     if isinstance(recent_events, list):
         stats["recent_events"] = list(recent_events)
-    helper._sync_file_rows(int(execution.id), items)
+    if items:
+        helper._sync_file_rows(int(execution.id), items)
 
-    task_status = str(getattr(task_resp, "status", "") or "").strip() or "pending"
     execution.stage = helper._map_stage(task_status)
     execution.stats_json = json.dumps(stats, ensure_ascii=False)
     execution.heartbeat_at = datetime.now()

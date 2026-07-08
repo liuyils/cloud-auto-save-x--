@@ -890,6 +890,26 @@ function mapRunFileRow(row: SyncExecutionFileItem | SyncFileEvent | any): SyncFi
   }
 }
 
+function runFileStatusRank(status: string) {
+  const normalized = String(status || '').trim()
+  if (normalized === 'syncing' || normalized === 'pending') return 0
+  if (normalized === 'failed') return 1
+  return 2
+}
+
+function compareRunFileItems(a: SyncFileEvent, b: SyncFileEvent) {
+  const rankDiff = runFileStatusRank(a.status) - runFileStatusRank(b.status)
+  if (rankDiff !== 0) return rankDiff
+  const bt = Date.parse(String(b.ts || '')) || 0
+  const at = Date.parse(String(a.ts || '')) || 0
+  if (bt !== at) return bt - at
+  return String(a.path || '').localeCompare(String(b.path || ''))
+}
+
+function sortRunFileItems(items: SyncFileEvent[]) {
+  return [...items].sort(compareRunFileItems)
+}
+
 function updateRunFilePageEvent(item: SyncFileEvent) {
   const key = String(item.path || '')
   if (!key) return
@@ -902,6 +922,7 @@ function updateRunFilePageEvent(item: SyncFileEvent) {
     size: item.size === undefined ? prev.size : item.size,
     message: item.message === undefined ? prev.message : item.message,
   })
+  runFilePage.items = sortRunFileItems(runFilePage.items)
 }
 
 function upsertRunFileLiveEvent(item: SyncFileEvent) {
@@ -911,7 +932,7 @@ function upsertRunFileLiveEvent(item: SyncFileEvent) {
   const idx = rows.findIndex((row) => String(row.path || '') === key)
   if (idx < 0) {
     rows.unshift(item)
-    runFileLiveItems.value = rows.slice(0, 200)
+    runFileLiveItems.value = sortRunFileItems(rows).slice(0, 200)
     return
   }
   const prev = rows[idx]
@@ -922,7 +943,7 @@ function upsertRunFileLiveEvent(item: SyncFileEvent) {
     size: item.size === undefined ? prev.size : item.size,
     message: item.message === undefined ? prev.message : item.message,
   })
-  runFileLiveItems.value = rows.slice(0, 200)
+  runFileLiveItems.value = sortRunFileItems(rows).slice(0, 200)
 }
 
 function applyStatsObject(stats: any) {
@@ -996,7 +1017,9 @@ async function loadExecutionFilesPage(syncTaskId: number, executionId: number, o
 
     runFilePage.total = total
     runFilePage.executionId = executionId
-    runFilePage.items = Array.isArray(data?.items) ? data.items.map((row) => mapRunFileRow(row)).filter((row) => row.path) : []
+    runFilePage.items = Array.isArray(data?.items)
+      ? sortRunFileItems(data.items.map((row) => mapRunFileRow(row)).filter((row) => row.path))
+      : []
   } finally {
     if (requestSeq === runFilePageRequestSeq) runFilePage.loading = false
   }
@@ -1332,6 +1355,14 @@ async function runSync(row: SyncTaskItem) {
             if (full) runLogDialog.content = full
           }
           applyStatsObject(exe?.stats || null)
+          if (eid > 0) {
+            const needResetPage = eid !== Number(runFilePage.executionId || 0)
+            await loadExecutionFilesPage(row.id, eid, { resetPage: needResetPage }).catch(() => null)
+          } else {
+            await refreshLatestExecution(row.id, {
+              minStartedAt: String(runLogDialog.startedAt || ''),
+            }).catch(() => null)
+          }
           if (runLogDialog.status === 'success') ElMessage.success('同步已完成')
           else if (runLogDialog.status === 'aborted') ElMessage.warning(runLogDialog.message || '已停止')
           else ElMessage.error(runLogDialog.message || '同步失败')

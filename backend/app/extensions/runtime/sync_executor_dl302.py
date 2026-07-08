@@ -6,11 +6,11 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import grpc
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -94,6 +94,8 @@ class _CancelChecker:
 
 
 class Dl302SyncExecutor:
+    _sync_file_rows_chunk_size = 100
+
     def __init__(self, db: Session | None):
         self.db = db
 
@@ -189,6 +191,8 @@ class Dl302SyncExecutor:
         last_status = ""
         item_event_cache: dict[str, tuple[str, str, int, int, str]] = {}
         last_stats: dict[str, Any] = dict(initial_stats)
+        cached_items: list[Any] = []
+        last_items_fetch_ts = 0.0
 
         def persist_execution_state(*, stats_payload: dict[str, Any] | None = None, message: str | None = None) -> None:
             values: dict[str, Any] = {
@@ -233,11 +237,27 @@ class Dl302SyncExecutor:
             self._emit_progress(log, persisted_stats)
             last_stats = dict(persisted_stats)
 
+            task_resp = None
+            items = list(cached_items)
+            task_status = "pending"
             while True:
                 cancel_checker.raise_if_cancelled()
                 try:
                     task_resp = get_copy_task(task_id=dl302_task_id)
-                    items_resp = list_copy_task_items(task_id=dl302_task_id)
+                    task_status = str(getattr(task_resp, "status", "") or "").strip() or "pending"
+                    fetched_items = False
+                    items = cached_items
+                    if self._should_fetch_copy_task_items(
+                        task_resp,
+                        task_status=task_status,
+                        has_cached_items=bool(cached_items),
+                        last_fetch_ts=last_items_fetch_ts,
+                    ):
+                        items_resp = list_copy_task_items(task_id=dl302_task_id)
+                        items = list(getattr(items_resp, "items", []) or [])
+                        cached_items = items
+                        last_items_fetch_ts = time.monotonic()
+                        fetched_items = True
                 except Exception as exc:
                     if self._is_transient_rpc_error(exc):
                         log.line(f"dl302 轮询超时，稍后重试: {self._rpc_error_text(exc)}")
@@ -245,14 +265,13 @@ class Dl302SyncExecutor:
                         time.sleep(1.5)
                         continue
                     raise
-                task_status = str(getattr(task_resp, "status", "") or "").strip() or "pending"
-                items = list(getattr(items_resp, "items", []) or [])
 
-                stats = self._build_stats(task_resp, items, dl302_task_id=dl302_task_id)
+                stats = self._build_stats(task_resp, items, dl302_task_id=dl302_task_id, prev_stats=last_stats)
                 recent_events = last_stats.get("recent_events")
                 if isinstance(recent_events, list):
                     stats["recent_events"] = list(recent_events)
-                self._sync_file_rows(int(execution.id), items)
+                if fetched_items:
+                    self._sync_file_rows(int(execution.id), items)
 
                 if task_status != last_status:
                     log.set_stage(self._map_stage(task_status))
@@ -263,22 +282,23 @@ class Dl302SyncExecutor:
                     )
                     last_status = task_status
 
-                for item in items:
-                    path = self._item_path(item)
-                    status = str(getattr(item, "status", "") or "").strip() or "pending"
-                    signature = self._item_event_signature(item)
-                    prev = item_event_cache.get(path)
-                    if prev == signature:
-                        continue
-                    item_event_cache[path] = signature
-                    mapped_status = self._map_item_status(status)
-                    msg = self._item_event_message(item)
-                    if status in {"running", "done", "failed", "skipped", "cancelled"}:
-                        suffix = f" msg={msg}" if msg else ""
-                        log.line(f"文件状态: {status} path={path}{suffix}")
-                        event = self._build_progress_event(item, path=path, status=mapped_status, message=msg or None)
-                        self._push_recent_event(stats, event)
-                        self._emit_progress(log, stats, event=event)
+                if fetched_items:
+                    for item in items:
+                        path = self._item_path(item)
+                        status = str(getattr(item, "status", "") or "").strip() or "pending"
+                        signature = self._item_event_signature(item)
+                        prev = item_event_cache.get(path)
+                        if prev == signature:
+                            continue
+                        item_event_cache[path] = signature
+                        mapped_status = self._map_item_status(status)
+                        msg = self._item_event_message(item)
+                        if status in {"running", "done", "failed", "skipped", "cancelled"}:
+                            suffix = f" msg={msg}" if msg else ""
+                            log.line(f"文件状态: {status} path={path}{suffix}")
+                            event = self._build_progress_event(item, path=path, status=mapped_status, message=msg or None)
+                            self._push_recent_event(stats, event)
+                            self._emit_progress(log, stats, event=event)
 
                 if cancel_checker.is_cancelled() and not cancel_sent:
                     try:
@@ -297,10 +317,9 @@ class Dl302SyncExecutor:
 
                 time.sleep(1.0)
 
-            final_resp = get_copy_task(task_id=dl302_task_id)
-            final_items_resp = list_copy_task_items(task_id=dl302_task_id)
-            final_items = list(getattr(final_items_resp, "items", []) or [])
-            final_stats = self._build_stats(final_resp, final_items, dl302_task_id=dl302_task_id)
+            final_resp = task_resp
+            final_items = list(items or [])
+            final_stats = self._build_stats(final_resp, final_items, dl302_task_id=dl302_task_id, prev_stats=last_stats)
             recent_events = last_stats.get("recent_events")
             if isinstance(recent_events, list):
                 final_stats["recent_events"] = list(recent_events)
@@ -493,7 +512,7 @@ class Dl302SyncExecutor:
             "cancelled": "aborted",
         }.get(str(status or "").strip(), "copy")
 
-    def _build_stats(self, task_resp, items, *, dl302_task_id: str) -> dict[str, Any]:
+    def _build_stats(self, task_resp, items, *, dl302_task_id: str, prev_stats: dict[str, Any] | None = None) -> dict[str, Any]:
         skipped = 0
         copied = 0
         failed = 0
@@ -509,6 +528,18 @@ class Dl302SyncExecutor:
                 failed += 1
             elif status == "syncing":
                 computed_done_bytes += self._item_progress_bytes(item)
+        prev_stats = prev_stats or {}
+        prev_copied = max(0, int(prev_stats.get("copied_files", 0) or 0))
+        prev_skipped = max(0, int(prev_stats.get("skipped_files", 0) or 0))
+        done_total = max(0, int(getattr(task_resp, "done_items", 0) or 0))
+        known_skipped = max(skipped, prev_skipped)
+        known_copied = max(copied, prev_copied)
+        known_done = known_copied + known_skipped
+        if done_total > known_done:
+            # Running-state item queries may omit successful/skipped rows entirely.
+            # Keep known skipped counts and attribute the unresolved done delta to copied
+            # until a terminal full refresh arrives.
+            known_copied += done_total - known_done
         done_bytes = int(getattr(task_resp, "done_bytes", 0) or 0)
         if computed_done_bytes > done_bytes:
             done_bytes = computed_done_bytes
@@ -517,15 +548,40 @@ class Dl302SyncExecutor:
             done_bytes = total_bytes
         return {
             "total_files": int(getattr(task_resp, "total_items", 0) or 0),
-            "done_files": int(getattr(task_resp, "done_items", 0) or 0),
-            "copied_files": copied,
+            "done_files": done_total,
+            "copied_files": known_copied,
             "deleted_files": 0,
-            "skipped_files": skipped,
+            "skipped_files": known_skipped,
             "failed_files": int(getattr(task_resp, "failed_items", 0) or failed),
             "total_bytes": total_bytes,
             "done_bytes": done_bytes,
             "dl302_task_id": dl302_task_id,
         }
+
+    def _copy_task_items_poll_interval_seconds(self, total_items: int) -> float:
+        total = max(0, int(total_items or 0))
+        if total >= 5000:
+            return 10.0
+        if total >= 2000:
+            return 6.0
+        if total >= 500:
+            return 3.0
+        return 1.0
+
+    def _should_fetch_copy_task_items(
+        self,
+        task_resp,
+        *,
+        task_status: str,
+        has_cached_items: bool,
+        last_fetch_ts: float,
+    ) -> bool:
+        if task_status in {"done", "failed", "cancelled"}:
+            return True
+        if not has_cached_items:
+            return True
+        total_items = int(getattr(task_resp, "total_items", 0) or 0)
+        return (time.monotonic() - float(last_fetch_ts)) >= self._copy_task_items_poll_interval_seconds(total_items)
 
     def _build_progress_event(self, item, *, path: str, status: str, message: str | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -634,8 +690,6 @@ class Dl302SyncExecutor:
         )
 
     def _push_recent_event(self, stats: dict[str, Any], event: dict[str, Any], *, limit: int = 100) -> None:
-        if not isinstance(stats, dict):
-            return
         items = stats.get("recent_events")
         if not isinstance(items, list):
             items = []
@@ -677,37 +731,47 @@ class Dl302SyncExecutor:
         }.get(str(status or "").strip(), "pending")
 
     def _sync_file_rows(self, execution_id: int, items) -> None:
-        with SessionLocal() as w:
-            existing = (
-                w.execute(select(SyncExecutionFile).where(SyncExecutionFile.sync_execution_id == int(execution_id)))
-                .scalars()
-                .all()
-            )
-            existing_map = {str(getattr(row, "path", "") or ""): row for row in existing}
-            now = datetime.now()
-            for item in items:
-                path = self._item_path(item)
-                row = existing_map.get(path)
-                payload = {
+        rows: list[dict[str, Any]] = []
+        now = datetime.now()
+        for item in items:
+            path = self._item_path(item)
+            if not path:
+                continue
+            rows.append(
+                {
+                    "sync_execution_id": int(execution_id),
+                    "path": path,
                     "action": "copy",
                     "status": self._map_item_status(str(getattr(item, "status", "") or "pending")),
                     "size": int(getattr(item, "size", 0) or 0) or None,
                     "message": self._item_event_message(item) or None,
                     "updated_at": now,
+                    "created_at": now,
                 }
-                if row is None:
-                    row = SyncExecutionFile(
-                        sync_execution_id=int(execution_id),
-                        path=path,
-                        created_at=now,
-                        **payload,
+            )
+        if not rows:
+            return
+
+        chunk_size = max(1, int(self._sync_file_rows_chunk_size or 100))
+        for start in range(0, len(rows), chunk_size):
+            chunk = rows[start : start + chunk_size]
+
+            def _write_chunk(db: Session) -> None:
+                for payload in chunk:
+                    stmt = sqlite_insert(SyncExecutionFile).values(**payload)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["sync_execution_id", "path"],
+                        set_={
+                            "action": payload["action"],
+                            "status": payload["status"],
+                            "size": payload["size"],
+                            "message": payload["message"],
+                            "updated_at": payload["updated_at"],
+                        },
                     )
-                    w.add(row)
-                    existing_map[path] = row
-                    continue
-                for key, value in payload.items():
-                    setattr(row, key, value)
-            w.commit()
+                    db.execute(stmt)
+
+            self._write_with_session(_write_chunk)
 
     def _mark_inflight_rows_aborted(self, execution_id: int) -> None:
         with SessionLocal() as w:
