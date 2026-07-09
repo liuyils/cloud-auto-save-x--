@@ -126,6 +126,7 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
     MARKET_BASE_URL = "https://m.mcloud.139.com"
     MARKET_SOURCE_ID = "1097"
     SIGNIN_ACTIVITY_ID = "sign_in_3"
+    MAIL_SIGNIN_ACTIVITY_ID = "newsign_139mail"
     SIGN_IN_TOTAL_BUDGET_SECONDS = 40.0
     SIGN_IN_STAGE_MIN_SECONDS = 1.5
     REFRESH_TOKEN_AES_KEY = "c7lXOigXahPnTViq"
@@ -138,6 +139,9 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
     RED_PACKET_APP_ID = "12345681"
     RED_PACKET_SIGN_KEY = "e10adc3949ba59abbe56e057f20f883e"
     RED_PACKET_CHANNEL_SRC = "red-cmccapp"
+    FRUIT_BASE_URL = "https://happy.mail.10086.cn/jsp/cn/garden/"
+    FRUIT_SOURCE_ID = "1003"
+    FRUIT_TARGET_SOURCE_ID = "001208"
     RED_PACKET_BROWSE_TASKS = {"NOVICE_2", "NOVICE_3", "MONTHLY_1"}
     RED_PACKET_DIRECT_TASKS = {"MONTHLY_4", "MONTHLY_5"}
     RED_PACKET_MANUAL_TASKS = {"NOVICE_1": "需跳转领取定向流量"}
@@ -1913,6 +1917,347 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             finished=sum(1 for item in handled if item.get("status") in {"finished", "registered", "attempted"}),
         )
 
+    def _query_legacy_market_task_list(self, jwt_token: str, market_name: str) -> dict[str, Any]:
+        data = self._request_json(
+            "GET",
+            "https://caiyun.feixin.10086.cn/market/signin/task/taskList",
+            headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            params={"marketname": market_name},
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def _click_legacy_market_task(self, jwt_token: str, task_id: int | str, key: str = "task") -> dict[str, Any]:
+        data = self._request_json(
+            "GET",
+            "https://caiyun.feixin.10086.cn/market/signin/task/click",
+            headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            params={"key": key, "id": task_id},
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def _run_cloud_game_stage(self, jwt_token: str) -> dict[str, Any]:
+        info = self._request_json(
+            "GET",
+            "https://caiyun.feixin.10086.cn/market/signin/hecheng1T/info",
+            headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            params={"op": "info"},
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        raw: dict[str, Any] = {"info": info, "attempts": []}
+        if not isinstance(info, dict) or int(info.get("code", -1)) != 0:
+            return self._build_sign_stage_result(ok=False, message=str((info or {}).get("msg") or "获取云朵大作战信息失败"), raw=raw)
+        currnum = int((((info.get("result") or {}).get("info") or {}).get("curr")) or 0)
+        if currnum <= 0:
+            return self._build_sign_stage_result(ok=True, message="云朵大作战今日无可用次数", raw=raw)
+        attempts = min(currnum, 2)
+        success = 0
+        for _ in range(attempts):
+            begin_data = self._request_json(
+                "GET",
+                "https://caiyun.feixin.10086.cn/market/signin/hecheng1T/beinvite",
+                headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+                cookies=self._market_cookies(jwt_token),
+                timeout=20,
+            )
+            attempt_raw: dict[str, Any] = {"begin": begin_data}
+            self._sleep_with_budget(float(random.randint(10, 12)))
+            finish_data = self._request_json(
+                "GET",
+                "https://caiyun.feixin.10086.cn/market/signin/hecheng1T/finish",
+                headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+                params={"flag": "true"},
+                cookies=self._market_cookies(jwt_token),
+                timeout=20,
+            )
+            attempt_raw["finish"] = finish_data
+            raw["attempts"].append(attempt_raw)
+            if isinstance(finish_data, dict) and int(finish_data.get("code", -1)) == 0:
+                success += 1
+        message = f"云朵大作战完成 {success}/{attempts} 次"
+        if currnum > attempts:
+            message = f"{message}，剩余 {currnum - attempts} 次未执行"
+        return self._build_sign_stage_result(ok=success > 0, message=message, raw=raw, finished=success)
+
+    def _claim_notice_reward(self, jwt_token: str, reward_type: int) -> dict[str, Any]:
+        data = self._request_json(
+            "POST",
+            "https://caiyun.feixin.10086.cn/market/msgPushOn/task/obtain",
+            headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            json_body={"type": reward_type},
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def _run_notice_stage(self, jwt_token: str) -> dict[str, Any]:
+        status_data = self._request_json(
+            "GET",
+            "https://caiyun.feixin.10086.cn/market/msgPushOn/task/status",
+            headers=self._market_headers(include_jwt=True, jwt_token=jwt_token),
+            cookies=self._market_cookies(jwt_token),
+            timeout=20,
+        )
+        raw: dict[str, Any] = {"status": status_data, "claims": []}
+        if not isinstance(status_data, dict) or int(status_data.get("code", -1)) != 0:
+            return self._build_sign_stage_result(ok=False, message=str((status_data or {}).get("msg") or "查询通知任务失败"), raw=raw)
+        result = status_data.get("result") or {}
+        push_on = int(result.get("pushOn") or 0)
+        first_status = int(result.get("firstTaskStatus") or 0)
+        second_status = int(result.get("secondTaskStatus") or 0)
+        on_duration = int(result.get("onDuaration") or 0)
+        if push_on != 1:
+            return self._build_sign_stage_result(ok=True, message="通知云朵未开启，需手动完成", raw=raw, manual=True)
+        claimed = 0
+        if first_status in (1, 2):
+            reward_data = self._claim_notice_reward(jwt_token, 1)
+            raw["claims"].append({"type": 1, "data": reward_data})
+            if int((reward_data or {}).get("code", -1)) == 0:
+                claimed += 1
+        if second_status == 2:
+            reward_data = self._claim_notice_reward(jwt_token, 2)
+            raw["claims"].append({"type": 2, "data": reward_data})
+            if int((reward_data or {}).get("code", -1)) == 0:
+                claimed += 1
+        message = f"通知云朵状态正常，已开启 {on_duration} 天"
+        if claimed:
+            message = f"{message}，领取奖励 {claimed} 次"
+        return self._build_sign_stage_result(ok=True, message=message, raw=raw, finished=claimed)
+
+    def _run_mail_tasks_stage(self, jwt_token: str) -> dict[str, Any]:
+        task_data = self._query_legacy_market_task_list(jwt_token, self.MAIL_SIGNIN_ACTIVITY_ID)
+        raw: dict[str, Any] = {"task_list": task_data, "tasks": []}
+        if not isinstance(task_data, dict):
+            return self._build_sign_stage_result(ok=False, message="获取 139 邮箱任务失败", raw=raw)
+        task_list = task_data.get("result") or {}
+        month_tasks = task_list.get("month") or []
+        failures = 0
+        finished = 0
+        skip_ids = {1004, 1005, 1015, 1020}
+        for task in month_tasks:
+            task_id = int(task.get("id") or 0)
+            task_name = self._strip_task_name(task)
+            task_status = str(task.get("state") or "")
+            if task_id in skip_ids:
+                raw["tasks"].append({"task_id": task_id, "task_name": task_name, "status": "skipped"})
+                continue
+            if task_status == "FINISH":
+                raw["tasks"].append({"task_id": task_id, "task_name": task_name, "status": "finished"})
+                finished += 1
+                continue
+            click_data = self._click_legacy_market_task(jwt_token, task_id)
+            ok = isinstance(click_data, dict) and (
+                int(click_data.get("code", -1)) == 0
+                or str(click_data.get("msg") or "").lower() == "success"
+                or "result" in click_data
+            )
+            raw["tasks"].append(
+                {
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "status": "finished" if ok else "failed",
+                    "raw": click_data,
+                }
+            )
+            if ok:
+                finished += 1
+            else:
+                failures += 1
+        if not month_tasks:
+            return self._build_sign_stage_result(ok=True, message="139 邮箱任务为空", raw=raw)
+        message = f"139 邮箱任务处理完成，共 {len(month_tasks)} 项"
+        if failures:
+            message = f"{message}，失败 {failures} 项"
+        return self._build_sign_stage_result(ok=failures == 0, message=message, raw=raw, finished=finished)
+
+    def _fruit_headers(self, referer: str = "") -> dict[str, str]:
+        return {
+            "Host": "happy.mail.10086.cn",
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": self.MARKET_USER_AGENT,
+            "Referer": referer or f"{self.FRUIT_BASE_URL}wap/index.html?sourceid={self.FRUIT_SOURCE_ID}",
+        }
+
+    def _login_fruit_session(self) -> tuple[requests.Session, dict[str, Any]]:
+        account = self._username or self._phone or self._parse_phone_from_authorization(self._authorization)
+        token = self._market_sso_token or self._query_market_sso_token()
+        if not account:
+            raise RuntimeError("缺少账号信息，无法登录果园")
+        if not token:
+            raise RuntimeError("缺少果园 token")
+        session = requests.Session()
+        login_url = (
+            f"{self.FRUIT_BASE_URL}login/caiyunsso.do?token={quote(token, safe='')}"
+            f"&account={quote(account, safe='')}&targetSourceId={self.FRUIT_TARGET_SOURCE_ID}"
+            f"&sourceid={self.FRUIT_SOURCE_ID}&enableShare=1"
+        )
+        self._request_text(
+            "GET",
+            login_url,
+            headers={
+                "Host": "happy.mail.10086.cn",
+                "Upgrade-Insecure-Requests": "1",
+                "User-Agent": self.MARKET_USER_AGENT,
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,"
+                    "image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"
+                ),
+                "Referer": "https://caiyun.feixin.10086.cn:7071/",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            },
+            timeout=20,
+            session=session,
+        )
+        userinfo = self._request_json(
+            "GET",
+            f"{self.FRUIT_BASE_URL}login/userinfo.do",
+            headers=self._fruit_headers(login_url),
+            timeout=20,
+            session=session,
+        )
+        if not isinstance(userinfo, dict) or int(((userinfo.get("result") or {}).get("islogin")) or 0) != 1:
+            raise RuntimeError("果园登录失败")
+        return session, {"login": userinfo}
+
+    def _run_fruit_stage(self) -> dict[str, Any]:
+        session, raw = self._login_fruit_session()
+        check_sign_data = self._request_json(
+            "GET",
+            f"{self.FRUIT_BASE_URL}task/checkinInfo.do",
+            headers=self._fruit_headers(),
+            timeout=20,
+            session=session,
+        )
+        raw["checkin_info"] = check_sign_data
+        today_checkin = int((((check_sign_data or {}).get("result") or {}).get("todayCheckin")) or 0)
+        if today_checkin != 1:
+            raw["checkin"] = self._request_json(
+                "GET",
+                f"{self.FRUIT_BASE_URL}task/checkin.do",
+                headers=self._fruit_headers(),
+                timeout=20,
+                session=session,
+            )
+            raw["click_widget"] = self._request_json(
+                "GET",
+                f"{self.FRUIT_BASE_URL}user/clickCartoon.do",
+                headers=self._fruit_headers(),
+                params={"cartoonType": "widget"},
+                timeout=20,
+                session=session,
+            )
+            raw["click_color"] = self._request_json(
+                "GET",
+                f"{self.FRUIT_BASE_URL}user/clickCartoon.do",
+                headers=self._fruit_headers(),
+                params={"cartoonType": "color"},
+                timeout=20,
+                session=session,
+            )
+        task_list_data = self._request_json(
+            "GET",
+            f"{self.FRUIT_BASE_URL}task/taskList.do",
+            headers=self._fruit_headers(),
+            params={"clientType": "PE"},
+            timeout=20,
+            session=session,
+        )
+        task_state_data = self._request_json(
+            "GET",
+            f"{self.FRUIT_BASE_URL}task/taskState.do",
+            headers=self._fruit_headers(),
+            timeout=20,
+            session=session,
+        )
+        raw["task_list"] = task_list_data
+        raw["task_state"] = task_state_data
+        if not isinstance(task_list_data, dict) or not isinstance(task_state_data, dict):
+            return self._build_sign_stage_result(ok=False, message="获取果园任务列表失败", raw=raw)
+        state_map = {int(item.get("taskId") or 0): int(item.get("taskState") or 0) for item in (task_state_data.get("result") or [])}
+        handled: list[dict[str, Any]] = []
+        failures = 0
+        completed = 0
+        for task in task_list_data.get("result") or []:
+            task_id = int(task.get("taskId") or 0)
+            task_name = str(task.get("taskName") or "")
+            if task_id in {2002, 2003}:
+                handled.append({"task_id": task_id, "task_name": task_name, "status": "skipped"})
+                continue
+            if state_map.get(task_id) == 2:
+                handled.append({"task_id": task_id, "task_name": task_name, "status": "finished"})
+                completed += 1
+                continue
+            do_data = self._request_json(
+                "GET",
+                f"{self.FRUIT_BASE_URL}task/doTask.do",
+                headers=self._fruit_headers(),
+                params={"taskId": task_id},
+                timeout=20,
+                session=session,
+            )
+            water_data = self._request_json(
+                "GET",
+                f"{self.FRUIT_BASE_URL}task/givenWater.do",
+                headers=self._fruit_headers(),
+                params={"taskId": task_id},
+                timeout=20,
+                session=session,
+            )
+            ok = bool((do_data or {}).get("success")) and bool((water_data or {}).get("success"))
+            handled.append({"task_id": task_id, "task_name": task_name, "status": "finished" if ok else "failed", "do": do_data, "water": water_data})
+            if ok:
+                completed += 1
+            else:
+                failures += 1
+        raw["handled_tasks"] = handled
+        tree_info = self._request_json(
+            "GET",
+            f"{self.FRUIT_BASE_URL}user/treeInfo.do",
+            headers=self._fruit_headers(),
+            timeout=20,
+            session=session,
+        )
+        raw["tree_info"] = tree_info
+        watered = 0
+        if bool((tree_info or {}).get("success")):
+            result = tree_info.get("result") or {}
+            tree_level = int(result.get("treeLevel") or 0)
+            collect_water = int(result.get("collectWater") or 0)
+            if tree_level in (2, 4, 6, 8):
+                raw["open_box"] = self._request_json(
+                    "GET",
+                    f"{self.FRUIT_BASE_URL}prize/openBox.do",
+                    headers=self._fruit_headers(),
+                    timeout=20,
+                    session=session,
+                )
+            watering_times = min(collect_water // 20, 5)
+            water_logs: list[dict[str, Any]] = []
+            for _ in range(watering_times):
+                water_data = self._request_json(
+                    "GET",
+                    f"{self.FRUIT_BASE_URL}user/watering.do",
+                    headers=self._fruit_headers(),
+                    params={"isFast": 0},
+                    timeout=20,
+                    session=session,
+                )
+                water_logs.append(water_data if isinstance(water_data, dict) else {})
+                if bool((water_data or {}).get("success")):
+                    watered += 1
+                self._sleep_with_budget(1.0)
+            raw["watering"] = water_logs
+        message = f"果园任务完成，处理 {len(handled)} 项"
+        if watered:
+            message = f"{message}，浇水 {watered} 次"
+        if failures:
+            message = f"{message}，失败 {failures} 项"
+        return self._build_sign_stage_result(ok=failures == 0, message=message, raw=raw, finished=completed + watered)
+
     def _run_cloud_reward_stage(self, jwt_token: str) -> dict[str, Any]:
         info_data = self._query_market_signin_info(jwt_token)
         if int(info_data.get("code", -1)) != 0:
@@ -2209,10 +2554,14 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             "signin": self._run_sign_stage(self._sign_in_market_stage, "signin", required_jwt=True, jwt_token=jwt_token),
             "click": self._run_sign_stage(self._run_market_click_stage, "click", required_jwt=True, jwt_token=jwt_token),
             "cloud_tasks": self._run_sign_stage(self._run_cloud_tasks_stage, "cloud_tasks", required_jwt=True, jwt_token=jwt_token),
-            "backup": self._run_sign_stage(self._run_backup_stage, "backup", required_jwt=True, jwt_token=jwt_token),
+            "cloud_game": self._run_sign_stage(self._run_cloud_game_stage, "cloud_game", required_jwt=True, jwt_token=jwt_token),
+            "fruit": self._run_sign_stage(self._run_fruit_stage, "fruit"),
             "wxsign": self._run_sign_stage(self._run_wx_sign_stage, "wxsign", required_jwt=True, jwt_token=jwt_token),
             "shake": self._run_sign_stage(self._run_shake_stage, "shake", required_jwt=True, jwt_token=jwt_token),
             "draw": self._run_sign_stage(self._run_draw_stage, "draw", required_jwt=True, jwt_token=jwt_token),
+            "backup": self._run_sign_stage(self._run_backup_stage, "backup", required_jwt=True, jwt_token=jwt_token),
+            "notice": self._run_sign_stage(self._run_notice_stage, "notice", required_jwt=True, jwt_token=jwt_token),
+            "mail_tasks": self._run_sign_stage(self._run_mail_tasks_stage, "mail_tasks", required_jwt=True, jwt_token=jwt_token),
             "red_packet": self._run_sign_stage(self._run_red_packet_stage, "red_packet"),
             "cloud_reward": self._run_sign_stage(self._run_cloud_reward_stage, "cloud_reward", required_jwt=True, jwt_token=jwt_token),
         }

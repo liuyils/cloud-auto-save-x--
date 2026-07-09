@@ -87,7 +87,16 @@ def patch_dl302_config(
     config = load_dl302_config(item)
     if bool(config.get("strm_enabled")):
         strm_config_changed = any(
-            key in payload.model_fields_set for key in {"strm_mode", "strm_root_dir", "strm_prefix_url"}
+            key in payload.model_fields_set
+            for key in {
+                "strm_enabled",
+                "strm_mode",
+                "strm_root_dir",
+                "strm_prefix_url",
+                "strm_include_cas_root_dir",
+                "strm_source_priority",
+                "cas_root_dir",
+            }
         )
         if strm_config_changed and (
             str(previous_config.get("strm_root_dir") or "") != str(config.get("strm_root_dir") or "")

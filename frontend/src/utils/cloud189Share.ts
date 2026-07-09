@@ -16,11 +16,9 @@ function extractPwdFromText(raw: string) {
   let text = raw
   let pwd = ''
   const patterns = [
-    /[（(]访问码[：:]\s*([a-zA-Z0-9]{4})[)）]/,
-    /[（(]提取码[：:]\s*([a-zA-Z0-9]{4})[)）]/,
-    /访问码[：:]\s*([a-zA-Z0-9]{4})/,
-    /提取码[：:]\s*([a-zA-Z0-9]{4})/,
-    /[（(]([a-zA-Z0-9]{4})[)）]/,
+    /[（(](?:访问码|提取码|密码)[：:]\s*([a-zA-Z0-9]{4,8})[)）]/,
+    /(?:访问码|提取码|密码)[：:]\s*([a-zA-Z0-9]{4,8})/,
+    /[（(]([a-zA-Z0-9]{4,8})[)）]/,
   ]
   for (const pattern of patterns) {
     const match = text.match(pattern)
@@ -48,6 +46,29 @@ function extractCloud189Url(text: string) {
   }
   const any = text.match(/(https?:\/\/[^\s]+)/)
   return any?.[1] || ''
+}
+
+function setPwdOnUrl(shareUrl: URL, pwd: string) {
+  if (!pwd) return
+  if (shareUrl.searchParams.get('pwd') || shareUrl.searchParams.get('passcode') || shareUrl.searchParams.get('accessCode')) return
+  shareUrl.searchParams.set('pwd', pwd)
+}
+
+function setPwdOnCloud139ShareUrl(shareUrl: URL, pwd: string) {
+  if (!pwd) return
+  const rawHash = String(shareUrl.hash || '')
+  if (!rawHash || !rawHash.includes('?')) {
+    shareUrl.hash = rawHash ? `${rawHash}?pwd=${encodeURIComponent(pwd)}` : `#?pwd=${encodeURIComponent(pwd)}`
+    return
+  }
+  const idx = rawHash.indexOf('?')
+  const prefix = rawHash.slice(0, idx)
+  const q = rawHash.slice(idx + 1)
+  const params = new URLSearchParams(q)
+  if (!params.get('pwd') && !params.get('passwd') && !params.get('passcode')) {
+    params.set('pwd', pwd)
+  }
+  shareUrl.hash = `${prefix}?${params.toString()}`
 }
 
 function parseShareCode(shareLink: string) {
@@ -105,6 +126,14 @@ export function normalizeCloud189ShareUrl(input: string): Cloud189ShareParseResu
   const existingPwd = shareUrl.searchParams.get('pwd') || shareUrl.searchParams.get('passcode') || shareUrl.searchParams.get('accessCode') || ''
   const pwd = textPwd || existingPwd || ''
 
+  const host = String(shareUrl.host || '').toLowerCase()
+  if (pwd) {
+    if (host.includes('yun.139.com') || host.includes('caiyun.139.com')) {
+      setPwdOnCloud139ShareUrl(shareUrl, pwd)
+    } else {
+      setPwdOnUrl(shareUrl, pwd)
+    }
+  }
   if (!shareCode) return { url: shareUrl.toString(), pwd, shareCode: '' }
 
   const hash = String(shareUrl.hash || '')
@@ -114,4 +143,3 @@ export function normalizeCloud189ShareUrl(input: string): Cloud189ShareParseResu
   if (hash) out.hash = hash
   return { url: out.toString(), pwd, shareCode }
 }
-

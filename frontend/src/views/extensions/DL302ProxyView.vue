@@ -32,6 +32,7 @@ const casSelectedTaskId = reactive<Record<number, string>>({})
 const casTaskLoading = reactive<Record<number, boolean>>({})
 const casItemLoading = reactive<Record<string, boolean>>({})
 const casActionLoading = reactive<Record<string, boolean>>({})
+const casItemRequestMap = new Map<string, Promise<DL302CASTaskItem[]>>()
 const casDialog = reactive({
   visible: false,
   accountId: 0,
@@ -41,6 +42,7 @@ const casDialog = reactive({
   pageSize: 10,
 })
 let casPollTimer: number | null = null
+let casPollInFlight = false
 
 const settings = reactive({
   proxy_url: '',
@@ -52,6 +54,8 @@ const settings = reactive({
   strm_mode: 'auto' as 'auto' | 'independent',
   strm_root_dir: '/strm',
   strm_prefix_url: '',
+  strm_include_cas_root_dir: false,
+  strm_source_priority: 'video_first' as 'video_first' | 'cas_first',
   savingProxy: false,
   generatingStrm: false,
 })
@@ -78,6 +82,8 @@ function applyConfig(data: DL302Config) {
   settings.strm_mode = data.strm_mode === 'independent' ? 'independent' : 'auto'
   settings.strm_root_dir = String(data.strm_root_dir || '/strm')
   settings.strm_prefix_url = String(data.strm_prefix_url || '')
+  settings.strm_include_cas_root_dir = Boolean(data.strm_include_cas_root_dir)
+  settings.strm_source_priority = data.strm_source_priority === 'cas_first' ? 'cas_first' : 'video_first'
   strmSummary.enabled = Boolean(data.strm_summary?.enabled)
   strmSummary.mode = data.strm_summary?.mode === 'independent' ? 'independent' : 'auto'
   strmSummary.prefix_ready = Boolean(data.strm_summary?.prefix_ready)
@@ -279,14 +285,32 @@ async function loadAccountTasks(accountId: number) {
   }
 }
 
-async function loadTaskItems(taskId: string) {
-  if (!taskId) return
-  casItemLoading[taskId] = true
-  try {
-    casTaskItems[taskId] = await fetchDL302CasTaskItems(taskId)
-  } finally {
-    casItemLoading[taskId] = false
+async function loadTaskItems(taskId: string, options: { silent?: boolean } = {}) {
+  if (!taskId) return []
+  const existing = casItemRequestMap.get(taskId)
+  if (existing) {
+    return await existing
   }
+  casItemLoading[taskId] = true
+  let requestPromise: Promise<DL302CASTaskItem[]>
+  requestPromise = fetchDL302CasTaskItems(taskId)
+    .then((items) => {
+      casTaskItems[taskId] = items
+      return items
+    })
+    .catch((error) => {
+      if (!options.silent) throw error
+      console.warn('[DL302] loadTaskItems failed during polling', taskId, error)
+      return casTaskItems[taskId] || []
+    })
+    .finally(() => {
+      if (casItemRequestMap.get(taskId) === requestPromise) {
+        casItemRequestMap.delete(taskId)
+      }
+      casItemLoading[taskId] = false
+    })
+  casItemRequestMap.set(taskId, requestPromise)
+  return await requestPromise
 }
 
 async function selectTask(accountId: number, taskId: string) {
@@ -326,38 +350,44 @@ function handleDialogPageSizeChange(size: number) {
 }
 
 async function pollRunningCasStatuses() {
-  const targets = flattenAccounts().filter((item) => isTaskActive(currentTask(item)?.status))
-  if (!targets.length) {
-    await pollSelectedDialogTaskItems()
-    stopCasPoller()
-    return
-  }
-  const results = await Promise.all(
-    targets.map(async (item) => {
-      const task = currentTask(item)
-      if (!task?.task_id) return null
-      try {
-        const latest = await fetchDL302CasTask(task.task_id)
-        return { accountId: item.account_id, task: latest }
-      } catch {
-        return null
-      }
-    }),
-  )
-  for (const item of results.filter(Boolean)) {
-    updateAccountTask(item!.accountId, item!.task)
-    const accountId = item!.accountId
-    const taskId = item!.task?.task_id
-    if (accountId && casTaskLists[accountId]) {
-      casTaskLists[accountId] = casTaskLists[accountId].map((task) => (task.task_id === taskId ? item!.task : task))
-      if (casTaskLists[accountId].length && casTaskLists[accountId][0].task_id === taskId) {
-        casTaskLists[accountId][0] = item!.task
+  if (casPollInFlight) return
+  casPollInFlight = true
+  try {
+    const targets = flattenAccounts().filter((item) => isTaskActive(currentTask(item)?.status))
+    if (!targets.length) {
+      await pollSelectedDialogTaskItems()
+      stopCasPoller()
+      return
+    }
+    const results = await Promise.all(
+      targets.map(async (item) => {
+        const task = currentTask(item)
+        if (!task?.task_id) return null
+        try {
+          const latest = await fetchDL302CasTask(task.task_id)
+          return { accountId: item.account_id, task: latest }
+        } catch {
+          return null
+        }
+      }),
+    )
+    for (const item of results.filter(Boolean)) {
+      updateAccountTask(item!.accountId, item!.task)
+      const accountId = item!.accountId
+      const taskId = item!.task?.task_id
+      if (accountId && casTaskLists[accountId]) {
+        casTaskLists[accountId] = casTaskLists[accountId].map((task) => (task.task_id === taskId ? item!.task : task))
+        if (casTaskLists[accountId].length && casTaskLists[accountId][0].task_id === taskId) {
+          casTaskLists[accountId][0] = item!.task
+        }
       }
     }
-  }
-  await pollSelectedDialogTaskItems()
-  if (!flattenAccounts().some((item) => isTaskActive(currentTask(item)?.status))) {
-    stopCasPoller()
+    await pollSelectedDialogTaskItems()
+    if (!flattenAccounts().some((item) => isTaskActive(currentTask(item)?.status))) {
+      stopCasPoller()
+    }
+  } finally {
+    casPollInFlight = false
   }
 }
 
@@ -365,7 +395,7 @@ async function pollSelectedDialogTaskItems() {
   if (!casDialog.visible) return
   const task = selectedDialogTask.value
   if (!task?.task_id || !isTaskActive(task.status)) return
-  await loadTaskItems(task.task_id)
+  await loadTaskItems(task.task_id, { silent: true })
 }
 
 function ensureCasPoller() {
@@ -375,7 +405,9 @@ function ensureCasPoller() {
   }
   if (casPollTimer !== null) return
   casPollTimer = window.setInterval(() => {
-    void pollRunningCasStatuses()
+    void pollRunningCasStatuses().catch((error) => {
+      console.warn('[DL302] CAS poll failed', error)
+    })
   }, 3000)
 }
 
@@ -477,6 +509,8 @@ async function saveProxySettings() {
       strm_mode: settings.strm_mode,
       strm_root_dir: String(settings.strm_root_dir || '').trim() || '/strm',
       strm_prefix_url: settings.strm_prefix_url ? String(settings.strm_prefix_url).trim() : null,
+      strm_include_cas_root_dir: Boolean(settings.strm_include_cas_root_dir),
+      strm_source_priority: settings.strm_source_priority,
     })
     applyConfig(data)
     ElMessage.success('反代设置已保存，已触发 dl302 重载')
@@ -494,6 +528,8 @@ async function saveStrmSettings() {
       strm_mode: settings.strm_mode,
       strm_root_dir: String(settings.strm_root_dir || '').trim() || '/strm',
       strm_prefix_url: settings.strm_prefix_url ? String(settings.strm_prefix_url).trim() : null,
+      strm_include_cas_root_dir: Boolean(settings.strm_include_cas_root_dir),
+      strm_source_priority: settings.strm_source_priority,
     })
     applyConfig(data)
     ElMessage.success('STRM 设置已保存')
@@ -576,8 +612,7 @@ onUnmounted(stopCasPoller)
         <el-tab-pane label="CAS管理" name="drivers">
           <div class="tab-copy">
             展示当前 dl302 支持的账号驱动及其账号卡片。`生成CAS数据` 会复用账号配置中的 `302_path` 作为扫描目录，仅处理目录缓存里缺少 rapid record
-            的视频文件；生成好秒传数据后，会按目录树在本地临时目录生成 `.cas` 文件，并上传到当前账号对应网盘的 `CAS 文件生成目录（网盘目录）`。
-            处理过程中仍会像复制功能一样为所有支持秒传的网盘驱动执行统一预热。
+            的视频文件；生成好秒传数据后，会按目录树在本地临时目录生成 `.cas` 文件，并上传到当前账号对应网盘的 `CAS 文件生成目录（网盘目录）`。<br>
             302 直连需要保留端口：5115/9000。5115 为统一代理端口，9000 为独立端口；不建议将 5115 直接暴露到公网，推荐使用反代服务代理 `/dl`。
           </div>
           <div class="form-card">
@@ -774,7 +809,7 @@ onUnmounted(stopCasPoller)
             <div class="glass-panel metric-tile">
               <div class="metric-tile__label">可参与账号</div>
               <div class="metric-tile__value">{{ strmSummary.path_ready_account_count }}</div>
-              <div class="metric-tile__hint">已配置 302 基础路径的可用账号</div>
+              <div class="metric-tile__hint">已配置可用 STRM 源路径的账号</div>
             </div>
             <div class="glass-panel metric-tile">
               <div class="metric-tile__label">已生成文件</div>
@@ -790,12 +825,31 @@ onUnmounted(stopCasPoller)
                 <div class="form-field">
                   <el-switch v-model="settings.strm_enabled" :disabled="!canWrite" />
                   <div class="form-field-hint">
-                    开启后会在驱动目录扫描/缓存巡检完成时自动对账生成。目录过滤复用各账号驱动配置里的 `302代理基础路径`。
+                    开启后会在驱动目录扫描/缓存巡检完成时自动对账生成。默认复用各账号驱动配置里的 `302代理基础路径`。
                   </div>
                   <div class="form-field-hint">
-                    可参与账号：{{ strmSummary.path_ready_account_count }} / {{ strmSummary.source_account_count }}，缺少基础路径账号：{{
+                    可参与账号：{{ strmSummary.path_ready_account_count }} / {{ strmSummary.source_account_count }}，缺少源路径账号：{{
                       strmSummary.path_missing_account_count
                     }}。
+                  </div>
+                </div>
+              </el-form-item>
+              <el-form-item label="包含CAS文件目录">
+                <div class="form-field">
+                  <el-switch v-model="settings.strm_include_cas_root_dir" :disabled="!canWrite" />
+                  <div class="form-field-hint">
+                    开启后，仅对“已配置 `302_path`”的账号，额外扫描 `CAS 文件生成目录`，为其中 `.cas` 文件补充生成 STRM。
+                  </div>
+                </div>
+              </el-form-item>
+              <el-form-item label="源优先级">
+                <div class="form-field">
+                  <el-radio-group v-model="settings.strm_source_priority" :disabled="!canWrite">
+                    <el-radio value="video_first">视频文件优先</el-radio>
+                    <el-radio value="cas_first">CAS 优先</el-radio>
+                  </el-radio-group>
+                  <div class="form-field-hint">
+                    当 `302_path` 下的视频与 `CAS 文件生成目录` 下的 `.cas` 生成出同名 `.strm` 时，按这里的优先级决定最终写入哪个链接。
                   </div>
                 </div>
               </el-form-item>

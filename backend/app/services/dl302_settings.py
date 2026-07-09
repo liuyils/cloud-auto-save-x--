@@ -25,9 +25,12 @@ DL302_STRM_ENABLED_KEY = "StrmEnabled"
 DL302_STRM_MODE_KEY = "StrmMode"
 DL302_STRM_ROOT_DIR_KEY = "StrmRootDir"
 DL302_STRM_PREFIX_URL_KEY = "StrmPrefixURL"
+DL302_STRM_INCLUDE_CAS_ROOT_KEY = "StrmIncludeCASRootDir"
+DL302_STRM_SOURCE_PRIORITY_KEY = "StrmSourcePriority"
 DL302_CAS_ROOT_DIR_KEY = "CASRootDir"
 DL302_SUPPORTED_DRIVE_TYPES = ("115", "cloud189", "cloud139", "quark", "uc")
 DL302_STRM_MODES = ("auto", "independent")
+DL302_STRM_SOURCE_PRIORITIES = ("video_first", "cas_first")
 DL302_DEFAULT_INTRANET_CIDRS = (
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -78,6 +81,8 @@ def serialize_dl302_config_kv(payload: dict[str, object]) -> str:
         DL302_STRM_MODE_KEY,
         DL302_STRM_ROOT_DIR_KEY,
         DL302_STRM_PREFIX_URL_KEY,
+        DL302_STRM_INCLUDE_CAS_ROOT_KEY,
+        DL302_STRM_SOURCE_PRIORITY_KEY,
         DL302_CAS_ROOT_DIR_KEY,
     ):
         value = payload.get(key)
@@ -110,6 +115,11 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         strm_mode = "auto"
     strm_root_dir = normalize_strm_root_dir(payload.get(DL302_STRM_ROOT_DIR_KEY)) or "/strm"
     strm_prefix_url = normalize_prefix_url(payload.get(DL302_STRM_PREFIX_URL_KEY))
+    strm_include_cas_root_raw = str(payload.get(DL302_STRM_INCLUDE_CAS_ROOT_KEY, "") or "").strip().lower()
+    strm_include_cas_root = strm_include_cas_root_raw in {"1", "true", "yes", "on"}
+    strm_source_priority = str(payload.get(DL302_STRM_SOURCE_PRIORITY_KEY, "") or "").strip().lower() or "video_first"
+    if strm_source_priority not in DL302_STRM_SOURCE_PRIORITIES:
+        strm_source_priority = "video_first"
     cas_root_dir = normalize_cas_root_dir(payload.get(DL302_CAS_ROOT_DIR_KEY))
     return {
         "proxy_url": proxy_url,
@@ -121,6 +131,8 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         "strm_mode": strm_mode,
         "strm_root_dir": strm_root_dir,
         "strm_prefix_url": strm_prefix_url,
+        "strm_include_cas_root_dir": strm_include_cas_root,
+        "strm_source_priority": strm_source_priority,
         "cas_root_dir": cas_root_dir,
     }
 
@@ -201,6 +213,13 @@ def validate_strm_mode(value: object) -> str:
     text = str(value or "").strip().lower() or "auto"
     if text not in DL302_STRM_MODES:
         raise bad_request("DL302_STRM_MODE_INVALID", "STRM 模式仅支持 auto 或 independent")
+    return text
+
+
+def validate_strm_source_priority(value: object) -> str:
+    text = str(value or "").strip().lower() or "video_first"
+    if text not in DL302_STRM_SOURCE_PRIORITIES:
+        raise bad_request("DL302_STRM_SOURCE_PRIORITY_INVALID", "STRM 源优先级仅支持 video_first 或 cas_first")
     return text
 
 
@@ -343,6 +362,20 @@ def update_dl302_setting(db: Session, *, payload: dict[str, object]) -> DL302Set
             current.pop(DL302_STRM_PREFIX_URL_KEY, None)
         else:
             current[DL302_STRM_PREFIX_URL_KEY] = value
+
+    if "strm_include_cas_root_dir" in payload:
+        value = payload.get("strm_include_cas_root_dir")
+        if value is None:
+            current.pop(DL302_STRM_INCLUDE_CAS_ROOT_KEY, None)
+        else:
+            current[DL302_STRM_INCLUDE_CAS_ROOT_KEY] = "true" if bool(value) else "false"
+
+    if "strm_source_priority" in payload:
+        value = payload.get("strm_source_priority")
+        if value is None:
+            current.pop(DL302_STRM_SOURCE_PRIORITY_KEY, None)
+        else:
+            current[DL302_STRM_SOURCE_PRIORITY_KEY] = validate_strm_source_priority(value)
 
     if "cas_root_dir" in payload:
         value = payload.get("cas_root_dir")

@@ -69,6 +69,8 @@ export type DL302Config = {
   strm_mode: 'auto' | 'independent'
   strm_root_dir: string
   strm_prefix_url?: string | null
+  strm_include_cas_root_dir: boolean
+  strm_source_priority: 'video_first' | 'cas_first'
   strm_summary: {
     enabled: boolean
     mode: 'auto' | 'independent'

@@ -91,6 +91,8 @@ class DL302ConfigOut(BaseModel):
     strm_mode: Literal["auto", "independent"] = "auto"
     strm_root_dir: str = "/strm"
     strm_prefix_url: str | None = None
+    strm_include_cas_root_dir: bool = False
+    strm_source_priority: Literal["video_first", "cas_first"] = "video_first"
     cas_root_dir: str | None = None
     strm_summary: DL302StrmSummaryOut = Field(default_factory=DL302StrmSummaryOut)
 
@@ -105,6 +107,8 @@ class DL302ConfigUpdateIn(BaseModel):
     strm_mode: Literal["auto", "independent"] | None = Field(default=None)
     strm_root_dir: str | None = Field(default=None)
     strm_prefix_url: str | None = Field(default=None)
+    strm_include_cas_root_dir: bool | None = Field(default=None)
+    strm_source_priority: Literal["video_first", "cas_first"] | None = Field(default=None)
     cas_root_dir: str | None = Field(default=None)
 
 

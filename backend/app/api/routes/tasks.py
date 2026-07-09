@@ -1306,7 +1306,18 @@ def post_share_preview(payload: SharePreviewIn, db: Session = Depends(get_db)):
             "file_name_saved": None,
         }
 
-        if is_dir or not _is_video_name(file_name):
+        if is_dir:
+            if compiled_subdir:
+                if compiled_subdir.search(file_name):
+                    item["file_name_re"] = file_name
+                else:
+                    item["file_name_saved"] = "目录未命中 update_subdir"
+            else:
+                item["file_name_saved"] = "未启用目录转存"
+            preview_list.append(item)
+            continue
+
+        if not _is_video_name(file_name):
             preview_list.append(item)
             continue
 

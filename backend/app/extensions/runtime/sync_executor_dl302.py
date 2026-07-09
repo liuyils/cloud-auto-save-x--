@@ -11,11 +11,11 @@ from typing import Any
 import grpc
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError, bad_request
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, is_lock_error
 from app.extensions.runtime.execution_log import ExecutionLog
 from app.models.sync_execution import SyncExecution
 from app.models.sync_execution_file import SyncExecutionFile
@@ -95,6 +95,9 @@ class _CancelChecker:
 
 class Dl302SyncExecutor:
     _sync_file_rows_chunk_size = 100
+    _sqlite_write_attempts = 6
+    _sqlite_write_backoff_seconds = 0.05
+    _sqlite_write_max_backoff_seconds = 0.5
 
     def __init__(self, db: Session | None):
         self.db = db
@@ -104,12 +107,35 @@ class Dl302SyncExecutor:
         with SessionLocal() as db:
             return loader(db)
 
-    @staticmethod
-    def _write_with_session(writer):
-        with SessionLocal() as db:
-            result = writer(db)
-            db.commit()
-            return result
+    @classmethod
+    def _lock_retry_sleep_seconds(cls, attempt: int) -> float:
+        sleep_s = float(cls._sqlite_write_backoff_seconds or 0.0) * (2 ** max(0, int(attempt) - 1))
+        max_sleep_s = float(cls._sqlite_write_max_backoff_seconds or 0.0)
+        if max_sleep_s > 0:
+            sleep_s = min(sleep_s, max_sleep_s)
+        return max(0.0, sleep_s)
+
+    @classmethod
+    def _write_with_session(cls, writer):
+        attempts = max(1, int(cls._sqlite_write_attempts or 1))
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            with SessionLocal() as db:
+                try:
+                    result = writer(db)
+                    db.commit()
+                    return result
+                except Exception as exc:
+                    db.rollback()
+                    if attempt >= attempts or not is_lock_error(exc):
+                        raise
+                    last_exc = exc
+            sleep_s = cls._lock_retry_sleep_seconds(attempt)
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+        if last_exc is not None:
+            raise last_exc
+        raise OperationalError("sqlite write retry exhausted", None, None)
 
     def run_sync_task(
         self,
@@ -146,9 +172,7 @@ class Dl302SyncExecutor:
 
         def _release_lock() -> None:
             try:
-                with SessionLocal() as ldb:
-                    ldb.execute(delete(SyncTaskLock).where(SyncTaskLock.sync_task_id == task_id))
-                    ldb.commit()
+                self._write_with_session(lambda db: db.execute(delete(SyncTaskLock).where(SyncTaskLock.sync_task_id == task_id)))
             except Exception:
                 pass
 
@@ -189,6 +213,8 @@ class Dl302SyncExecutor:
         dl302_task_id = ""
         cancel_sent = False
         last_status = ""
+        last_task_message = ""
+        last_task_message_ts = 0.0
         item_event_cache: dict[str, tuple[str, str, int, int, str]] = {}
         last_stats: dict[str, Any] = dict(initial_stats)
         cached_items: list[Any] = []
@@ -204,9 +230,9 @@ class Dl302SyncExecutor:
                 values["stats_json"] = json.dumps(stats_payload, ensure_ascii=False)
             if message is not None:
                 values["message"] = str(message)
-            with SessionLocal() as w:
-                w.execute(update(SyncExecution).where(SyncExecution.id == int(execution.id)).values(**values))
-                w.commit()
+            self._write_with_session(
+                lambda db: db.execute(update(SyncExecution).where(SyncExecution.id == int(execution.id)).values(**values))
+            )
 
         try:
             persist_execution_state(stats_payload=initial_stats)
@@ -267,6 +293,7 @@ class Dl302SyncExecutor:
                     raise
 
                 stats = self._build_stats(task_resp, items, dl302_task_id=dl302_task_id, prev_stats=last_stats)
+                task_message = str(getattr(task_resp, "message", "") or "").strip()
                 recent_events = last_stats.get("recent_events")
                 if isinstance(recent_events, list):
                     stats["recent_events"] = list(recent_events)
@@ -281,6 +308,13 @@ class Dl302SyncExecutor:
                         f"bytes={int(stats.get('done_bytes', 0) or 0)}/{int(stats.get('total_bytes', 0) or 0)}"
                     )
                     last_status = task_status
+
+                if task_message and task_message != "ok":
+                    now_ts = time.monotonic()
+                    if task_message != last_task_message or (now_ts - float(last_task_message_ts)) >= 5.0:
+                        log.line(f"dl302 进度: {task_message}")
+                        last_task_message = task_message
+                        last_task_message_ts = now_ts
 
                 if fetched_items:
                     for item in items:
@@ -788,8 +822,8 @@ class Dl302SyncExecutor:
             self._write_with_session(lambda db: db.execute(missing_stmt))
 
     def _mark_inflight_rows_aborted(self, execution_id: int) -> None:
-        with SessionLocal() as w:
-            w.execute(
+        self._write_with_session(
+            lambda db: db.execute(
                 update(SyncExecutionFile)
                 .where(
                     SyncExecutionFile.sync_execution_id == int(execution_id),
@@ -797,11 +831,11 @@ class Dl302SyncExecutor:
                 )
                 .values(status="aborted", message="aborted", updated_at=datetime.now())
             )
-            w.commit()
+        )
 
     def _persist_progress(self, *, execution_id: int, log: ExecutionLog, stats: dict[str, Any]) -> None:
-        with SessionLocal() as w:
-            w.execute(
+        self._write_with_session(
+            lambda db: db.execute(
                 update(SyncExecution)
                 .where(SyncExecution.id == int(execution_id))
                 .values(
@@ -812,4 +846,4 @@ class Dl302SyncExecutor:
                     message=str(stats.get("dl302_task_id") or ""),
                 )
             )
-            w.commit()
+        )

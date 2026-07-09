@@ -1512,7 +1512,13 @@ function onShareRowClick(row: SharePreviewItem) {
 function pickShareFolderCurrent() {
   const current = sharePicker.stack.at(-1)
   if (current?.pdir_fid && current?.name !== '当前目录') {
-    state.shareurl = getShareurl(sharePicker.root_shareurl, { fid: current.pdir_fid, name: current.name })
+    const nextUrl = getShareurl(sharePicker.root_shareurl, { fid: current.pdir_fid, name: current.name })
+    if (shareAuto.timer) clearTimeout(shareAuto.timer)
+    shareAuto.runId += 1
+    autoFill.runId = shareAuto.runId
+    autoFill.loading = false
+    shareAuto.lastResolved = nextUrl
+    state.shareurl = nextUrl
     state.startfid = null
     sharePicker.visible = false
     ElMessage.success('已选择分享文件夹')
@@ -1520,6 +1526,11 @@ function pickShareFolderCurrent() {
   }
   const fid = extractShareFid(sharePicker.shareurl)
   if (fid) {
+    if (shareAuto.timer) clearTimeout(shareAuto.timer)
+    shareAuto.runId += 1
+    autoFill.runId = shareAuto.runId
+    autoFill.loading = false
+    shareAuto.lastResolved = sharePicker.shareurl
     state.shareurl = sharePicker.shareurl
     state.startfid = null
     sharePicker.visible = false

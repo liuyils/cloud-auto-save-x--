@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -9,21 +8,6 @@ from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.drive_account_lsdir_cache import DriveAccountLsdirCache
-
-
-_CACHED_VIDEO_EXTS = {
-    ".mp4",
-    ".mkv",
-    ".avi",
-    ".ts",
-    ".m2ts",
-    ".mov",
-    ".wmv",
-    ".flv",
-    ".webm",
-    ".m4v",
-    ".cas"
-}
 
 
 def _utcnow() -> datetime:
@@ -80,14 +64,6 @@ def _bool_is_dir(payload: dict[str, Any]) -> bool:
             if normalized in {"0", "false", "no", "file"}:
                 return False
     return False
-
-
-def _should_cache_file(name: str, *, is_dir: bool) -> bool:
-    if is_dir:
-        return True
-    _root, ext = os.path.splitext(str(name or "").strip())
-    ext = ext.lower()
-    return ext in _CACHED_VIDEO_EXTS
 
 
 def _pick_size(payload: dict[str, Any]) -> int | None:
@@ -180,8 +156,6 @@ def normalize_lsdir_items(parent_path: str, items: list[dict[str, Any]] | None) 
         if not fid or not name:
             continue
         is_dir = _bool_is_dir(raw)
-        if not _should_cache_file(name, is_dir=is_dir):
-            continue
         result.append(
             {
                 "fid": fid,

@@ -34,6 +34,7 @@ _VIDEO_EXTS = {
     ".webm",
     ".m4v",
 }
+_CAS_EXTS = {".cas"}
 
 _DRIVE_TYPE_ROUTE_MAP = {
     "115": "/dl/115",
@@ -110,7 +111,32 @@ def extract_account_media_base_path(account: DriveAccount) -> str | None:
     return _normalize_posix_dir(raw)
 
 
-def list_cached_media_items(db: Session, account_id: int, media_base_path: str) -> list[DriveAccountLsdirCache]:
+def list_account_strm_sources(config: dict[str, Any], account: DriveAccount) -> list[tuple[str, set[str] | None]]:
+    sources: list[tuple[str, set[str] | None]] = []
+    media_base_path = extract_account_media_base_path(account)
+    if not media_base_path:
+        return sources
+    normalized_media_base = _normalize_posix_dir(media_base_path)
+    include_cas_root = bool(config.get("strm_include_cas_root_dir"))
+    raw_cas_root_dir = str(config.get("cas_root_dir") or "").strip()
+    source_priority = str(config.get("strm_source_priority") or "video_first").strip().lower()
+    sources.append((normalized_media_base, None if source_priority == "video_first" else _VIDEO_EXTS - _CAS_EXTS))
+    if include_cas_root and raw_cas_root_dir:
+        normalized_cas_root = _normalize_posix_dir(raw_cas_root_dir)
+        if source_priority == "cas_first":
+            sources.insert(0, (normalized_cas_root, _CAS_EXTS))
+        else:
+            sources.append((normalized_cas_root, _CAS_EXTS))
+    return sources
+
+
+def list_cached_media_items(
+    db: Session,
+    account_id: int,
+    media_base_path: str,
+    *,
+    allowed_exts: set[str] | None = None,
+) -> list[DriveAccountLsdirCache]:
     base = _normalize_posix_dir(media_base_path)
     stmt = select(DriveAccountLsdirCache).where(
         DriveAccountLsdirCache.account_id == int(account_id),
@@ -122,31 +148,43 @@ def list_cached_media_items(db: Session, account_id: int, media_base_path: str) 
         )
     stmt = stmt.order_by(DriveAccountLsdirCache.full_path.asc())
     rows = db.execute(stmt).scalars().all()
-    return [row for row in rows if _is_video_file_path(str(getattr(row, "full_path", "") or ""))]
+    return [row for row in rows if _is_allowed_media_file_path(str(getattr(row, "full_path", "") or ""), allowed_exts)]
 
 
-def build_auto_strm_tree(db: Session, accounts: list[DriveAccount], prefix_url: str) -> tuple[dict[str, str], int]:
+def build_auto_strm_tree(
+    db: Session,
+    accounts: list[DriveAccount],
+    prefix_url: str,
+    config: dict[str, Any],
+) -> tuple[dict[str, str], int]:
     tree: dict[str, str] = {}
     skipped_accounts = 0
     for account in accounts:
-        media_base_path = extract_account_media_base_path(account)
-        if not media_base_path:
+        sources = list_account_strm_sources(config, account)
+        if not sources:
             skipped_accounts += 1
             continue
-        for row in list_cached_media_items(db, int(account.id), media_base_path):
-            relative_path = _to_relative_media_path(str(row.full_path), media_base_path)
-            if not relative_path or relative_path in tree:
-                continue
-            tree[relative_path] = render_auto_strm_url(prefix_url, relative_path)
+        for source_base_path, allowed_exts in sources:
+            for row in list_cached_media_items(db, int(account.id), source_base_path, allowed_exts=allowed_exts):
+                relative_path = _to_relative_media_path(str(row.full_path), source_base_path)
+                output_relative_path = _normalize_strm_output_relative_path(relative_path)
+                if not relative_path or not output_relative_path or output_relative_path in tree:
+                    continue
+                tree[output_relative_path] = render_auto_strm_url(prefix_url, relative_path)
     return tree, skipped_accounts
 
 
-def build_independent_strm_tree(db: Session, accounts: list[DriveAccount], prefix_url: str) -> tuple[dict[str, str], int]:
+def build_independent_strm_tree(
+    db: Session,
+    accounts: list[DriveAccount],
+    prefix_url: str,
+    config: dict[str, Any],
+) -> tuple[dict[str, str], int]:
     tree: dict[str, str] = {}
     skipped_accounts = 0
     for account in accounts:
-        media_base_path = extract_account_media_base_path(account)
-        if not media_base_path:
+        sources = list_account_strm_sources(config, account)
+        if not sources:
             skipped_accounts += 1
             continue
         drive_route = _DRIVE_TYPE_ROUTE_MAP.get(str(account.drive_type or ""))
@@ -154,12 +192,14 @@ def build_independent_strm_tree(db: Session, accounts: list[DriveAccount], prefi
             skipped_accounts += 1
             continue
         account_dir = _sanitize_path_segment(str(account.name or "").strip() or f"account-{account.id}")
-        for row in list_cached_media_items(db, int(account.id), media_base_path):
-            relative_path = _to_relative_media_path(str(row.full_path), media_base_path)
-            if not relative_path:
-                continue
-            output_key = _join_relative_output(account_dir, relative_path)
-            tree[output_key] = render_account_strm_url(prefix_url, str(account.drive_type), str(account.name), relative_path)
+        for source_base_path, allowed_exts in sources:
+            for row in list_cached_media_items(db, int(account.id), source_base_path, allowed_exts=allowed_exts):
+                relative_path = _to_relative_media_path(str(row.full_path), source_base_path)
+                output_relative_path = _normalize_strm_output_relative_path(relative_path)
+                if not relative_path or not output_relative_path:
+                    continue
+                output_key = _join_relative_output(account_dir, output_relative_path)
+                tree[output_key] = render_account_strm_url(prefix_url, str(account.drive_type), str(account.name), relative_path)
     return tree, skipped_accounts
 
 
@@ -202,10 +242,10 @@ def rebuild_dl302_strm(
 
     accounts = list_strm_source_accounts(db)
     if effective_mode == "independent":
-        tree, skipped_accounts = build_independent_strm_tree(db, accounts, prefix_url)
+        tree, skipped_accounts = build_independent_strm_tree(db, accounts, prefix_url, config)
     else:
         effective_mode = "auto"
-        tree, skipped_accounts = build_auto_strm_tree(db, accounts, prefix_url)
+        tree, skipped_accounts = build_auto_strm_tree(db, accounts, prefix_url, config)
 
     stats = _write_strm_files(root_dir=root_dir, mode=effective_mode, tree=tree)
     return {
@@ -253,7 +293,7 @@ def get_dl302_strm_summary(db: Session, *, mode: str | None = None) -> dict[str,
     root_dir = str(config.get("strm_root_dir") or "/strm")
     prefix_url = str(config.get("strm_prefix_url") or "").strip()
     accounts = list_strm_source_accounts(db)
-    path_ready_account_count = sum(1 for account in accounts if extract_account_media_base_path(account))
+    path_ready_account_count = sum(1 for account in accounts if list_account_strm_sources(config, account))
     generated_files = _load_manifest(Path(root_dir) / f"{_MANIFEST_PREFIX}{effective_mode}.json")
     generated_dirs = {
         str(Path(relative_path).parent)
@@ -360,9 +400,9 @@ def _to_relative_media_path(full_path: str, media_base_path: str) -> str | None:
     return _normalize_relative_media_path(suffix)
 
 
-def _is_video_file_path(path: str) -> bool:
+def _is_allowed_media_file_path(path: str, allowed_exts: set[str] | None = None) -> bool:
     suffix = Path(str(path or "")).suffix.lower()
-    return suffix in _VIDEO_EXTS
+    return suffix in (allowed_exts or _VIDEO_EXTS)
 
 
 def _join_relative_output(prefix: str, relative_media_path: str) -> str:
@@ -377,6 +417,22 @@ def _sanitize_path_segment(value: str) -> str:
     return text.replace("/", "_").replace("\\", "_")
 
 
+def _normalize_strm_output_relative_path(relative_media_path: str | None) -> str | None:
+    normalized = _normalize_relative_media_path(relative_media_path or "")
+    if not normalized:
+        return None
+    path = PurePosixPath(normalized)
+    name = path.name
+    if name.lower().endswith(".cas"):
+        name = name[:-4]
+    if not name:
+        return str(path.parent) if str(path.parent) not in {"", "."} else "/"
+    parent = str(path.parent)
+    if parent in {"", "."}:
+        return f"/{name}"
+    return str(PurePosixPath(parent) / name)
+
+
 def _media_path_to_strm_relative_path(relative_media_path: str) -> str:
     normalized = str(relative_media_path or "").strip().lstrip("/")
     if not normalized:
@@ -384,6 +440,8 @@ def _media_path_to_strm_relative_path(relative_media_path: str) -> str:
     posix_path = PurePosixPath(normalized)
     parent = posix_path.parent
     stem = posix_path.stem
+    if posix_path.suffix.lower() == ".cas":
+        stem = PurePosixPath(stem).stem or stem
     filename = f"{stem}.strm"
     if str(parent) in {"", "."}:
         return filename

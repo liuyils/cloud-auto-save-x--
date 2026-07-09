@@ -354,10 +354,13 @@ class DramaTaskExecutor:
 
     def _save_items(self, *, pwd_id: str, stoken: str, to_pdir_fid: str, items: list[dict[str, Any]]) -> None:
         plan: list[DramaPlanItem] = []
+        all_dirs = True
         for raw in items:
             fid = str(_get_fid(raw)).strip()
             token = _get_fid_token(raw)
             name = _get_name(raw)
+            if not _is_dir(raw):
+                all_dirs = False
             if not fid:
                 continue
             if not token:
@@ -372,7 +375,13 @@ class DramaTaskExecutor:
             )
         if not plan:
             return
-        saved_fids = self._save_with_saved_fids(pwd_id=pwd_id, stoken=stoken, dest_root_fid=to_pdir_fid, plan=plan)
+        saved_fids = self._save_with_saved_fids(
+            pwd_id=pwd_id,
+            stoken=stoken,
+            dest_root_fid=to_pdir_fid,
+            plan=plan,
+            allow_empty_result=all_dirs,
+        )
         self._remember_saved_history(saved_fids=saved_fids, plan=plan)
 
     def _call_save_file(
@@ -419,7 +428,15 @@ class DramaTaskExecutor:
             return fids, "query_task.data.save_as.save_as_top_fids"
         return [], "missing"
 
-    def _save_with_saved_fids(self, *, pwd_id: str, stoken: str, dest_root_fid: str, plan: list[DramaPlanItem]) -> list[str]:
+    def _save_with_saved_fids(
+        self,
+        *,
+        pwd_id: str,
+        stoken: str,
+        dest_root_fid: str,
+        plan: list[DramaPlanItem],
+        allow_empty_result: bool = False,
+    ) -> list[str]:
         fid_list = [item.fid for item in plan]
         fid_token_list = [item.fid_token or "" for item in plan]
         file_names = [item.origin_name for item in plan]
@@ -481,6 +498,9 @@ class DramaTaskExecutor:
         if err_msg:
             raise RuntimeError(err_msg)
         if not saved_fids:
+            if allow_empty_result:
+                self._line("提示: 转存任务完成但未返回转存后 fid 列表，当前按目录转存兜底继续")
+                return []
             raise RuntimeError("转存任务完成但未返回转存后 fid 列表")
 
         if share_folder_fid and drive_type == "uc":
@@ -971,29 +991,6 @@ class DramaTaskExecutor:
         if compiled_subdir:
             self._set_stage("subdir_sync")
             self._section("子目录转存")
-            startfid = str(self.task_data.get("startfid") or "").strip()
-            start_ts = None
-            fid_keep = None
-            if startfid:
-                def _to_ts(v):
-                    try:
-                        return float(v)
-                    except Exception:
-                        return None
-
-                start_item = next((f for f in share_items if str(_get_fid(f)).strip() == startfid), None)
-                if start_item:
-                    start_ts = _to_ts(_get_updated_at(start_item))
-                    if start_ts is None:
-                        sorted_list = sorted(share_items, key=lambda x: _to_ts(_get_updated_at(x)) or 0, reverse=True)
-                        kept: list[str] = []
-                        for f in sorted_list:
-                            fid = str(_get_fid(f)).strip()
-                            if fid == startfid:
-                                break
-                            if fid:
-                                kept.append(fid)
-                        fid_keep = set(kept)
             for raw in natsorted(share_items, key=lambda x: _get_name(x)):
                 if not _is_dir(raw):
                     continue
@@ -1001,12 +998,6 @@ class DramaTaskExecutor:
                 fid = _get_fid(raw)
                 if not name or not fid:
                     continue
-                if startfid:
-                    if start_ts is not None:
-                        if (_to_ts(_get_updated_at(raw)) or 0) <= start_ts:
-                            continue
-                    elif fid_keep is not None and str(fid).strip() not in fid_keep:
-                        continue
                 if not compiled_subdir.search(name):
                     continue
                 if mode == "delete_then_resave":
