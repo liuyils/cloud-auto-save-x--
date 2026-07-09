@@ -48,6 +48,23 @@ _MANIFEST_PREFIX = ".dl302_strm_manifest_"
 _PATH_SEGMENT_SAFE_CHARS = "-._~"
 
 
+class StrmSource(tuple):
+    __slots__ = ()
+
+    @property
+    def scan_base_path(self) -> str:
+        return str(self[0])
+
+    @property
+    def allowed_exts(self) -> set[str] | None:
+        value = self[1]
+        return value if value is None else set(value)
+
+    @property
+    def use_full_path_for_url(self) -> bool:
+        return bool(self[2])
+
+
 def load_effective_strm_config(db: Session, *, mode: str | None = None) -> dict[str, Any]:
     item = get_or_create_dl302_setting(db)
     config = load_dl302_config(item)
@@ -111,8 +128,8 @@ def extract_account_media_base_path(account: DriveAccount) -> str | None:
     return _normalize_posix_dir(raw)
 
 
-def list_account_strm_sources(config: dict[str, Any], account: DriveAccount) -> list[tuple[str, set[str] | None]]:
-    sources: list[tuple[str, set[str] | None]] = []
+def list_account_strm_sources(config: dict[str, Any], account: DriveAccount) -> list[StrmSource]:
+    sources: list[StrmSource] = []
     media_base_path = extract_account_media_base_path(account)
     if not media_base_path:
         return sources
@@ -120,13 +137,14 @@ def list_account_strm_sources(config: dict[str, Any], account: DriveAccount) -> 
     include_cas_root = bool(config.get("strm_include_cas_root_dir"))
     raw_cas_root_dir = str(config.get("cas_root_dir") or "").strip()
     source_priority = str(config.get("strm_source_priority") or "video_first").strip().lower()
-    sources.append((normalized_media_base, None if source_priority == "video_first" else _VIDEO_EXTS - _CAS_EXTS))
+    sources.append(StrmSource((normalized_media_base, None if source_priority == "video_first" else _VIDEO_EXTS - _CAS_EXTS, False)))
     if include_cas_root and raw_cas_root_dir:
         normalized_cas_root = _normalize_posix_dir(raw_cas_root_dir)
+        cas_source = StrmSource((normalized_cas_root, _CAS_EXTS, True))
         if source_priority == "cas_first":
-            sources.insert(0, (normalized_cas_root, _CAS_EXTS))
+            sources.insert(0, cas_source)
         else:
-            sources.append((normalized_cas_root, _CAS_EXTS))
+            sources.append(cas_source)
     return sources
 
 
@@ -164,13 +182,15 @@ def build_auto_strm_tree(
         if not sources:
             skipped_accounts += 1
             continue
-        for source_base_path, allowed_exts in sources:
-            for row in list_cached_media_items(db, int(account.id), source_base_path, allowed_exts=allowed_exts):
-                relative_path = _to_relative_media_path(str(row.full_path), source_base_path)
+        for source in sources:
+            for row in list_cached_media_items(db, int(account.id), source.scan_base_path, allowed_exts=source.allowed_exts):
+                full_path = _normalize_relative_media_path(str(row.full_path))
+                relative_path = _to_relative_media_path(full_path, source.scan_base_path)
                 output_relative_path = _normalize_strm_output_relative_path(relative_path)
                 if not relative_path or not output_relative_path or output_relative_path in tree:
                     continue
-                tree[output_relative_path] = render_auto_strm_url(prefix_url, relative_path)
+                url_path = full_path if source.use_full_path_for_url else relative_path
+                tree[output_relative_path] = render_auto_strm_url(prefix_url, url_path)
     return tree, skipped_accounts
 
 
@@ -192,14 +212,16 @@ def build_independent_strm_tree(
             skipped_accounts += 1
             continue
         account_dir = _sanitize_path_segment(str(account.name or "").strip() or f"account-{account.id}")
-        for source_base_path, allowed_exts in sources:
-            for row in list_cached_media_items(db, int(account.id), source_base_path, allowed_exts=allowed_exts):
-                relative_path = _to_relative_media_path(str(row.full_path), source_base_path)
+        for source in sources:
+            for row in list_cached_media_items(db, int(account.id), source.scan_base_path, allowed_exts=source.allowed_exts):
+                full_path = _normalize_relative_media_path(str(row.full_path))
+                relative_path = _to_relative_media_path(full_path, source.scan_base_path)
                 output_relative_path = _normalize_strm_output_relative_path(relative_path)
                 if not relative_path or not output_relative_path:
                     continue
                 output_key = _join_relative_output(account_dir, output_relative_path)
-                tree[output_key] = render_account_strm_url(prefix_url, str(account.drive_type), str(account.name), relative_path)
+                url_path = full_path if source.use_full_path_for_url else relative_path
+                tree[output_key] = render_account_strm_url(prefix_url, str(account.drive_type), str(account.name), url_path)
     return tree, skipped_accounts
 
 
