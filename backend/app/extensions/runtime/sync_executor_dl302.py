@@ -238,7 +238,15 @@ class Dl302SyncExecutor:
             persist_execution_state(stats_payload=initial_stats)
             self._emit_progress(log, initial_stats)
             cancel_checker.raise_if_cancelled()
-            self._refresh_netdisk_endpoints_if_needed(source=source, target=target, strategy=strategy, log=log)
+            self._refresh_netdisk_endpoints_if_needed(
+                source=source,
+                target=target,
+                strategy=strategy,
+                log=log,
+                cancel_checker=cancel_checker,
+                persist_state=lambda: persist_execution_state(stats_payload=last_stats),
+                overwrite=strategy.overwrite,
+            )
             log.set_stage("submit")
             log.section("提交 dl302 复制任务")
             log.line(f"源端: type={source.type} drive={source.drive_type} account={source.account_name or '-'} path={source.path}")
@@ -488,22 +496,59 @@ class Dl302SyncExecutor:
         target: Dl302Endpoint,
         strategy: Dl302Strategy,
         log: ExecutionLog,
+        cancel_checker: _CancelChecker,
+        persist_state,
+        overwrite: bool,
     ) -> None:
         if not bool(strategy.force_refresh):
             return
         log.set_stage("refresh")
         log.section("刷新网盘目录缓存")
-        for endpoint, recursive, label in ((source, True, "源端"), (target, False, "目标端")):
+        persist_state()
+        target_recursive = True if not bool(overwrite) else False
+        for endpoint, recursive, label in ((source, True, "源端"), (target, target_recursive, "目标端")):
             if endpoint.type != "netdisk" or not endpoint.account_id:
                 continue
-            self._refresh_netdisk_endpoint(endpoint=endpoint, recursive=recursive, label=label, log=log)
+            self._refresh_netdisk_endpoint(
+                endpoint=endpoint,
+                recursive=recursive,
+                label=label,
+                log=log,
+                cancel_checker=cancel_checker,
+                persist_state=persist_state,
+            )
 
-    def _refresh_netdisk_endpoint(self, *, endpoint: Dl302Endpoint, recursive: bool, label: str, log: ExecutionLog) -> None:
+    def _refresh_netdisk_endpoint(
+        self,
+        *,
+        endpoint: Dl302Endpoint,
+        recursive: bool,
+        label: str,
+        log: ExecutionLog,
+        cancel_checker: _CancelChecker,
+        persist_state,
+    ) -> None:
         path = str(endpoint.path or "").strip() or str(endpoint.base_path or "/")
         log.line(
             f"{label}刷新: account={endpoint.account_name or '-'} drive={endpoint.drive_type or '-'} "
             f"path={path} recursive={'true' if recursive else 'false'}"
         )
+        persist_state()
+        last_progress_ts = 0.0
+
+        def _progress_hook(stats, current_path: str, queue_len: int) -> None:
+            cancel_checker.raise_if_cancelled()
+            nonlocal last_progress_ts
+            now_ts = time.monotonic()
+            if last_progress_ts and (now_ts - last_progress_ts) < 2.0:
+                return
+            last_progress_ts = now_ts
+            log.line(
+                f"{label}刷新进度: scanned_dirs={int(getattr(stats, 'scanned_dirs', 0) or 0)} "
+                f"cached_items={int(getattr(stats, 'cached_items', 0) or 0)} queue={int(queue_len or 0)} current={str(current_path or '').strip()}"
+            )
+            persist_state()
+
         stats = refresh_drive_account_lsdir_paths(
             int(endpoint.account_id),
             savepath=path,
@@ -512,11 +557,14 @@ class Dl302SyncExecutor:
             recursive_savepath=recursive,
             wait_if_busy=True,
             max_wait_seconds=60.0,
+            progress_hook=_progress_hook,
+            include_cas_root_dir=False,
         )
         log.line(
             f"{label}刷新完成: scanned_dirs={int(getattr(stats, 'scanned_dirs', 0) or 0)} "
             f"cached_items={int(getattr(stats, 'cached_items', 0) or 0)}"
         )
+        persist_state()
 
     def _is_transient_rpc_error(self, exc: Exception) -> bool:
         if not isinstance(exc, grpc.RpcError):

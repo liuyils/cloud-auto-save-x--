@@ -2839,7 +2839,18 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
                 payload = self._list_disk_dir(parent_file_id, cursor=cursor)
                 batch = payload.get("items") or payload.get("fileList") or []
                 for item in batch:
-                    is_dir = str(item.get("fileType") or item.get("category") or "").lower() == "folder"
+                    file_type = item.get("fileType")
+                    if file_type is None:
+                        file_type = item.get("category")
+                    if file_type is None:
+                        file_type = item.get("type")
+                    if file_type is None:
+                        file_type = item.get("isFolder")
+                    normalized_type = str(file_type or "").strip().lower()
+                    if normalized_type.isdigit():
+                        is_dir = int(normalized_type) == 0
+                    else:
+                        is_dir = normalized_type in {"folder", "dir", "directory", "d"}
                     size = item.get("size")
                     try:
                         size = int(size) if size is not None else 0

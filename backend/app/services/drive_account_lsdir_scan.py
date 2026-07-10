@@ -223,12 +223,14 @@ def refresh_drive_account_lsdir_paths(
     recursive_savepath: bool = False,
     wait_if_busy: bool = False,
     max_wait_seconds: float = 30.0,
+    progress_hook=None,
+    include_cas_root_dir: bool = True,
 ) -> ScanStats:
     account_key = int(account_id)
     normalized_savepath = _normalize_parent_path(savepath)
-    target_paths = _append_cas_root_dir_target_paths(
-        _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
-    )
+    target_paths = _build_target_paths(normalized_savepath, relative_dir_paths, recursive_savepath=recursive_savepath)
+    if bool(include_cas_root_dir):
+        target_paths = _append_cas_root_dir_target_paths(target_paths)
 
     waited = 0.0
     while True:
@@ -267,7 +269,13 @@ def refresh_drive_account_lsdir_paths(
         with SessionLocal() as db:
             purge_expired_drive_account_lsdir_cache(db)
             db.commit()
-        stats = _refresh_account_paths(account_id=context.account_id, drive_type=context.drive_type, adapter=adapter, target_paths=target_paths)
+        stats = _refresh_account_paths(
+            account_id=context.account_id,
+            drive_type=context.drive_type,
+            adapter=adapter,
+            target_paths=target_paths,
+            progress_hook=progress_hook,
+        )
         with SessionLocal() as db:
             _trigger_dl302_strm_after_scan(db=db, source=f"{source}.sync_targeted")
             db.commit()
@@ -509,7 +517,14 @@ def _walk_account_tree(*, account_id: int, drive_type: str, adapter) -> ScanStat
     return stats
 
 
-def _refresh_account_paths(*, account_id: int, drive_type: str, adapter, target_paths: list[tuple[str, bool]]) -> ScanStats:
+def _refresh_account_paths(
+    *,
+    account_id: int,
+    drive_type: str,
+    adapter,
+    target_paths: list[tuple[str, bool]],
+    progress_hook=None,
+) -> ScanStats:
     ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 30 * 60) or 30 * 60)
     rate_limit = float(getattr(settings, "drive_account_lsdir_scan_rate_limit_per_second", 1.0) or 1.0)
     stats = ScanStats()
@@ -567,6 +582,11 @@ def _refresh_account_paths(*, account_id: int, drive_type: str, adapter, target_
 
         stats.scanned_dirs += 1
         stats.cached_items += len(normalized_items)
+        if progress_hook is not None:
+            try:
+                progress_hook(stats, parent_path, len(queue))
+            except Exception:
+                pass
         if not recursive:
             continue
         for item in normalized_items:
