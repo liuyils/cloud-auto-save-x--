@@ -438,21 +438,22 @@ class GuangyaClientLite:
         *,
         parent_id: str = "",
         page: int = 1,
-        page_size: int = 50,
+        page_size: int = 100,
+        cursor: int | str | None = None,
         order_by: int = 0,
         sort_type: int = 0,
     ) -> dict[str, Any]:
-        return cls._public_post(
-            f"{cls.API_USERRES}/get_share_page_files_list",
-            {
-                "accessToken": access_token,
-                "parentId": parent_id,
-                "page": page,
-                "pageSize": page_size,
-                "orderBy": order_by,
-                "sortType": sort_type,
-            },
-        )
+        payload: dict[str, Any] = {
+            "accessToken": access_token,
+            "parentId": parent_id,
+            "page": page,
+            "pageSize": page_size,
+            "orderBy": order_by,
+            "sortType": sort_type,
+        }
+        if cursor not in (None, "", "0"):
+            payload["cursor"] = cursor
+        return cls._public_post(f"{cls.API_USERRES}/get_share_page_files_list", payload)
 
 
 class GuangyaAdapter(BaseCloudDriveAdapter):
@@ -659,18 +660,57 @@ class GuangyaAdapter(BaseCloudDriveAdapter):
 
     def _list_share_items(self, access_token: str, parent_id: str = "") -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        page = 1
-        page_size = 50
+        seen_keys: set[str] = set()
+        stagnant_pages = 0
+        page = 0
+        page_size = 100
+        cursor: int | str | None = None
         while True:
-            payload = self._client.share_files_list(access_token, parent_id=parent_id, page=page, page_size=page_size)
+            payload = self._client.share_files_list(access_token, parent_id=parent_id, page=page, page_size=page_size, cursor=cursor)
             if not _is_success(payload):
                 raise RuntimeError(_extract_message(payload, "获取分享文件列表失败"))
             batch = _extract_items(payload)
             if not batch:
                 break
-            items.extend(batch)
-            if len(batch) < page_size:
+            data = _extract_data(payload)
+            total = _to_int(_deep_get(data, "total", "totalCount", "count"), 0) if isinstance(data, dict) else 0
+            need_more = total > 0 and len(items) < total
+            added = 0
+            for item in batch:
+                fid = self._pick_item_id(item)
+                if fid and fid != "0":
+                    key = f"fid:{fid}"
+                else:
+                    key = f"fallback:{self._pick_parent_id(item)}:{int(self._pick_is_dir(item))}:{self._pick_name(item)}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                items.append(item)
+                added += 1
+            if added > 0:
+                stagnant_pages = 0
+            else:
+                stagnant_pages += 1
+            if total > 0 and len(items) >= total:
                 break
+            if added <= 0 and not need_more:
+                break
+            if added <= 0 and stagnant_pages >= 3:
+                break
+            has_more = _deep_get(data, "hasMore", "hasNext", "more") if isinstance(data, dict) else None
+            if has_more is not None and not _to_bool(has_more) and not need_more:
+                break
+            if len(batch) < page_size and not need_more:
+                break
+            next_cursor = _deep_get(data, "cursor", "nextCursor", "next_cursor") if isinstance(data, dict) else None
+            if next_cursor in (None, "", cursor):
+                if not need_more:
+                    break
+                stagnant_pages += 1
+                if stagnant_pages >= 3:
+                    break
+            else:
+                cursor = next_cursor
             page += 1
             if page > 200:
                 break
@@ -1220,10 +1260,18 @@ class GuangyaAdapter(BaseCloudDriveAdapter):
                     time.sleep(1)
             aligned: list[str] = []
             if file_names:
-                for _ in range(15):
-                    aligned = self._diff_dest_dir(dest_fid, before_fids, file_names)
-                    if aligned and any(aligned):
+                best_aligned: list[str] = []
+                best_matched = 0
+                for _ in range(30):
+                    current = self._diff_dest_dir(dest_fid, before_fids, file_names)
+                    current_matched = sum(1 for fid in current if _clean_text(fid))
+                    if current_matched >= best_matched:
+                        best_aligned = current
+                        best_matched = current_matched
+                    if current and current_matched >= len(file_names):
+                        aligned = current
                         break
+                    aligned = best_aligned
                     time.sleep(1)
             return {
                 "code": 0,

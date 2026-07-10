@@ -411,9 +411,14 @@ class DramaTaskExecutor:
         save_file_return: dict[str, Any] | None,
         query_task_return: dict[str, Any] | None,
     ) -> tuple[list[str], str]:
+        def _normalize_saved_fids(values: Any) -> list[str]:
+            if not isinstance(values, list):
+                return []
+            return [str(x).strip() for x in values]
+
         data = (save_file_return or {}).get("data") or {}
         if data.get("_sync") and data.get("save_as_top_fids") is not None:
-            fids = [str(x).strip() for x in (data.get("save_as_top_fids") or []) if str(x).strip()]
+            fids = _normalize_saved_fids(data.get("save_as_top_fids"))
             return fids, "save_file.data.save_as_top_fids"
 
         drive_type = str(getattr(self.adapter, "DRIVE_TYPE", "") or "")
@@ -421,10 +426,10 @@ class DramaTaskExecutor:
         save_as = (qdata.get("save_as") or {}) if isinstance(qdata, dict) else {}
         if drive_type == "uc":
             if save_as.get("save_as_select_top_fids") is not None:
-                fids = [str(x).strip() for x in (save_as.get("save_as_select_top_fids") or []) if str(x).strip()]
+                fids = _normalize_saved_fids(save_as.get("save_as_select_top_fids"))
                 return fids, "query_task.data.save_as.save_as_select_top_fids"
         if save_as.get("save_as_top_fids") is not None:
-            fids = [str(x).strip() for x in (save_as.get("save_as_top_fids") or []) if str(x).strip()]
+            fids = _normalize_saved_fids(save_as.get("save_as_top_fids"))
             return fids, "query_task.data.save_as.save_as_top_fids"
         return [], "missing"
 
@@ -492,12 +497,17 @@ class DramaTaskExecutor:
                     break
 
             batch_saved, source = self._extract_saved_fids(save_file_return=save_ret, query_task_return=qret)
-            self._line(f"saved_fids: {len(batch_saved)}（来源={source}）")
+            matched_saved = sum(1 for fid in batch_saved if str(fid or "").strip())
+            if batch_saved:
+                self._line(f"saved_fids: {matched_saved}/{len(batch_saved)}（来源={source}）")
+            else:
+                self._line(f"saved_fids: 0（来源={source}）")
             saved_fids.extend(batch_saved)
 
         if err_msg:
             raise RuntimeError(err_msg)
-        if not saved_fids:
+        matched_total = sum(1 for fid in saved_fids if str(fid or "").strip())
+        if matched_total <= 0:
             if allow_empty_result:
                 self._line("提示: 转存任务完成但未返回转存后 fid 列表，当前按目录转存兜底继续")
                 return []
@@ -506,15 +516,17 @@ class DramaTaskExecutor:
         if share_folder_fid and drive_type == "uc":
             self._set_stage("move_files")
             self._section("移动到目标目录")
-            self._line(f"移动文件数: {len(saved_fids)}")
-            move_ret = self.adapter.move_files_to_target(saved_fids, str(dest_root_fid)) or {}
+            move_fids = [fid for fid in saved_fids if str(fid or "").strip()]
+            self._line(f"移动文件数: {len(move_fids)}")
+            move_ret = self.adapter.move_files_to_target(move_fids, str(dest_root_fid)) or {}
             if move_ret.get("code") not in (0, "0", None):
                 raise RuntimeError(str(move_ret.get("message") or "移动失败"))
 
         if len(saved_fids) != len(plan):
             self._line(f"提示: saved_fids={len(saved_fids)} 与计划数={len(plan)} 不一致，将仅对齐前 {min(len(saved_fids), len(plan))} 项")
-        if saved_fids:
-            self.transfer_count += len(saved_fids)
+        elif matched_total != len(plan):
+            self._line(f"提示: 已识别转存结果 {matched_total}/{len(plan)}，未识别项将跳过按 fid 后处理")
+        self.transfer_count += matched_total
         return saved_fids
 
     def _sync_share_dir(
