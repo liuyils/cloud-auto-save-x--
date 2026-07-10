@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 import time
 import logging
-import json
-from pathlib import PurePosixPath
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -26,29 +24,36 @@ from app.services.drive_accounts import probe_drive_account, sign_in_drive_accou
 from app.services.drive_account_lsdir_scan import trigger_drive_account_lsdir_targeted_scan
 from app.services.drive_account_lsdir_cache import get_drive_account_lsdir_cache_subtree_freshness
 from app.services.dl302_strm import maybe_auto_generate_dl302_strm
-from app.services.drama_linked_pipeline import run_cas_strm_stage
+from app.services.drama_linked_pipeline import DramaLinkedBatchItem, run_drama_linked_batch_pipeline
 from app.services.sync_execution_cleanup import purge_old_sync_executions
 from app.services.sync_execution_recovery import abort_stale_running_sync_executions
-from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution, run_linked_sync_tasks_blocking
+from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution
 from app.models.drive_account import DriveAccount
-from app.models.sync_execution_file import SyncExecutionFile
 from app.extensions.runtime.adapter_registry import AdapterRegistry
 from app.extensions.runtime.account_manager import DatabaseAccountManager
 from app.extensions.runtime.task_executor import TaskExecutor
 from app.extensions.runtime.execution_log import ExecutionLog
-from app.extensions.runtime.plugin_loader import sync_plugin_definitions
-from app.extensions.runtime.plugin_hooks import plugin_key_from_definition
-from app.extensions.runtime.plugin_registry import PluginRegistry
 from app.core.errors import ApiError
 
 
 logger = logging.getLogger(__name__)
 
-
-def _plugin_meta_value(payload: object, key: str, default=None):
-    if isinstance(payload, dict):
-        return payload.get(key, default)
-    return getattr(payload, key, default)
+def _extract_execution_log_section_lines(run_log: str, title: str) -> list[str]:
+    target = f"==============={str(title or '').strip()}==============="
+    lines = [str(line or "") for line in str(run_log or "").splitlines()]
+    collected: list[str] = []
+    in_section = False
+    for raw in lines:
+        line = str(raw or "")
+        if line.startswith("==============="):
+            if line == target:
+                in_section = True
+                continue
+            if in_section:
+                break
+        if in_section:
+            collected.append(line)
+    return collected
 
 
 class TaskSchedulerManager:
@@ -259,8 +264,7 @@ def run_drama_tasks() -> None:
             account_manager = None
 
     sections: list[str] = []
-    success_task_uids: list[str] = []
-    plugin_candidates: list[object] = []
+    linked_candidates: list[DramaLinkedBatchItem] = []
 
     for task_id in task_ids:
         max_attempts = 3
@@ -274,9 +278,27 @@ def run_drama_tasks() -> None:
                     task,
                     account_manager=account_manager,
                     init_account_for_task=False,
-                    defer_plugins=True,
+                    defer_plugins=False,
+                    allow_drama_plugins=True,
                     keep_runtime_tree=True,
                 )
+                try:
+                    auto_update_lines = _extract_execution_log_section_lines(
+                        str(getattr(execution, "run_log", "") or ""),
+                        "自动换链",
+                    )
+                    if auto_update_lines:
+                        logger.info(
+                            "追剧任务调度阶段: 自动换链 task_id=%s task_uid=%s",
+                            int(getattr(task, "id", 0) or 0),
+                            str(getattr(task, "task_uid", "") or "").strip(),
+                        )
+                        for line in auto_update_lines:
+                            if not str(line or "").strip():
+                                continue
+                            logger.info("追剧自动换链: %s", line)
+                except Exception:
+                    pass
                 should_notify = False
                 try:
                     section, should_notify = build_task_section(task, execution)
@@ -287,13 +309,34 @@ def run_drama_tasks() -> None:
                 try:
                     if should_trigger_linked_sync_for_drama_execution(execution):
                         uid = str(getattr(task, "task_uid", "") or "").strip()
-                        if uid:
-                            success_task_uids.append(uid)
-                except Exception:
-                    pass
-                try:
-                    if getattr(execution, "status", None) == "success" and bool(getattr(execution, "_has_new_files", False)):
-                        plugin_candidates.append(execution)
+                        task_data = getattr(execution, "_runtime_task_data", None)
+                        adapter = getattr(execution, "_runtime_adapter", None)
+                        tree = getattr(execution, "_runtime_tree", None)
+                        account_name = str(
+                            (task_data or {}).get("account_name") or getattr(adapter, "account_name", "") or ""
+                        ).strip()
+                        savepath = str((task_data or {}).get("savepath") or getattr(task, "savepath", "") or "").strip()
+                        changed_dirs = getattr(tree, "_changed_relative_dirs", None)
+                        normalized_changed_dirs = [
+                            str(item or "").strip() for item in (changed_dirs or []) if str(item or "").strip()
+                        ]
+                        account_id = 0
+                        if account_name:
+                            with SessionLocal() as ldb:
+                                found_id = (
+                                    ldb.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
+                                )
+                            account_id = int(found_id or 0)
+                        if uid and account_id > 0 and savepath:
+                            linked_candidates.append(
+                                DramaLinkedBatchItem(
+                                    task_uid=uid,
+                                    task_id=int(getattr(task, "id", 0) or 0) or None,
+                                    account_id=account_id,
+                                    savepath=savepath,
+                                    changed_relative_dirs=normalized_changed_dirs or None,
+                                )
+                            )
                 except Exception:
                     pass
                 break
@@ -315,253 +358,27 @@ def run_drama_tasks() -> None:
             except Exception:
                 db.rollback()
         try:
-            repair_banned_drama_tasks(db)
+            logger.info("追剧任务调度阶段: 封禁修复")
+            repair_result = repair_banned_drama_tasks(db)
             db.commit()
+            logger.info(
+                "追剧封禁修复: checked=%s repaired=%s",
+                int((repair_result or {}).get("checked") or 0),
+                int((repair_result or {}).get("repaired") or 0),
+            )
         except Exception:
             db.rollback()
-    sync_results: list[dict[str, object]] = []
-    if success_task_uids:
-        try:
-            sync_results = run_linked_sync_tasks_blocking(success_task_uids, source="scheduler.run_drama_tasks")
-        except Exception as exc:
-            logger.exception("追剧任务调度联动同步阶段异常 err=%s", str(exc).strip() or type(exc).__name__)
-            sync_results = []
-    plugin_candidates_count = len(plugin_candidates)
-    logger.info(
-        "追剧任务调度后置插件阶段: 候选任务数=%d linked_sync_tasks=%s",
-        plugin_candidates_count,
-        len(sync_results),
-    )
-    if not plugin_candidates:
-        plugins = []
-    else:
-        plugins = None
-    if plugins is None:
-        try:
-            with SessionLocal() as pdb:
-                try:
-                    logger.debug("追剧调度后置插件: 同步插件定义")
-                    sync_plugin_definitions(pdb)
-                    pdb.commit()
-                    logger.debug("追剧调度后置插件: 插件定义同步完成")
-                except Exception:
-                    pdb.rollback()
-                    logger.exception("追剧调度后置插件: 插件定义同步失败")
-                try:
-                    raw_plugins = PluginRegistry(pdb).load_active_plugins()
-                    plugins = []
-                    for item in raw_plugins:
-                        plugin = item.get("instance")
-                        definition = item.get("definition")
-                        config = item.get("config")
-                        plugin_key = str(
-                            getattr(plugin, "plugin_name", "") or plugin_key_from_definition(definition) or ""
-                        ).strip()
-                        plugins.append(
-                            {
-                                "instance": plugin,
-                                "plugin_key": plugin_key,
-                                "priority": int(_plugin_meta_value(config, "priority", 0) or 0),
-                            }
-                        )
-                    plugins.sort(key=lambda it: int(it.get("priority") or 0))
-                    logger.info("追剧调度后置插件: 加载到插件数=%d", len(plugins))
-                    pdb.rollback()
-                except Exception:
-                    plugins = []
-                    logger.exception("追剧调度后置插件: 加载插件失败")
-        except Exception:
-            plugins = []
-            logger.exception("追剧调度后置插件: 创建插件注册表失败")
-    if plugins:
-        logger.info("追剧调度后置插件: 开始执行 plugins=%d", len(plugins))
-    else:
-        plugins = []
-    deduped: dict[str, tuple[object, dict[str, Any], object, object]] = {}
-    for item in plugins:
-        plugin = item.get("instance")
-        plugin_key = str(item.get("plugin_key") or "").strip()
-        if not bool(getattr(plugin, "is_active", False)):
-            logger.debug("追剧调度后置插件: 跳过（is_active=false） plugin=%s", plugin_key)
-            continue
-        if not hasattr(plugin, "run"):
-            logger.debug("追剧调度后置插件: 跳过（缺少 run 方法） plugin=%s", plugin_key)
-            continue
-        if not plugin_key:
-            continue
-        base_task_cfg = getattr(plugin, "default_task_config", None)
-        if not isinstance(base_task_cfg, dict):
-            base_task_cfg = {}
-        for execution in plugin_candidates:
-            task_data = getattr(execution, "_runtime_task_data", None)
-            adapter = getattr(execution, "_runtime_adapter", None)
-            tree = getattr(execution, "_runtime_tree", None)
-            if not isinstance(task_data, dict) or adapter is None or tree is None:
-                logger.debug("追剧调度后置插件: 跳过（执行结果缺少必要数据） plugin=%s", plugin_key)
-                continue
-            merged_cfg = dict(base_task_cfg)
-            addition_cfg = (task_data.get("addition") or {}).get(plugin_key)
-            if isinstance(addition_cfg, dict):
-                merged_cfg.update(addition_cfg)
-            cfg_key = json.dumps(merged_cfg, ensure_ascii=False, sort_keys=True)
-            context_key = json.dumps(
-                {
-                    "taskname": str(task_data.get("taskname") or ""),
-                    "savepath": str(task_data.get("savepath") or ""),
-                    "task_type": str(task_data.get("task_type") or ""),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            account_key = f"{str(getattr(adapter, 'DRIVE_TYPE', '') or '')}:{str(getattr(adapter, 'account_name', '') or '')}"
-            dedupe_key = f"{plugin_key}|{account_key}|{cfg_key}|{context_key}"
-            if dedupe_key not in deduped:
-                deduped[dedupe_key] = (plugin, task_data, adapter, tree)
-    logger.info(
-        "追剧调度后置插件: 去重后待执行插件任务数=%d",
-        len(deduped),
-    )
-    for _k, payload in deduped.items():
-        plugin, task_data, adapter, tree = payload
-        plugin_key = str(getattr(plugin, "plugin_name", "") or getattr(plugin, "__class__", type(plugin)).__name__ or "").strip()
-        try:
-            logger.info("追剧调度后置插件: 执行 plugin=%s taskname=%s", plugin_key, str(task_data.get("taskname") or ""))
-            plugin.run(task_data, account=adapter, tree=tree)
-            logger.info("追剧调度后置插件: 成功 plugin=%s", plugin_key)
-        except Exception:
-            logger.exception("追剧调度后置插件: 执行失败 plugin=%s", plugin_key)
-
-    cas_video_exts = {
-        ".mp4",
-        ".mkv",
-        ".avi",
-        ".mov",
-        ".wmv",
-        ".flv",
-        ".m4v",
-        ".ts",
-        ".m2ts",
-        ".mts",
-        ".mpg",
-        ".mpeg",
-        ".webm",
-        ".rmvb",
-        ".rm",
-        ".asf",
-        ".3gp",
-        ".mp2",
-        ".mpe",
-        ".mpv",
-        ".mxf",
-        ".ogm",
-        ".ogv",
-        ".qt",
-        ".vob",
-    }
-
-    def _is_video(p: str) -> bool:
-        try:
-            return str(PurePosixPath(str(p or "")).suffix or "").lower() in cas_video_exts
-        except Exception:
-            return False
-
-    def _norm_abs(p: str) -> str:
-        text = str(p or "").strip()
-        if not text:
-            return ""
-        if not text.startswith("/"):
-            text = "/" + text.lstrip("/")
-        try:
-            normalized = str(PurePosixPath(text))
-        except Exception:
-            normalized = text
-        return normalized if normalized.startswith("/") else "/" + normalized.lstrip("/")
-
-    def _join(base: str, rel: str) -> str:
-        b = _norm_abs(base)
-        r = str(rel or "").strip().strip("/")
-        if not b:
-            return ""
-        if not r:
-            return b
-        return str(PurePosixPath(b) / r)
-
-    delta_by_account: dict[int, dict[str, set[str]]] = {}
-    account_base_path: dict[int, str] = {}
-
-    for execution in plugin_candidates:
-        task_data = getattr(execution, "_runtime_task_data", None)
-        adapter = getattr(execution, "_runtime_adapter", None)
-        tree = getattr(execution, "_runtime_tree", None)
-        if not isinstance(task_data, dict) or adapter is None or tree is None:
-            continue
-        account_name = str(getattr(adapter, "account_name", "") or "").strip()
-        savepath = _norm_abs(str(task_data.get("savepath") or ""))
-        if not account_name or not savepath:
-            continue
-        with SessionLocal() as db:
-            account_id = (
-                db.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
-            )
-        if account_id is None:
-            continue
-        account_id = int(account_id)
-        account_base_path[account_id] = savepath
-        changed_dirs = getattr(tree, "_changed_relative_dirs", None)
-        rel_list = changed_dirs if isinstance(changed_dirs, list) else []
-        if not rel_list:
-            rel_list = [""]
-        payload = delta_by_account.setdefault(account_id, {"dir_paths": set(), "file_paths": set()})
-        for rel in rel_list:
-            full_dir = _join(savepath, str(rel or ""))
-            if full_dir:
-                payload["dir_paths"].add(full_dir)
-
-    for item in sync_results:
-        if str(item.get("status") or "") != "success":
-            continue
-        if str(item.get("target_type") or "").strip().lower() != "netdisk":
-            continue
-        execution_id = int(item.get("execution_id") or 0) or 0
-        account_id = int(item.get("target_account_id") or 0) or 0
-        base_path = _norm_abs(str(item.get("target_path") or ""))
-        if execution_id <= 0 or account_id <= 0 or not base_path:
-            continue
-        account_base_path.setdefault(account_id, base_path)
-        with SessionLocal() as db:
-            rows = (
-                db.execute(
-                    select(SyncExecutionFile.path).where(
-                        SyncExecutionFile.sync_execution_id == int(execution_id),
-                        SyncExecutionFile.action == "copy",
-                        SyncExecutionFile.status == "success",
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        payload = delta_by_account.setdefault(account_id, {"dir_paths": set(), "file_paths": set()})
-        for p in rows:
-            full_path = _norm_abs(str(p or ""))
-            if not full_path:
-                continue
-            if base_path != "/" and full_path != base_path and not full_path.startswith(base_path + "/"):
-                continue
-            if not _is_video(full_path):
-                continue
-            payload["file_paths"].add(full_path)
-
-    if delta_by_account:
+    if linked_candidates:
+        logger.info("追剧任务调度联动后置阶段: 候选任务数=%d", len(linked_candidates))
         elog = ExecutionLog(emit_line=lambda s: logger.info("追剧联动后置: %s", s))
         try:
-            run_cas_strm_stage(
-                delta_by_account=delta_by_account,
-                account_base_path=account_base_path,
+            run_drama_linked_batch_pipeline(
+                items=linked_candidates,
                 source="scheduler.run_drama_tasks",
                 log=elog,
             )
         except Exception as exc:
-            logger.exception("追剧联动后置 CAS/STRM 阶段异常 err=%s", str(exc).strip() or type(exc).__name__)
+            logger.exception("追剧联动后置阶段异常 err=%s", str(exc).strip() or type(exc).__name__)
 
 
 def run_sync_execution_recovery() -> None:

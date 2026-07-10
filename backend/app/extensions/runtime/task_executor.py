@@ -289,6 +289,7 @@ class TaskExecutor:
         account_manager: DatabaseAccountManager | None = None,
         init_account_for_task: bool = True,
         defer_plugins: bool = False,
+        allow_drama_plugins: bool = False,
         keep_runtime_tree: bool = False,
     ) -> TaskExecution:
         if not task.enabled:
@@ -390,7 +391,9 @@ class TaskExecutor:
             account_manager.init_for_tasks([task_data])
         default_adapter = account_manager.get_default_adapter()
         plugins = []
-        should_defer_plugins = bool(defer_plugins) or str(task_data.get("task_type") or "") == "drama"
+        is_drama_task = str(task_data.get("task_type") or "") == "drama"
+        should_defer_plugins = bool(defer_plugins) or is_drama_task
+        should_run_drama_plugins = bool(allow_drama_plugins) or not bool(defer_plugins)
         if not should_defer_plugins:
             log.set_stage("load_plugins")
             plugins = self._write_with_session(lambda db: PluginRegistry(db).load_active_plugins())
@@ -492,7 +495,7 @@ class TaskExecutor:
             setattr(task, "_runtime_adapter", adapter)
             setattr(task, "_runtime_has_new_files", has_new_files)
             if not defer_plugins:
-                if str(task_data.get("task_type") or "") == "drama":
+                if is_drama_task and should_run_drama_plugins:
                     if not has_new_files:
                         log.set_stage("plugin_run")
                         log.section("插件执行")
@@ -533,7 +536,7 @@ class TaskExecutor:
                                     continue
                                 log.line(f"RUN: {key}（task_after）")
                         PluginHookRunner.task_after(plugins, [task_data], default_adapter or adapter, emit_line=log.line)
-                else:
+                elif not is_drama_task:
                     log.set_stage("plugin_run")
                     log.section("插件执行")
                     if not plugins:

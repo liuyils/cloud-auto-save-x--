@@ -49,6 +49,7 @@ class Cloud189Adapter(BaseCloudDriveAdapter):
         "username": "",
         "password": "",
         "ssoncookie": "",
+        "family_id": "",
         "302_path": "",
         "protocol": "pc",
         "name": "",
@@ -81,6 +82,15 @@ class Cloud189Adapter(BaseCloudDriveAdapter):
             "required": False,
             "secret": True,
             "placeholder": "ssoncookie",
+        },
+        {
+            "key": "family_id",
+            "label": "家庭云 ID",
+            "description": "可选；配置后 dl302 在 CAS 播放恢复时优先使用家庭云。",
+            "input_type": "text",
+            "required": False,
+            "secret": False,
+            "placeholder": "",
         },
         {
             "key": "302_path",
@@ -156,6 +166,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         self._user_name = self._cookie_kv.get("username") or self._cookie_kv.get("mobile") or ""
         self._password = self._cookie_kv.get("password") or self._cookie_kv.get("passWord") or ""
         self._ssoncookie = self._cookie_kv.get("ssoncookie") or self._cookie_kv.get("SSON") or ""
+        self._family_id = (self._cookie_kv.get("family_id") or self._cookie_kv.get("familyId") or "").strip()
         self._protocol = (self._cookie_kv.get("protocol") or "pc").strip().lower()
         self._account_name = self._cookie_kv.get("name") or account_name or f"cloud189用户{self.index}"
         self._debug = (

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -11,15 +10,12 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.extensions.runtime.execution_log import ExecutionLog
-from app.extensions.runtime.sync_executor import SyncExecutor
 from app.models.drive_account import DriveAccount
-from app.models.sync_execution import SyncExecution
 from app.models.sync_execution_file import SyncExecutionFile
-from app.models.sync_task import SyncTask
-from app.models.sync_task_drama_link import SyncTaskDramaLink
 from app.services.dl302_cas import _extract_account_media_base_path, submit_dl302_cas_task_delta
 from app.services.dl302_strm import rebuild_dl302_strm
 from app.services.drive_account_lsdir_scan import refresh_drive_account_lsdir_paths
+from app.services.sync_task_triggers import run_linked_sync_tasks_blocking
 
 
 logger = logging.getLogger(__name__)
@@ -89,16 +85,125 @@ def _is_cas_video_path(path: str) -> bool:
 
 
 @dataclass(slots=True)
-class SyncRunResult:
-    sync_task_id: int
-    uid: str
-    name: str
-    status: str
-    execution_id: int | None
-    target_type: str
-    target_account_id: int | None
-    target_path: str
-    message: str
+class DramaLinkedBatchItem:
+    task_uid: str
+    task_id: int | None
+    account_id: int
+    savepath: str
+    changed_relative_dirs: list[str] | None = None
+
+
+def _normalize_batch_items(items: list[DramaLinkedBatchItem] | None) -> list[DramaLinkedBatchItem]:
+    normalized: list[DramaLinkedBatchItem] = []
+    seen: set[str] = set()
+    for item in items or []:
+        uid = str(getattr(item, "task_uid", "") or "").strip()
+        account_id = int(getattr(item, "account_id", 0) or 0)
+        savepath = _norm_abs_path(str(getattr(item, "savepath", "") or ""))
+        if not uid or account_id <= 0 or not savepath:
+            continue
+        if uid in seen:
+            continue
+        seen.add(uid)
+        raw_changed = getattr(item, "changed_relative_dirs", None)
+        changed_relative_dirs = [str(x or "").strip() for x in (raw_changed or []) if str(x or "").strip()]
+        normalized.append(
+            DramaLinkedBatchItem(
+                task_uid=uid,
+                task_id=int(getattr(item, "task_id", 0) or 0) or None,
+                account_id=account_id,
+                savepath=savepath,
+                changed_relative_dirs=changed_relative_dirs or None,
+            )
+        )
+    return normalized
+
+
+def _load_drive_accounts(account_ids: set[int]) -> dict[int, DriveAccount]:
+    normalized_ids = sorted({int(x) for x in account_ids if int(x or 0) > 0})
+    if not normalized_ids:
+        return {}
+    with SessionLocal() as db:
+        rows = db.execute(select(DriveAccount).where(DriveAccount.id.in_(normalized_ids))).scalars().all()
+    return {int(getattr(row, "id", 0) or 0): row for row in rows if int(getattr(row, "id", 0) or 0) > 0}
+
+
+def _build_linked_stage_context(
+    *,
+    items: list[DramaLinkedBatchItem],
+    sync_results: list[dict[str, object]],
+) -> tuple[dict[int, dict[str, set[str]]], dict[int, str], dict[int, str]]:
+    delta_by_account: dict[int, dict[str, set[str]]] = {}
+    account_base_path: dict[int, str] = {}
+    account_ids = {int(item.account_id) for item in items}
+    account_ids.update(int(item.get("target_account_id") or 0) for item in sync_results if int(item.get("target_account_id") or 0) > 0)
+    accounts_by_id = _load_drive_accounts(account_ids)
+    cas_base_path_by_account: dict[int, str] = {}
+
+    for item in items:
+        account_id = int(item.account_id)
+        base_path = _norm_abs_path(item.savepath)
+        account_base_path.setdefault(account_id, base_path)
+        account = accounts_by_id.get(account_id)
+        cas_base_path_by_account.setdefault(
+            account_id,
+            _norm_abs_path(
+                str(getattr(account, "proxy_base_path", "") or "").strip()
+                or _extract_account_media_base_path(account) if account is not None else ""
+                or base_path
+            ),
+        )
+        changed_dirs = set()
+        for rel in item.changed_relative_dirs or []:
+            changed_dirs.add(_join_path(base_path, rel))
+        if not changed_dirs:
+            changed_dirs.add(base_path)
+        delta_by_account.setdefault(account_id, {"dir_paths": set(), "file_paths": set()})["dir_paths"].update(changed_dirs)
+
+    for item in sync_results:
+        if str(item.get("status") or "").strip().lower() != "success":
+            continue
+        if str(item.get("target_type") or "").strip().lower() != "netdisk":
+            continue
+        execution_id = int(item.get("execution_id") or 0) or 0
+        account_id = int(item.get("target_account_id") or 0) or 0
+        base_path = _norm_abs_path(str(item.get("target_path") or ""))
+        if execution_id <= 0 or account_id <= 0 or not base_path:
+            continue
+        account_base_path.setdefault(account_id, base_path)
+        account = accounts_by_id.get(account_id)
+        cas_base_path_by_account.setdefault(
+            account_id,
+            _norm_abs_path(
+                str(getattr(account, "proxy_base_path", "") or "").strip()
+                or _extract_account_media_base_path(account) if account is not None else ""
+                or base_path
+            ),
+        )
+        with SessionLocal() as db:
+            rows = (
+                db.execute(
+                    select(SyncExecutionFile.path).where(
+                        SyncExecutionFile.sync_execution_id == int(execution_id),
+                        SyncExecutionFile.action == "copy",
+                        SyncExecutionFile.status.in_(["success", "skipped"]),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        payload = delta_by_account.setdefault(account_id, {"dir_paths": set(), "file_paths": set()})
+        for raw_path in rows:
+            full_path = _norm_abs_path(str(raw_path or ""))
+            if not full_path:
+                continue
+            if not _is_within_base(base_path, full_path):
+                continue
+            if not _is_cas_video_path(full_path):
+                continue
+            payload["file_paths"].add(full_path)
+
+    return delta_by_account, account_base_path, cas_base_path_by_account
 
 
 def run_cas_strm_stage(
@@ -193,6 +298,65 @@ def run_cas_strm_stage(
     return cas_tasks, strm_result
 
 
+def run_drama_linked_batch_pipeline(
+    *,
+    items: list[DramaLinkedBatchItem],
+    source: str,
+    log: ExecutionLog | None = None,
+) -> dict[str, Any]:
+    log = log or ExecutionLog()
+    batch_items = _normalize_batch_items(items)
+    if not batch_items:
+        return {
+            "ok": True,
+            "drama_task_uids": [],
+            "sync_results": [],
+            "cas_tasks": [],
+            "strm": None,
+        }
+
+    log.set_stage("linked_sync_prepare")
+    log.section("联动流程")
+    log.line(f"来源: {str(source or '').strip()}")
+    log.line(f"追剧任务数: {len(batch_items)}")
+    for item in batch_items:
+        task_id_text = int(item.task_id or 0) or "-"
+        log.line(
+            "追剧任务: "
+            f"uid={item.task_uid} task_id={task_id_text} "
+            f"account_id={int(item.account_id)} savepath={item.savepath}"
+        )
+
+    log.section("联动等待")
+    time.sleep(2.0)
+    log.line("OK: sleep=2.0s")
+
+    sync_results = run_linked_sync_tasks_blocking(
+        [item.task_uid for item in batch_items],
+        source=source,
+        log=log,
+    )
+
+    delta_by_account, account_base_path, cas_base_path_by_account = _build_linked_stage_context(
+        items=batch_items,
+        sync_results=sync_results,
+    )
+    cas_tasks, strm_result = run_cas_strm_stage(
+        delta_by_account=delta_by_account,
+        account_base_path=account_base_path,
+        cas_base_path_by_account=cas_base_path_by_account,
+        source=source,
+        log=log,
+    )
+    return {
+        "ok": True,
+        "drama_task_uids": [item.task_uid for item in batch_items],
+        "sync_results": sync_results,
+        "cas_tasks": cas_tasks,
+        "strm": strm_result,
+    }
+
+
 def run_drama_linked_pipeline(
     *,
     drama_task_uid: str,
@@ -205,202 +369,25 @@ def run_drama_linked_pipeline(
 ) -> dict[str, Any]:
     log = log or ExecutionLog()
     drama_uid = str(drama_task_uid or "").strip()
-    drama_save = _norm_abs_path(drama_savepath)
     if not drama_uid:
         raise ValueError("missing drama_task_uid")
     if drama_account_id <= 0:
         raise ValueError("missing drama_account_id")
+    drama_save = _norm_abs_path(drama_savepath)
     if not drama_save:
         raise ValueError("missing drama_savepath")
-
-    log.set_stage("linked_sync_prepare")
-    log.section("联动流程")
-    log.line(f"来源: {str(source or '').strip()}")
-    log.line(f"追剧任务: uid={drama_uid} task_id={int(drama_task_id or 0) or '-'}")
-
-    with SessionLocal() as db:
-        links = (
-            db.execute(select(SyncTaskDramaLink.sync_task_uid).where(SyncTaskDramaLink.task_uid == drama_uid))
-            .scalars()
-            .all()
-        )
-        sync_uids = [str(x or "").strip() for x in links if str(x or "").strip()]
-        if sync_uids:
-            tasks = (
-                db.execute(
-                    select(SyncTask)
-                    .where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True))
-                    .order_by(SyncTask.id.asc())
-                )
-                .scalars()
-                .all()
+    result = run_drama_linked_batch_pipeline(
+        items=[
+            DramaLinkedBatchItem(
+                task_uid=drama_uid,
+                task_id=int(drama_task_id or 0) or None,
+                account_id=int(drama_account_id),
+                savepath=drama_save,
+                changed_relative_dirs=changed_relative_dirs,
             )
-        else:
-            tasks = []
-
-        drama_account = db.get(DriveAccount, int(drama_account_id))
-        if drama_account is None:
-            raise RuntimeError(f"drama account not found id={int(drama_account_id)}")
-        drama_drive_type = str(getattr(drama_account, "drive_type", "") or "").strip()
-        drama_account_name = str(getattr(drama_account, "name", "") or "").strip()
-
-    log.line(f"追剧目标账号: id={int(drama_account_id)} {drama_drive_type}:{drama_account_name}")
-    log.line(f"追剧保存路径: {drama_save}")
-    log.line(f"关联同步任务数: {len(tasks)}")
-
-    log.section("联动等待")
-    time.sleep(2.0)
-    log.line("OK: sleep=2.0s")
-
-    sync_results: list[SyncRunResult] = []
-    if tasks:
-        log.set_stage("linked_sync_run")
-        log.section("关联同步任务")
-        for task in tasks:
-            sync_task_id = int(getattr(task, "id", 0) or 0)
-            sync_uid = str(getattr(task, "uid", "") or "").strip()
-            sync_name = str(getattr(task, "name", "") or "").strip()
-            target_type = str(getattr(task, "target_type", "") or "").strip().lower()
-            target_account_id = int(getattr(task, "target_account_id", 0) or 0) or None
-            target_path = _norm_abs_path(str(getattr(task, "target_path", "") or ""))
-
-            with SessionLocal() as db:
-                running = (
-                    db.execute(
-                        select(SyncExecution.id).where(
-                            SyncExecution.sync_task_id == int(sync_task_id),
-                            SyncExecution.status == "running",
-                            SyncExecution.finished_at.is_(None),
-                        )
-                    )
-                    .scalars()
-                    .first()
-                )
-            if running is not None:
-                msg = f"跳过: 正在运行 execution_id={int(running)}（详情请到同步任务列表查看）"
-                log.line(f"{sync_name} ({sync_uid}) {msg}")
-                sync_results.append(
-                    SyncRunResult(
-                        sync_task_id=sync_task_id,
-                        uid=sync_uid,
-                        name=sync_name,
-                        status="skipped",
-                        execution_id=int(running),
-                        target_type=target_type,
-                        target_account_id=target_account_id,
-                        target_path=target_path,
-                        message=msg,
-                    )
-                )
-                continue
-            try:
-                log.line(f"{sync_name} ({sync_uid}) 已发起（同步进度请到同步任务列表查看）")
-                sync_log = ExecutionLog()
-                execution = SyncExecutor(db=None).run_sync_task(task, log=sync_log)
-                execution_id = int(getattr(execution, "id", 0) or 0) or None
-                status = str(getattr(execution, "status", "") or "").strip() or "unknown"
-                msg = str(getattr(execution, "message", "") or "").strip()
-                log.line(f"{sync_name} ({sync_uid}) 执行完成 status={status} execution_id={execution_id or '-'}（详情请到同步任务列表查看）")
-                sync_results.append(
-                    SyncRunResult(
-                        sync_task_id=sync_task_id,
-                        uid=sync_uid,
-                        name=sync_name,
-                        status=status,
-                        execution_id=execution_id,
-                        target_type=target_type,
-                        target_account_id=target_account_id,
-                        target_path=target_path,
-                        message=msg,
-                    )
-                )
-            except Exception as exc:
-                msg = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
-                log.line(f"{sync_name} ({sync_uid}) 执行失败 err={msg}（详情请到同步任务列表查看）")
-                sync_results.append(
-                    SyncRunResult(
-                        sync_task_id=sync_task_id,
-                        uid=sync_uid,
-                        name=sync_name,
-                        status="failed",
-                        execution_id=None,
-                        target_type=target_type,
-                        target_account_id=target_account_id,
-                        target_path=target_path,
-                        message=msg,
-                    )
-                )
-
-    delta_by_account: dict[int, dict[str, set[str]]] = {}
-    account_base_path: dict[int, str] = {int(drama_account_id): drama_save}
-    drama_media_base_path = _norm_abs_path(
-        str(getattr(drama_account, "proxy_base_path", "") or "").strip()
-        or _extract_account_media_base_path(drama_account)
-        or drama_save
-    )
-    cas_base_path_by_account: dict[int, str] = {int(drama_account_id): drama_media_base_path}
-
-    drama_dirs = set()
-    for rel in changed_relative_dirs or []:
-        drama_dirs.add(_join_path(drama_save, str(rel or "").strip()))
-    if not drama_dirs:
-        drama_dirs.add(drama_save)
-    delta_by_account.setdefault(int(drama_account_id), {"dir_paths": set(), "file_paths": set()})["dir_paths"].update(drama_dirs)
-
-    for item in sync_results:
-        if item.status != "success":
-            continue
-        if item.target_type != "netdisk":
-            continue
-        if not item.execution_id or not item.target_account_id or not item.target_path:
-            continue
-        account_id = int(item.target_account_id)
-        base_path = _norm_abs_path(item.target_path)
-        account_base_path.setdefault(account_id, base_path)
-        if account_id not in cas_base_path_by_account:
-            with SessionLocal() as db:
-                target_account = db.get(DriveAccount, account_id)
-            if target_account is not None:
-                target_media_base_path = _norm_abs_path(
-                    str(getattr(target_account, "proxy_base_path", "") or "").strip()
-                    or _extract_account_media_base_path(target_account)
-                    or base_path
-                )
-                cas_base_path_by_account[account_id] = target_media_base_path
-        with SessionLocal() as db:
-            rows = (
-                db.execute(
-                    select(SyncExecutionFile.path).where(
-                        SyncExecutionFile.sync_execution_id == int(item.execution_id),
-                        SyncExecutionFile.action == "copy",
-                        SyncExecutionFile.status.in_(["success", "skipped"]),
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        for p in rows:
-            full_path = _norm_abs_path(str(p or ""))
-            if not full_path:
-                continue
-            if not _is_within_base(base_path, full_path):
-                continue
-            if not _is_cas_video_path(full_path):
-                continue
-            delta_by_account.setdefault(account_id, {"dir_paths": set(), "file_paths": set()})["file_paths"].add(full_path)
-
-    cas_tasks, strm_result = run_cas_strm_stage(
-        delta_by_account=delta_by_account,
-        account_base_path=account_base_path,
-        cas_base_path_by_account=cas_base_path_by_account,
+        ],
         source=source,
         log=log,
     )
-
-    return {
-        "ok": True,
-        "drama_task_uid": drama_uid,
-        "sync_results": [asdict(item) for item in sync_results],
-        "cas_tasks": cas_tasks,
-        "strm": strm_result,
-    }
+    result["drama_task_uid"] = drama_uid
+    return result

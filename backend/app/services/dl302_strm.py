@@ -424,7 +424,7 @@ def _to_relative_media_path(full_path: str, media_base_path: str) -> str | None:
 
 def _is_allowed_media_file_path(path: str, allowed_exts: set[str] | None = None) -> bool:
     suffix = Path(str(path or "")).suffix.lower()
-    return suffix in (allowed_exts or _VIDEO_EXTS)
+    return suffix in (allowed_exts or (_VIDEO_EXTS | _CAS_EXTS))
 
 
 def _join_relative_output(prefix: str, relative_media_path: str) -> str:
