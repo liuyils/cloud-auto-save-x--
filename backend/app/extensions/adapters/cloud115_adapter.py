@@ -613,44 +613,68 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
 
     def mkdir(self, dir_path: str) -> Dict:
         """创建目录"""
-        parts = dir_path.rstrip("/").split("/")
-        dir_name = parts[-1] if parts else "新建文件夹"
-        parent_path = "/".join(parts[:-1]) if len(parts) > 1 else ""
+        normalized_path = re.sub(r"/{2,}", "/", f"/{str(dir_path or '').strip('/')}")
+        if normalized_path == "/":
+            return {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "fid": "0",
+                    "file_name": "/",
+                },
+            }
 
-        parent_cid = "0"
-        if parent_path and parent_path != "/":
-            parent_fids = self.get_fids([parent_path])
-            if parent_fids:
-                parent_cid = parent_fids[0].get("fid", "0")
-
-        data = {"pid": parent_cid, "cname": dir_name}
+        parts = [part for part in normalized_path.strip("/").split("/") if part]
+        current_cid = "0"
+        current_path = ""
         try:
-            resp = self._request(
-                self.auth_session,
-                "POST",
-                f"{self.API_URL}/files/add",
-                data=data,
-                timeout=15,
-            )
-            result = self._safe_json(resp)
-            if result.get("state"):
-                return {
-                    "code": 0,
-                    "message": "success",
-                    "data": {
-                        "fid": result.get("cid", result.get("file_id")),
-                        "file_name": dir_name,
-                    },
-                }
-            # 目录可能已存在
-            existing = self.get_fids([dir_path])
-            if existing:
-                return {
-                    "code": 0,
-                    "message": "目录已存在",
-                    "data": {"fid": existing[0].get("fid"), "file_name": dir_name},
-                }
-            return {"code": 1, "message": result.get("error", "创建目录失败")}
+            for part in parts:
+                current_path = f"{current_path}/{part}" if current_path else f"/{part}"
+                listing = self.ls_dir(current_cid, max_items=0)
+                if listing.get("code") != 0:
+                    return {"code": 1, "message": listing.get("message", "获取目录列表失败")}
+
+                existing_dir = next(
+                    (
+                        item for item in listing.get("data", {}).get("list", [])
+                        if item.get("dir") and item.get("file_name") == part
+                    ),
+                    None,
+                )
+                if existing_dir and existing_dir.get("fid"):
+                    current_cid = str(existing_dir["fid"])
+                    continue
+
+                data = {"pid": current_cid, "cname": part}
+                resp = self._request(
+                    self.auth_session,
+                    "POST",
+                    f"{self.API_URL}/files/add",
+                    data=data,
+                    timeout=15,
+                )
+                result = self._safe_json(resp)
+                if result.get("state"):
+                    current_cid = str(result.get("cid") or result.get("file_id") or "")
+                    if current_cid:
+                        continue
+
+                # 目录可能是并发创建成功，或接口成功但未返回 cid，重新按当前层路径解析一次
+                existing = self.get_fids([current_path])
+                if existing and existing[0].get("fid"):
+                    current_cid = str(existing[0]["fid"])
+                    continue
+
+                return {"code": 1, "message": result.get("error", "创建目录失败")}
+
+            return {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "fid": current_cid,
+                    "file_name": parts[-1],
+                },
+            }
         except Exception as e:
             return {"code": 1, "message": f"创建目录失败: {e}"}
 
