@@ -178,6 +178,7 @@ class Dl302SyncExecutor:
 
         now = datetime.now()
         initial_stats: dict[str, Any] = {
+            "execution_id": 0,
             "total_files": 0,
             "done_files": 0,
             "copied_files": 0,
@@ -209,6 +210,7 @@ class Dl302SyncExecutor:
             _release_lock()
             raise
 
+        initial_stats["execution_id"] = int(execution.id)
         cancel_checker = _CancelChecker(int(execution.id))
         dl302_task_id = ""
         cancel_sent = False
@@ -556,7 +558,7 @@ class Dl302SyncExecutor:
             source=f"sync_executor_dl302.{label}",
             recursive_savepath=recursive,
             wait_if_busy=True,
-            max_wait_seconds=60.0,
+            max_wait_seconds=600.0,
             progress_hook=_progress_hook,
             include_cas_root_dir=False,
         )
@@ -782,6 +784,7 @@ class Dl302SyncExecutor:
 
     def _emit_progress(self, log: ExecutionLog, stats: dict[str, Any], event: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {
+            "execution_id": int(stats.get("execution_id") or 0),
             "total_files": int(stats.get("total_files") or 0),
             "done_files": int(stats.get("done_files") or 0),
             "copied_files": int(stats.get("copied_files") or 0),

@@ -956,8 +956,22 @@ function applyStatsObject(stats: any) {
   if (stats.failed_files != null) runFileStats.failed_files = Number(stats.failed_files) || 0
 }
 
+function bindRunExecutionFromProgress(executionIdRaw: any) {
+  const executionId = Number(executionIdRaw) || 0
+  const syncTaskId = Number(runLogDialog.syncTaskId) || 0
+  if (!syncTaskId || !executionId) return
+  if (Number(runLogDialog.executionId || 0) !== executionId) {
+    runLogDialog.executionId = executionId
+  }
+  const currentExecutionId = Number(runFilePage.executionId || 0)
+  if (currentExecutionId === executionId && (runFilePage.loading || runFilePage.items.length > 0)) return
+  const needResetPage = currentExecutionId !== executionId
+  loadExecutionFilesPage(syncTaskId, executionId, { resetPage: needResetPage }).catch(() => null)
+}
+
 function applyProgressPayload(payload: any) {
   if (!payload || typeof payload !== 'object') return
+  bindRunExecutionFromProgress(payload.execution_id)
   if (payload.total_files != null) runFileStats.total_files = Number(payload.total_files) || 0
   if (payload.done_files != null) runFileStats.done_files = Number(payload.done_files) || 0
   if (payload.copied_files != null) runFileStats.copied_files = Number(payload.copied_files) || 0

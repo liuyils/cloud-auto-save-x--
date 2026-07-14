@@ -581,6 +581,7 @@ class SyncExecutor:
 
             def emit_progress(event: dict[str, Any] | None = None) -> None:
                 payload: dict[str, Any] = {
+                    "execution_id": int(execution.id),
                     "total_files": int(stats.get("total_files") or 0),
                     "done_files": int(stats.get("done_files") or 0),
                     "copied_files": int(stats.get("copied_files") or 0),

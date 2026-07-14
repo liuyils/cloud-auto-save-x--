@@ -132,6 +132,10 @@ class Cloud189Adapter(BaseCloudDriveAdapter):
 
     HOST_URL = "https://cloud.189.cn"
     AUTH_URL = "https://open.e.189.cn/api/logbox/oauth2/"
+    API_URL = "https://api.cloud.189.cn"
+    OPEN_PC_CLIENT_TYPE = "TELEPC"
+    OPEN_VERSION = "6.2"
+    OPEN_CHANNEL_ID = "web_cloud.189.cn"
 
     PC_APP_ID = 8025431004
     PC_CLIENT_TYPE = 10020
@@ -244,6 +248,222 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             return s
         return s[:n]
 
+    def _open_client_suffix(self) -> Dict[str, str]:
+        return {
+            "clientType": self.OPEN_PC_CLIENT_TYPE,
+            "version": self.OPEN_VERSION,
+            "channelId": self.OPEN_CHANNEL_ID,
+            "rand": f"{uuid.uuid4().int % 100000}_{uuid.uuid4().int % 10000000000}",
+        }
+
+    def _persist_open_tokens(self, access_token: str, refresh_token: str) -> None:
+        at = str(access_token or "").strip()
+        rt = str(refresh_token or "").strip()
+        if not rt:
+            return
+        self._cookie_kv["refresh_token"] = rt
+        if at:
+            self._cookie_kv["access_token"] = at
+        self.cookie = self._cookie_kv_to_str(self._cookie_kv)
+        self._persist_cookie()
+
+    def _open_token_request(
+        self,
+        session: requests.Session,
+        method: str,
+        url: str,
+        *,
+        raise_status: bool = True,
+        timeout: int | float = 20,
+        **kwargs,
+    ) -> requests.Response:
+        self._throttle_request()
+        resp = session.request(method=method, url=url, timeout=timeout, **kwargs)
+        if raise_status:
+            resp.raise_for_status()
+        return resp
+
+    def _open_token_init_login_params(self, session: requests.Session) -> Dict[str, str]:
+        resp = self._open_token_request(
+            session,
+            "GET",
+            f"{self.HOST_URL}/api/portal/unifyLoginForPC.action",
+            params={
+                "appId": str(self.PC_APP_ID),
+                "clientType": str(self.PC_CLIENT_TYPE),
+                "returnURL": "https://m.cloud.189.cn/zhuanti/2020/loginErrorPc/index.html",
+                "timeStamp": str(int(time.time() * 1000)),
+            },
+            timeout=20,
+        )
+        text = resp.text or ""
+
+        def _must_find(pattern: str, label: str) -> str:
+            match = re.search(pattern, text)
+            if not match:
+                raise RuntimeError(f"open token login missing {label}")
+            return str(match.group(1) or "").strip()
+
+        lt = _must_find(r'lt = "(.+?)"', "lt")
+        param_id = _must_find(r'paramId = "(.+?)"', "paramId")
+        req_id = _must_find(r'reqId = "(.+?)"', "reqId")
+        captcha_token = _must_find(r"'captchaToken' value='(.+?)'", "captchaToken")
+
+        enc_resp = self._open_token_request(
+            session,
+            "POST",
+            "https://open.e.189.cn/api/logbox/config/encryptConf.do",
+            data={"appId": str(self.PC_APP_ID)},
+            timeout=20,
+        )
+        enc = enc_resp.json()
+        data = enc.get("data") if isinstance(enc, dict) else None
+        if not isinstance(data, dict):
+            raise RuntimeError("open token encryptConf invalid")
+
+        return {
+            "lt": lt,
+            "paramId": param_id,
+            "reqId": req_id,
+            "captchaToken": captcha_token,
+            "pre": str(data.get("pre") or ""),
+            "pubKey": str(data.get("pubKey") or ""),
+        }
+
+    def _open_token_need_captcha(self, session: requests.Session, login_params: Dict[str, str]) -> bool:
+        enc_user = self._encrypt_for_login(login_params, self._user_name)
+        resp = self._open_token_request(
+            session,
+            "POST",
+            f"{self.AUTH_URL}needcaptcha.do",
+            headers={"REQID": str(login_params.get("reqId") or "")},
+            data={
+                "appKey": str(self.PC_APP_ID),
+                "accountType": "02",
+                "userName": enc_user,
+            },
+            timeout=20,
+        )
+        body = (resp.text or "").strip()
+        return body != "0"
+
+    def _open_token_login_submit(self, session: requests.Session, login_params: Dict[str, str]) -> str:
+        enc_user = self._encrypt_for_login(login_params, self._user_name)
+        enc_pwd = self._encrypt_for_login(login_params, self._password)
+        resp = self._open_token_request(
+            session,
+            "POST",
+            f"{self.AUTH_URL}loginSubmit.do",
+            headers={
+                "REQID": str(login_params.get("reqId") or ""),
+                "lt": str(login_params.get("lt") or ""),
+            },
+            data={
+                "appKey": str(self.PC_APP_ID),
+                "accountType": "02",
+                "userName": enc_user,
+                "password": enc_pwd,
+                "validateCode": "",
+                "captchaToken": str(login_params.get("captchaToken") or ""),
+                "returnUrl": "https://m.cloud.189.cn/zhuanti/2020/loginErrorPc/index.html",
+                "dynamicCheck": "FALSE",
+                "clientType": str(self.PC_CLIENT_TYPE),
+                "cb_SaveName": "1",
+                "isOauth2": "false",
+                "state": "",
+                "paramId": str(login_params.get("paramId") or ""),
+            },
+            timeout=20,
+        )
+        j = resp.json()
+        if not isinstance(j, dict):
+            raise RuntimeError("open token login invalid response")
+        result = int(j.get("result", 1))
+        if result in (-133, -134):
+            raise RuntimeError(f"open token login requires second validation result={result}")
+        to_url = str(j.get("toUrl") or "").strip()
+        if result != 0 or not to_url:
+            raise RuntimeError(str(j.get("msg") or "open token login failed"))
+        return to_url
+
+    def _fetch_open_tokens(self) -> Tuple[str, str] | None:
+        existing_refresh = str(
+            self._cookie_kv.get("refresh_token") or self._cookie_kv.get("refreshToken") or ""
+        ).strip()
+        if existing_refresh:
+            logger.info(f"[cloud189] skip getSessionForPC: refresh_token exists tail={self._tail(existing_refresh)}")
+            return None
+        if not self._user_name or not self._password:
+            logger.warning("[cloud189] skip independent token login: username/password missing")
+            return None
+
+        session = requests.Session()
+        session.headers.update(
+            {
+                "User-Agent": self.WEB_USER_AGENT,
+                "Accept": "application/json;charset=UTF-8",
+                "Referer": self.HOST_URL,
+            }
+        )
+
+        logger.info("[cloud189] independent token login start")
+        try:
+            login_params = self._open_token_init_login_params(session)
+            if self._open_token_need_captcha(session, login_params):
+                logger.warning("[cloud189] independent token login requires captcha, skip")
+                return None
+            redirect_url = self._open_token_login_submit(session, login_params)
+            logger.info(f"[cloud189] getSessionForPC start: redirect_tail={self._tail(redirect_url, 24)}")
+            resp = self._open_token_request(
+                session,
+                "POST",
+                f"{self.API_URL}/getSessionForPC.action",
+                params={**self._open_client_suffix(), "redirectURL": redirect_url},
+                raise_status=False,
+                timeout=20,
+            )
+            try:
+                resp.raise_for_status()
+            except Exception as e:
+                logger.warning(f"[cloud189] getSessionForPC http={getattr(resp, 'status_code', '?')} err={e}")
+                return None
+            try:
+                j = resp.json()
+            except Exception:
+                logger.warning(f"[cloud189] getSessionForPC decode failed: {self._snippet(resp.text)}")
+                return None
+            if not isinstance(j, dict):
+                logger.warning(f"[cloud189] getSessionForPC invalid payload: {self._snippet(str(j))}")
+                return None
+            if j.get("res_code") not in (None, 0, "0"):
+                logger.warning(
+                    f"[cloud189] getSessionForPC failed: res_code={j.get('res_code')} msg={self._snippet(j.get('res_message') or j.get('msg') or '')}"
+                )
+                return None
+            access_token = str(j.get("accessToken") or "").strip()
+            refresh_token = str(j.get("refreshToken") or "").strip()
+            if not refresh_token:
+                logger.warning("[cloud189] getSessionForPC ok but refreshToken empty")
+                return None
+            logger.info(
+                f"[cloud189] getSessionForPC ok: access_tail={self._tail(access_token)} refresh_tail={self._tail(refresh_token)}"
+            )
+            return access_token, refresh_token
+        except Exception as e:
+            logger.warning(f"[cloud189] independent token login failed: {e}")
+            return None
+
+    def _ensure_open_tokens_after_login(self, source: str) -> None:
+        try:
+            tokens = self._fetch_open_tokens()
+            if tokens:
+                self._persist_open_tokens(tokens[0], tokens[1])
+                logger.info(f"[cloud189] persisted open tokens: source={source} refresh_tail={self._tail(tokens[1])}")
+            else:
+                logger.warning(f"[cloud189] open tokens unavailable: source={source}")
+        except Exception as e:
+            logger.warning(f"[cloud189] get open tokens failed: source={source} err={e}")
+
     def _finalize_login(self) -> Any:
         info = self._get_logined_infos() or {}
         cookies = self._session.cookies.get_dict()
@@ -274,6 +494,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             to_url = j.get("toUrl") or ""
             if to_url:
                 self._session.get(to_url, timeout=15)
+                self._ensure_open_tokens_after_login("captcha")
             return self._finalize_login()
         if isinstance(j, dict) and int(j.get("result", 1)) in (-133, -134):
             result = int(j.get("result", 1))
@@ -318,6 +539,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             to_url = resp.get("toUrl") or ""
             if to_url:
                 self._session.get(to_url, timeout=15)
+                self._ensure_open_tokens_after_login("sms")
             return self._finalize_login()
         msg = (resp or {}).get("msg") if isinstance(resp, dict) else ""
         raise RuntimeError(msg or "短信校验失败")
@@ -664,6 +886,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             to_url = j.get("toUrl") or ""
             if to_url:
                 self._session.get(to_url, timeout=15)
+                self._ensure_open_tokens_after_login("password")
             return True
         if isinstance(j, dict) and int(j.get("result", 1)) in (-133, -134):
             result = int(j.get("result", 1))
@@ -790,7 +1013,25 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         return resp.json()
 
     def _apply_saved_cookies(self):
-        reserved = {"name", "username", "userName", "password", "passWord", "ssoncookie", "cookiejar", "debug", "protocol"}
+        reserved = {
+            "name",
+            "username",
+            "userName",
+            "password",
+            "passWord",
+            "ssoncookie",
+            "cookiejar",
+            "debug",
+            "protocol",
+            "family_id",
+            "familyId",
+            "302_path",
+            "302Path",
+            "access_token",
+            "accessToken",
+            "refresh_token",
+            "refreshToken",
+        }
         cookiejar = (self._cookie_kv.get("cookiejar") or "").strip()
         if cookiejar:
             self._import_cookiejar_b64(cookiejar)
@@ -930,6 +1171,19 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
         if self._cookie_kv.get("cookiejar") or self._ssoncookie or self._cookie_kv.get("SSON") or self._cookie_kv.get("DEVICEID") or self._cookie_kv.get("OPENINFO"):
             try:
                 if self._login_by_cookie():
+                    if not str(self._cookie_kv.get("refresh_token") or self._cookie_kv.get("refreshToken") or "").strip():
+                        logger.info("[cloud189] cookie login ok but refresh_token missing, try password supplement")
+                        if self._user_name and self._password:
+                            try:
+                                self._login_by_username_password(self._user_name, self._password, "")
+                            except Cloud189CaptchaRequired:
+                                logger.warning("[cloud189] supplement token skipped: captcha required")
+                            except Cloud189SecondValidRequired:
+                                logger.warning("[cloud189] supplement token skipped: second validation required")
+                            except Exception as e:
+                                logger.warning(f"[cloud189] supplement token failed: {e}")
+                        else:
+                            logger.warning("[cloud189] supplement token skipped: username/password missing")
                     info = self._get_logined_infos() or {}
                     self.is_active = True
                     self.nickname = info.get("nickname") or self._account_name

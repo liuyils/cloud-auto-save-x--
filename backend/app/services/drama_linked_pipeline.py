@@ -246,7 +246,7 @@ def run_cas_strm_stage(
                 recursive_savepath=False,
                 source=f"{source}.linked_pipeline",
                 wait_if_busy=True,
-                max_wait_seconds=60.0,
+                max_wait_seconds=600.0,
             )
             log.line(f"OK: account_id={account_id} scanned_dirs={stats.scanned_dirs} cached_items={stats.cached_items}")
         except Exception as exc:

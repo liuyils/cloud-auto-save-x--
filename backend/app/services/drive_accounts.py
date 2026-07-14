@@ -356,6 +356,10 @@ def _probe_drive_account_snapshot(snapshot: DriveAccountSnapshot) -> DriveAccoun
                     snapshot.cookie,
                     adapter.export_runtime_config(),
                 )
+                if snapshot.drive_type == "cloud189":
+                    refresh_token = str(config_snapshot.get("refresh_token") or config_snapshot.get("refreshToken") or "").strip()
+                    if not refresh_token:
+                        last_error = "dl302: 缺少 access_token/refresh_token，302/CAS 播放不可用，请重新登录"
                 config_json_value = json.dumps(config_snapshot, ensure_ascii=False)
                 cookie_value = AdapterRegistry.serialize_config(snapshot.drive_type, config_snapshot)
                 profile = _build_account_profile(adapter, snapshot)
