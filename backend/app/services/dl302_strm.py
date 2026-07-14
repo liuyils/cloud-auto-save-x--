@@ -137,7 +137,12 @@ def list_account_strm_sources(config: dict[str, Any], account: DriveAccount) -> 
     include_cas_root = bool(config.get("strm_include_cas_root_dir"))
     raw_cas_root_dir = str(config.get("cas_root_dir") or "").strip()
     source_priority = str(config.get("strm_source_priority") or "video_first").strip().lower()
-    sources.append(StrmSource((normalized_media_base, None if source_priority == "video_first" else _VIDEO_EXTS - _CAS_EXTS, False)))
+    media_video_source = StrmSource((normalized_media_base, _VIDEO_EXTS - _CAS_EXTS, False))
+    media_cas_source = StrmSource((normalized_media_base, _CAS_EXTS, False))
+    if source_priority == "cas_first":
+        sources.extend([media_cas_source, media_video_source])
+    else:
+        sources.extend([media_video_source, media_cas_source])
     if include_cas_root and raw_cas_root_dir:
         normalized_cas_root = _normalize_posix_dir(raw_cas_root_dir)
         cas_source = StrmSource((normalized_cas_root, _CAS_EXTS, True))
