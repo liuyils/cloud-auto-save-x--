@@ -157,8 +157,9 @@ def trigger_drive_account_lsdir_targeted_scan(
     return True
 
 
-def rebuild_drive_account_lsdir_cache_for_current_302_path(account_id: int, source: str) -> dict[str, Any]:
+def rebuild_drive_account_lsdir_cache_for_current_302_path(account_id: int, source: str, old_base_path: str | None = None) -> dict[str, Any]:
     account_key = int(account_id)
+    cleared = 0
     with SessionLocal() as db:
         account = db.get(DriveAccount, account_key)
         if account is None:
@@ -170,8 +171,22 @@ def rebuild_drive_account_lsdir_cache_for_current_302_path(account_id: int, sour
                 "reason": "account_not_found",
             }
         base_path = extract_dl302_media_base_path(account)
-        cleared = delete_drive_account_lsdir_cache_by_account(db, account_key)
-        db.commit()
+        
+        # 如果有旧路径且与新路径不同，清理旧路径缓存
+        if old_base_path and old_base_path != base_path:
+            cleared = delete_drive_account_lsdir_cache_subtree_by_path(db, account_id=account_key, full_path=old_base_path)
+            db.commit()
+            logger.info(
+                "drive account lsdir cleared old path account_id=%s source=%s old_path=%s cleared=%s",
+                account_key,
+                source,
+                old_base_path,
+                cleared,
+            )
+        elif not old_base_path and not base_path:
+            # 如果新旧路径都为空，清理全部缓存
+            cleared = delete_drive_account_lsdir_cache_by_account(db, account_key)
+            db.commit()
 
     if not base_path:
         logger.info(

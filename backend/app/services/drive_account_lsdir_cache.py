@@ -317,11 +317,18 @@ def get_drive_account_lsdir_cache_freshness(db: Session, *, account_id: int) -> 
     )
     scanned_at, expires_at, total = latest
     now = _utcnow()
+    
+    is_fresh = bool(expires_at and expires_at > now)
+    
+    # 如果缓存记录太少（少于 10 条），说明可能是初次扫描中断了
+    if 0 < int(total or 0) < 10:
+        is_fresh = False
+    
     return {
         "account_id": int(account_id),
         "scanned_at": scanned_at,
         "expires_at": expires_at,
-        "is_fresh": bool(expires_at and expires_at > now),
+        "is_fresh": is_fresh,
         "total": int(total or 0),
     }
 
@@ -347,12 +354,29 @@ def get_drive_account_lsdir_cache_subtree_freshness(db: Session, *, account_id: 
     )
     scanned_at, expires_at, total = latest
     now = _utcnow()
+    
+    # 检查是否有该路径本身的记录（表示是否开始扫描过）
+    has_root = db.execute(
+        select(func.count(DriveAccountLsdirCache.id)).where(
+            DriveAccountLsdirCache.account_id == int(account_id),
+            DriveAccountLsdirCache.full_path == normalized_path,
+        )
+    ).scalar()
+    
+    # 额外的检查：如果是初次扫描（没有太多缓存或者根本没有根路径记录），或者总记录数很少，不要认为是新鲜的
+    # 这样可以确保即使扫描中断，重启后也会继续扫描
+    is_fresh = bool(expires_at and expires_at > now)
+    
+    # 如果缓存记录太少（比如少于 10 条），或者没有根路径记录，说明可能是初次扫描中断了
+    if (int(total or 0) < 10 and int(total or 0) > 0) or (not has_root and int(total or 0) > 0):
+        is_fresh = False
+    
     return {
         "account_id": int(account_id),
         "full_path": normalized_path,
         "scanned_at": scanned_at,
         "expires_at": expires_at,
-        "is_fresh": bool(expires_at and expires_at > now),
+        "is_fresh": is_fresh,
         "total": int(total or 0),
     }
 

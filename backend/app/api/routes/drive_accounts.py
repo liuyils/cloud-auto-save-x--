@@ -85,17 +85,23 @@ def _drive_account_cache_signature(account: DriveAccount | None) -> dict[str, ob
         "config": config,
         "cookie": AdapterRegistry.serialize_config(account.drive_type, config),
         "base_path": extract_dl302_media_base_path(account),
+        "drive_type": account.drive_type,
     }
 
 
 def _should_rebuild_lsdir_cache(before: dict[str, object] | None, after: dict[str, object] | None) -> bool:
     if before is None or after is None:
         return True
-    return before.get("config") != after.get("config") or before.get("cookie") != after.get("cookie")
+    return (
+        before.get("config") != after.get("config")
+        or before.get("cookie") != after.get("cookie")
+        or before.get("base_path") != after.get("base_path")
+        or before.get("drive_type") != after.get("drive_type")
+    )
 
 
-def _request_lsdir_cache_rebuild(account_id: int, *, source: str) -> None:
-    result = rebuild_drive_account_lsdir_cache_for_current_302_path(int(account_id), source=source)
+def _request_lsdir_cache_rebuild(account_id: int, *, source: str, old_base_path: str | None = None) -> None:
+    result = rebuild_drive_account_lsdir_cache_for_current_302_path(int(account_id), source=source, old_base_path=old_base_path)
     logger.info(
         "drive account lsdir rebuild result account_id=%s source=%s cleared=%s queued=%s base_path=%s reason=%s",
         account_id,
@@ -178,7 +184,9 @@ def post_account(request: Request, payload: DriveAccountCreateIn, current: Curre
 
 @router.patch('/{account_id}', response_model=DriveAccountOut, dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_WRITE))])
 def patch_account(request: Request, account_id: int, payload: DriveAccountUpdateIn, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    before_signature = _drive_account_cache_signature(get_drive_account(db, account_id))
+    before_account = get_drive_account(db, account_id)
+    before_signature = _drive_account_cache_signature(before_account)
+    old_base_path = before_signature.get("base_path") if before_signature else None
     account = update_drive_account(db, account_id, **payload.model_dump(exclude_unset=True))
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.update', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
@@ -186,7 +194,7 @@ def patch_account(request: Request, account_id: int, payload: DriveAccountUpdate
     _reload_dl302_if_needed(account.drive_type)
     after_signature = _drive_account_cache_signature(account)
     if _should_rebuild_lsdir_cache(before_signature, after_signature):
-        _request_lsdir_cache_rebuild(account_id, source="api.drive_accounts.update")
+        _request_lsdir_cache_rebuild(account_id, source="api.drive_accounts.update", old_base_path=old_base_path)
     return _out(account, db=db)
 
 
