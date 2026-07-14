@@ -127,7 +127,7 @@ class Pan123Adapter(BaseCloudDriveAdapter):
             "placeholder": "",
         },
     ]
-    DEFAULT_BASE_URL = "https://api.123pan.com"
+    DEFAULT_BASE_URL = "https://www.123pan.cn"
 
     WEB_APP_VERSION = "3"
     WEB_USER_AGENT = (
