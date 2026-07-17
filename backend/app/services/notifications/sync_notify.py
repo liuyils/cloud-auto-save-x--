@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable
+import json
+from typing import Any, Iterable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -70,6 +71,55 @@ def _build_ascii_tree(paths: Iterable[str]) -> str:
 
     walk(root, "")
     return "\n".join(lines)
+
+
+def _load_execution_stats(execution: SyncExecution) -> dict[str, Any]:
+    raw = getattr(execution, "stats_json", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _build_sync_success_summary(task: SyncTask, execution: SyncExecution) -> tuple[str, bool]:
+    stats = _load_execution_stats(execution)
+    copied_files = int(stats.get("copied_files", 0) or 0)
+    deleted_files = int(stats.get("deleted_files", 0) or 0)
+    skipped_files = int(stats.get("skipped_files", 0) or 0)
+    failed_files = int(stats.get("failed_files", 0) or 0)
+    total_files = int(stats.get("total_files", 0) or 0)
+    done_files = int(stats.get("done_files", 0) or 0)
+    done_bytes = int(stats.get("done_bytes", 0) or 0)
+    total_bytes = int(stats.get("total_bytes", 0) or 0)
+    if copied_files <= 0 and deleted_files <= 0:
+        return "", False
+
+    name = str(getattr(task, "name", "") or "")
+    mode = str(getattr(task, "mode", "") or "one_way")
+    source = f"{getattr(task, 'source_type', '')}:{getattr(task, 'source_path', '')}"
+    target = f"{getattr(task, 'target_type', '')}:{getattr(task, 'target_path', '')}"
+
+    parts: list[str] = [
+        f"✅同步《{name}》完成",
+        f"模式: {mode}",
+        f"源: {source}",
+        f"目标: {target}",
+        f"新增/更新: {copied_files}",
+    ]
+    if deleted_files > 0:
+        parts.append(f"删除: {deleted_files}")
+    if skipped_files > 0:
+        parts.append(f"跳过: {skipped_files}")
+    if failed_files > 0:
+        parts.append(f"失败: {failed_files}")
+    if total_files > 0 or done_files > 0:
+        parts.append(f"文件进度: {done_files}/{total_files}")
+    if total_bytes > 0 or done_bytes > 0:
+        parts.append(f"字节进度: {done_bytes}/{total_bytes}")
+    return "\n".join(parts), True
 
 
 def build_sync_execution_section(task: SyncTask, execution: SyncExecution, files: list[SyncExecutionFile]) -> tuple[str, bool]:
@@ -150,6 +200,8 @@ def send_sync_execution_notification(db: Session, task: SyncTask, execution: Syn
             .all()
         )
         content, should = build_sync_execution_section(task, execution, rows)
+        if not should or not content:
+            content, should = _build_sync_success_summary(task, execution)
         if should and content:
             send_runtime(db, SYNC_NOTIFY_TITLE, content)
     except Exception:
