@@ -51,11 +51,11 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
         {
             "key": "strm_scan_path",
             "label": "STRM 扫描路径",
-            "description": "STRM/CAS 使用的扫描根目录（网盘内路径）；为空时默认与缓存路径一致。",
+            "description": "STRM/CAS 使用的扫描根目录（网盘内路径）；支持英文逗号分隔多路径，为空时默认与缓存路径一致。",
             "input_type": "text",
             "required": False,
             "secret": True,
-            "placeholder": "/",
+            "placeholder": "/影视,/动漫",
         }
     ]
     API_URL = "https://webapi.115.com"

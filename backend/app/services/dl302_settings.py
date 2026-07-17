@@ -285,6 +285,22 @@ def _normalize_account_posix_path(value: object) -> str | None:
     return path.rstrip("/") or "/"
 
 
+def _normalize_account_posix_paths(value: object) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw_values = [str(item or "") for item in value]
+    else:
+        raw_values = str(value or "").split(",")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        path = _normalize_account_posix_path(raw)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
 def _load_drive_account_config(account: DriveAccount) -> dict[str, object]:
     payload = str(getattr(account, "config_json", "") or "").strip()
     if not payload:
@@ -305,13 +321,25 @@ def extract_dl302_cache_base_path(account: DriveAccount) -> str | None:
     )
 
 
-def extract_dl302_strm_scan_base_path(account: DriveAccount) -> str | None:
+def extract_dl302_strm_scan_base_paths(account: DriveAccount) -> list[str]:
     data = _load_drive_account_config(account)
-    return _normalize_account_posix_path(
-        data.get(DL302_ACCOUNT_STRM_SCAN_PATH_KEY)
-        or data.get(DL302_ACCOUNT_LSDIR_CACHE_PATH_KEY)
-        or data.get(DL302_ACCOUNT_LEGACY_MEDIA_PATH_KEY)
-    )
+    paths = _normalize_account_posix_paths(data.get(DL302_ACCOUNT_STRM_SCAN_PATH_KEY))
+    if paths:
+        return paths
+    cache_base_path = extract_dl302_cache_base_path(account)
+    if cache_base_path:
+        return [cache_base_path]
+    legacy_path = _normalize_account_posix_path(data.get(DL302_ACCOUNT_LEGACY_MEDIA_PATH_KEY))
+    if legacy_path:
+        return [legacy_path]
+    return []
+
+
+def extract_dl302_strm_scan_base_path(account: DriveAccount) -> str | None:
+    paths = extract_dl302_strm_scan_base_paths(account)
+    if not paths:
+        return None
+    return paths[0]
 
 
 def extract_dl302_sync_base_path(account: DriveAccount) -> str | None:
@@ -320,6 +348,10 @@ def extract_dl302_sync_base_path(account: DriveAccount) -> str | None:
 
 def extract_dl302_cas_base_path(account: DriveAccount) -> str | None:
     return extract_dl302_strm_scan_base_path(account)
+
+
+def extract_dl302_cas_base_paths(account: DriveAccount) -> list[str]:
+    return extract_dl302_strm_scan_base_paths(account)
 
 
 def extract_dl302_media_base_path(account: DriveAccount) -> str | None:
@@ -476,7 +508,8 @@ def list_supported_dl302_drivers(db: Session) -> list[dict[str, object]]:
         account_data = serialize_drive_account(item)
         profile = dict(account_data.get("profile") or {})
         cache_base_path = extract_dl302_cache_base_path(item)
-        strm_scan_base_path = extract_dl302_strm_scan_base_path(item)
+        strm_scan_base_paths = extract_dl302_strm_scan_base_paths(item)
+        strm_scan_base_path = ",".join(strm_scan_base_paths) if strm_scan_base_paths else None
         state["accounts"].append(
             {
                 "account_id": int(account_data.get("id") or 0),

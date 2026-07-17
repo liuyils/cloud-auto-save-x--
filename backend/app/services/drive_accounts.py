@@ -129,6 +129,7 @@ def delete_drive_account(db: Session, account_id: int) -> None:
 
 
 def probe_drive_account(db: Session, account_id: int) -> DriveAccount:
+    _rollback_clean_session_transaction(db)
     with SessionLocal() as rdb:
         snapshot = _load_drive_account_snapshot(rdb, account_id)
     outcome = _probe_drive_account_snapshot(snapshot)
@@ -167,6 +168,16 @@ def sign_in_drive_account(db: Session, account_id: int) -> dict[str, Any]:
             wdb.commit()
         db.expire_all()
     return result
+
+
+def _rollback_clean_session_transaction(db: Session) -> None:
+    try:
+        if db.new or db.dirty or db.deleted:
+            return
+        if db.in_transaction():
+            db.rollback()
+    except Exception:
+        return
 
 
 def supported_drive_types() -> list[dict[str, str]]:

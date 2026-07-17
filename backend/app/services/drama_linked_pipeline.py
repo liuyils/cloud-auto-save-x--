@@ -12,7 +12,8 @@ from app.db.session import SessionLocal
 from app.extensions.runtime.execution_log import ExecutionLog
 from app.models.drive_account import DriveAccount
 from app.models.sync_execution_file import SyncExecutionFile
-from app.services.dl302_cas import _extract_account_media_base_path, submit_dl302_cas_task_delta
+from app.services.dl302_cas import submit_dl302_cas_task_delta
+from app.services.dl302_settings import extract_dl302_cas_base_paths
 from app.services.dl302_strm import rebuild_dl302_strm
 from app.services.drive_account_lsdir_scan import refresh_drive_account_lsdir_paths
 from app.services.sync_task_triggers import run_linked_sync_tasks_blocking
@@ -77,6 +78,21 @@ def _is_within_base(base: str, path: str) -> bool:
     if b == "/":
         return True
     return p == b or p.startswith(b + "/")
+
+
+def _pick_cas_base_path(account: DriveAccount | None, target_path: str) -> str:
+    normalized_target = _norm_abs_path(target_path)
+    if account is None:
+        return normalized_target
+    configured: list[str] = []
+    for raw in extract_dl302_cas_base_paths(account):
+        normalized = _norm_abs_path(raw)
+        if normalized and normalized not in configured:
+            configured.append(normalized)
+    for base_path in configured:
+        if _is_within_base(base_path, normalized_target):
+            return base_path
+    return configured[0] if configured else normalized_target
 
 
 def _is_cas_video_path(path: str) -> bool:
@@ -147,11 +163,7 @@ def _build_linked_stage_context(
         account = accounts_by_id.get(account_id)
         cas_base_path_by_account.setdefault(
             account_id,
-            _norm_abs_path(
-                str(getattr(account, "proxy_base_path", "") or "").strip()
-                or _extract_account_media_base_path(account) if account is not None else ""
-                or base_path
-            ),
+            _pick_cas_base_path(account, base_path),
         )
         changed_dirs = set()
         for rel in item.changed_relative_dirs or []:
@@ -174,11 +186,7 @@ def _build_linked_stage_context(
         account = accounts_by_id.get(account_id)
         cas_base_path_by_account.setdefault(
             account_id,
-            _norm_abs_path(
-                str(getattr(account, "proxy_base_path", "") or "").strip()
-                or _extract_account_media_base_path(account) if account is not None else ""
-                or base_path
-            ),
+            _pick_cas_base_path(account, base_path),
         )
         with SessionLocal() as db:
             rows = (

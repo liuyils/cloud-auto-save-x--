@@ -69,6 +69,7 @@ declare module 'vue' {
     ElTag: typeof import('element-plus/es')['ElTag']
     ElText: typeof import('element-plus/es')['ElText']
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
+    ElTransfer: typeof import('element-plus/es')['ElTransfer']
     ElTree: typeof import('element-plus/es')['ElTree']
     HelloWorld: typeof import('./components/HelloWorld.vue')['default']
     InteractiveLineChart: typeof import('./components/dashboard/InteractiveLineChart.vue')['default']

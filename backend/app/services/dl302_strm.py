@@ -14,7 +14,7 @@ from app.models.drive_account import DriveAccount
 from app.models.drive_account_lsdir_cache import DriveAccountLsdirCache
 from app.services.dl302_settings import (
     DL302_SUPPORTED_DRIVE_TYPES,
-    extract_dl302_strm_scan_base_path,
+    extract_dl302_strm_scan_base_paths,
     get_or_create_dl302_setting,
     load_dl302_config,
     update_dl302_setting,
@@ -142,28 +142,35 @@ def list_strm_source_accounts(db: Session) -> list[DriveAccount]:
     )
 
 
-def extract_account_media_base_path(account: DriveAccount) -> str | None:
-    resolved = extract_dl302_strm_scan_base_path(account)
-    if not resolved:
-        return None
-    return _normalize_posix_dir(resolved)
+def extract_account_media_base_paths(account: DriveAccount) -> list[str]:
+    resolved = extract_dl302_strm_scan_base_paths(account)
+    paths: list[str] = []
+    seen: set[str] = set()
+    for item in resolved:
+        path = _normalize_posix_dir(item)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
 
 
 def list_account_strm_sources(config: dict[str, Any], account: DriveAccount) -> list[StrmSource]:
     sources: list[StrmSource] = []
-    media_base_path = extract_account_media_base_path(account)
-    if not media_base_path:
+    media_base_paths = extract_account_media_base_paths(account)
+    if not media_base_paths:
         return sources
-    normalized_media_base = _normalize_posix_dir(media_base_path)
     include_cas_root = bool(config.get("strm_include_cas_root_dir"))
     raw_cas_root_dir = str(config.get("cas_root_dir") or "").strip()
     source_priority = str(config.get("strm_source_priority") or "video_first").strip().lower()
-    media_video_source = StrmSource((normalized_media_base, _VIDEO_EXTS - _CAS_EXTS, False))
-    media_cas_source = StrmSource((normalized_media_base, _CAS_EXTS, False))
-    if source_priority == "cas_first":
-        sources.extend([media_cas_source, media_video_source])
-    else:
-        sources.extend([media_video_source, media_cas_source])
+    use_full_media_path_for_url = len(media_base_paths) > 1
+    for media_base_path in media_base_paths:
+        media_video_source = StrmSource((media_base_path, _VIDEO_EXTS - _CAS_EXTS, use_full_media_path_for_url))
+        media_cas_source = StrmSource((media_base_path, _CAS_EXTS, use_full_media_path_for_url))
+        if source_priority == "cas_first":
+            sources.extend([media_cas_source, media_video_source])
+        else:
+            sources.extend([media_video_source, media_cas_source])
     if include_cas_root and raw_cas_root_dir:
         normalized_cas_root = _normalize_posix_dir(raw_cas_root_dir)
         cas_source = StrmSource((normalized_cas_root, _CAS_EXTS, True))

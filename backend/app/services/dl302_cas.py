@@ -7,7 +7,7 @@ import grpc
 
 from app.core.errors import ApiError, bad_request, not_found
 from app.models.drive_account import DriveAccount
-from app.services.dl302_settings import extract_dl302_cas_base_path
+from app.services.dl302_settings import extract_dl302_cas_base_path, extract_dl302_cas_base_paths
 
 
 def _normalize_media_base_path(raw: object) -> str | None:
@@ -25,6 +25,33 @@ def _normalize_media_base_path(raw: object) -> str | None:
 
 def _extract_account_media_base_path(account: DriveAccount) -> str | None:
     return _normalize_media_base_path(extract_dl302_cas_base_path(account))
+
+
+def _extract_account_media_base_paths(account: DriveAccount) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for raw in extract_dl302_cas_base_paths(account):
+        path = _normalize_media_base_path(raw)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
+def _is_within_any_base(path: str, base_paths: list[str]) -> bool:
+    if not base_paths:
+        return False
+    normalized_path = _normalize_media_base_path(path)
+    if not normalized_path:
+        return False
+    for base_path in base_paths:
+        normalized_base = _normalize_media_base_path(base_path)
+        if not normalized_base:
+            continue
+        if normalized_base == "/" or normalized_path == normalized_base or normalized_path.startswith(normalized_base + "/"):
+            return True
+    return False
 
 
 def _wrap_dl302_rpc_error(exc: Exception, *, action: str) -> ApiError:
@@ -100,8 +127,8 @@ def _resolve_account(
     drive_type = str(getattr(account, "drive_type", "") or "").strip()
     if drive_type not in {"115", "cloud139", "cloud189", "quark", "uc"}:
         raise bad_request("DL302_CAS_DRIVE_UNSUPPORTED", "当前账号类型不支持 dl302 CAS 生成")
-    media_base_path = _extract_account_media_base_path(account)
-    if require_media_base_path and not media_base_path:
+    media_base_paths = _extract_account_media_base_paths(account)
+    if require_media_base_path and not media_base_paths:
         raise bad_request("DL302_CAS_302_PATH_REQUIRED", "当前账号未配置 STRM 扫描路径")
     if require_enabled and not bool(getattr(account, "enabled", False)):
         raise bad_request("DL302_CAS_ACCOUNT_DISABLED", "当前账号未启用")
@@ -144,14 +171,13 @@ def submit_dl302_cas_task_delta(
         raise bad_request("DL302_CAS_ROOT_DIR_REQUIRED", "请先配置 CAS 文件生成目录")
 
     account = _resolve_account(account_id, db, require_media_base_path=True, require_enabled=True)
-    media_base_path = _extract_account_media_base_path(account) or "/"
-    effective_base_path = _normalize_media_base_path(base_path) or media_base_path
-    if media_base_path != "/" and not (
-        effective_base_path == media_base_path or effective_base_path.startswith(media_base_path + "/")
-    ):
+    media_base_paths = _extract_account_media_base_paths(account)
+    effective_base_path = _normalize_media_base_path(base_path) or (media_base_paths[0] if media_base_paths else "/")
+    base_scope = ",".join(media_base_paths) if media_base_paths else "/"
+    if not _is_within_any_base(effective_base_path, media_base_paths or ["/"]):
         raise bad_request(
             "DL302_CAS_BASE_PATH_OUTSIDE_302_PATH",
-            f"CAS base_path 不在账号 STRM 扫描路径范围内: base_path={effective_base_path} strm_scan_path={media_base_path}",
+            f"CAS base_path 不在账号 STRM 扫描路径范围内: base_path={effective_base_path} strm_scan_path={base_scope}",
         )
     input_dir_count = len([x for x in (dir_paths or []) if str(x or "").strip()])
     input_file_count = len([x for x in (file_paths or []) if str(x or "").strip()])
@@ -164,7 +190,7 @@ def submit_dl302_cas_task_delta(
                 continue
             if not text.startswith("/"):
                 text = "/" + text.lstrip("/")
-            if effective_base_path != "/" and text != effective_base_path and not text.startswith(effective_base_path + "/"):
+            if not _is_within_any_base(text, [effective_base_path]):
                 continue
             out.append(text)
         return out
@@ -175,7 +201,7 @@ def submit_dl302_cas_task_delta(
     if (input_dir_count > 0 or input_file_count > 0) and not filtered_dirs and not filtered_files:
         raise bad_request(
             "DL302_CAS_DELTA_OUTSIDE_302_PATH",
-            f"增量路径不在账号 STRM 扫描路径范围内: strm_scan_path={media_base_path}",
+            f"增量路径不在账号 STRM 扫描路径范围内: strm_scan_path={base_scope}",
         )
 
     if len(filtered_files) > 5000:
