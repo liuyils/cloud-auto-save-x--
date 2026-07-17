@@ -3,8 +3,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
+from pathlib import Path
 
 from sqlalchemy import select
+
+if __package__ in {None, ""}:
+    # Support direct execution like: python app/scripts/ensure_admin.py
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.core.logging import setup_logging
 from app.core.permission_seed import PERMISSIONS_SEED
