@@ -743,6 +743,16 @@ a {
   }
 }
 
+@supports (-webkit-touch-callout: none) {
+  input,
+  textarea,
+  select,
+  .el-input__inner,
+  .el-textarea__inner {
+    font-size: 16px !important;
+  }
+}
+
 @media (max-width: 1200px) {
   .metric-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));

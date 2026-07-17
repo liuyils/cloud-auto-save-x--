@@ -23,16 +23,36 @@ from app.services.dl302_settings import (
 logger = logging.getLogger(__name__)
 
 _VIDEO_EXTS = {
+    ".3g2",
+    ".3gp",
+    ".asf",
     ".mp4",
     ".mkv",
     ".avi",
-    ".ts",
-    ".m2ts",
-    ".mov",
-    ".wmv",
+    ".divx",
+    ".f4v",
     ".flv",
-    ".webm",
     ".m4v",
+    ".m2t",
+    ".m2ts",
+    ".mk3d",
+    ".mov",
+    ".mp2ts",
+    ".mpeg",
+    ".mpg",
+    ".mts",
+    ".ogm",
+    ".ogv",
+    ".qt",
+    ".rm",
+    ".rmvb",
+    ".tp",
+    ".trp",
+    ".ts",
+    ".vob",
+    ".webm",
+    ".wmv",
+    ".xvid",
 }
 _CAS_EXTS = {".cas"}
 
@@ -192,10 +212,13 @@ def build_auto_strm_tree(
                 full_path = _normalize_relative_media_path(str(row.full_path))
                 relative_path = _to_relative_media_path(full_path, source.scan_base_path)
                 output_relative_path = _normalize_strm_output_relative_path(relative_path)
-                if not relative_path or not output_relative_path or output_relative_path in tree:
+                if not relative_path or not output_relative_path:
+                    continue
+                output_key = _media_path_to_strm_relative_path(output_relative_path)
+                if output_key in tree:
                     continue
                 url_path = full_path if source.use_full_path_for_url else relative_path
-                tree[output_relative_path] = render_auto_strm_url(prefix_url, url_path)
+                tree[output_key] = render_auto_strm_url(prefix_url, url_path)
     return tree, skipped_accounts
 
 
@@ -224,7 +247,7 @@ def build_independent_strm_tree(
                 output_relative_path = _normalize_strm_output_relative_path(relative_path)
                 if not relative_path or not output_relative_path:
                     continue
-                output_key = _join_relative_output(account_dir, output_relative_path)
+                output_key = _join_relative_output(account_dir, _media_path_to_strm_relative_path(output_relative_path))
                 url_path = full_path if source.use_full_path_for_url else relative_path
                 tree[output_key] = render_account_strm_url(prefix_url, str(account.drive_type), str(account.name), url_path)
     return tree, skipped_accounts
@@ -350,8 +373,7 @@ def _write_strm_files(*, root_dir: str, mode: str, tree: dict[str, str]) -> dict
 
     generated_dirs: set[str] = set()
     current_manifest: list[str] = []
-    for relative_media_path, url in tree.items():
-        relative_strm_path = _media_path_to_strm_relative_path(relative_media_path)
+    for relative_strm_path, url in tree.items():
         target = root / Path(relative_strm_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(str(url), encoding="utf-8")
@@ -466,9 +488,8 @@ def _media_path_to_strm_relative_path(relative_media_path: str) -> str:
         return "index.strm"
     posix_path = PurePosixPath(normalized)
     parent = posix_path.parent
-    stem = posix_path.stem
-    if posix_path.suffix.lower() == ".cas":
-        stem = PurePosixPath(stem).stem or stem
+    suffix = posix_path.suffix.lower()
+    stem = posix_path.stem if suffix in _VIDEO_EXTS else posix_path.name
     filename = f"{stem}.strm"
     if str(parent) in {"", "."}:
         return filename

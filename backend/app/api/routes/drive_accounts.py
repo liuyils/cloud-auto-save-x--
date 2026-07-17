@@ -304,6 +304,7 @@ def post_account_probe(request: Request, account_id: int, current: CurrentUser =
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.probe', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _reload_dl302_if_needed(account.drive_type)
     _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.probe")
     return _out(account, db=db)
 
@@ -393,6 +394,7 @@ def post_account_auth_qrcode_poll(request: Request, session_id: str, current: Cu
             audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_confirm', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
             db.commit()
             db.refresh(account)
+            _reload_dl302_if_needed(account.drive_type)
             _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_qrcode_confirm")
             return _out(account, db=db)
         session.payload.update({"status": str(data.get("status") or ""), "message": str(data.get("message") or "")})
@@ -431,6 +433,7 @@ def post_account_auth_qrcode_poll(request: Request, session_id: str, current: Cu
             update_drive_account(db, account.id, config=config)
             db.commit()
             db.refresh(account)
+            _reload_dl302_if_needed(account.drive_type)
             audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_confirm', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True, detail="tv_credentials_saved")
             db.commit()
             _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_qrcode_confirm_tv")
@@ -498,6 +501,7 @@ def post_account_auth_captcha_submit(request: Request, session_id: str, payload:
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_captcha', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _reload_dl302_if_needed(account.drive_type)
     _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_captcha")
     return _out(account, db=db)
 
@@ -561,6 +565,7 @@ def post_account_auth_sms_submit(request: Request, session_id: str, payload: Dri
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_sms_submit', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
+    _reload_dl302_if_needed(account.drive_type)
     _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_sms_submit")
     return _out(account, db=db)
 
