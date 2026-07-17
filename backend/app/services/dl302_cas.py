@@ -96,7 +96,7 @@ def _resolve_account(
     return account
 
 
-def submit_dl302_cas_task(account_id: int, db) -> dict[str, object]:
+def submit_dl302_cas_task(account_id: int, db, *, fast_compute: bool = False) -> dict[str, object]:
     from app.thirdparty.dl302_grpc_client import submit_cas_task
     from app.services.dl302_settings import get_or_create_dl302_setting, load_dl302_config
 
@@ -107,6 +107,7 @@ def submit_dl302_cas_task(account_id: int, db) -> dict[str, object]:
     resp = submit_cas_task(
         drive_type=str(getattr(account, "drive_type", "") or ""),
         account=str(getattr(account, "name", "") or ""),
+        fast_compute=bool(fast_compute),
     )
     return _task_to_dict(getattr(resp, "task", None))
 
@@ -118,6 +119,7 @@ def submit_dl302_cas_task_delta(
     base_path: str | None = None,
     dir_paths: list[str] | None,
     file_paths: list[str] | None,
+    fast_compute: bool = False,
 ) -> dict[str, object]:
     from app.thirdparty.dl302_grpc_client import submit_cas_task_delta
     from app.services.dl302_settings import get_or_create_dl302_setting, load_dl302_config
@@ -170,6 +172,7 @@ def submit_dl302_cas_task_delta(
         base_path=effective_base_path,
         dir_paths=filtered_dirs,
         file_paths=filtered_files,
+        fast_compute=bool(fast_compute),
     )
     return _task_to_dict(getattr(resp, "task", None))
 

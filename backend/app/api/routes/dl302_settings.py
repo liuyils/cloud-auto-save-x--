@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, get_current_user, require_permissions
@@ -12,6 +12,7 @@ from app.schemas.dl302_settings import (
     DL302CASTaskItemOut,
     DL302CASTaskListOut,
     DL302CASTaskOut,
+    DL302CasGenerateIn,
     DL302CasGenerateOut,
     DL302ConfigOut,
     DL302ConfigUpdateIn,
@@ -152,10 +153,11 @@ def post_dl302_strm_generate(
 def post_dl302_cas_task(
     request: Request,
     account_id: int,
+    payload: DL302CasGenerateIn = Body(default=DL302CasGenerateIn()),
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DL302CasGenerateOut:
-    task = submit_dl302_cas_task(int(account_id), db)
+    task = submit_dl302_cas_task(int(account_id), db, fast_compute=bool(payload.fast_compute))
     audit.write_audit_log(
         db,
         actor_user_id=current.user.id,

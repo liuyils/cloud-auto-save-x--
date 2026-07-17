@@ -127,7 +127,11 @@ class DL302StrmGenerateOut(BaseModel):
     message: str = ""
 
 
+class DL302CasGenerateIn(BaseModel):
+    fast_compute: bool = Field(default=False)
+
+
+
 class DL302CasGenerateOut(BaseModel):
     ok: bool = True
     task: DL302CASTaskOut
-    message: str = ""

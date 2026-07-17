@@ -78,10 +78,11 @@ def reload_dl302(*, timeout_seconds: float = 2.0) -> Tuple[bool, str]:
         return False, str(e)
 
 
-def submit_cas_task(*, drive_type: str, account: str, timeout_seconds: float = 20.0):
+def submit_cas_task(*, drive_type: str, account: str, fast_compute: bool = False, timeout_seconds: float = 20.0):
     request = dl302_pb2.SubmitCASTaskRequest(
         drive_type=str(drive_type or ""),
         account=str(account or ""),
+        fast_compute=bool(fast_compute),
     )
     return _call_dl302_rpc("SubmitCASTask", request, timeout_seconds=timeout_seconds, fallback="submit cas task failed", retries=1)
 
@@ -93,6 +94,7 @@ def submit_cas_task_delta(
     base_path: str = "",
     dir_paths: list[str] | None,
     file_paths: list[str] | None,
+    fast_compute: bool = False,
     timeout_seconds: float = 30.0,
 ):
     request = dl302_pb2.SubmitCASTaskDeltaRequest(
@@ -101,6 +103,7 @@ def submit_cas_task_delta(
         base_path=str(base_path or ""),
         dir_paths=[str(item or "") for item in (dir_paths or []) if str(item or "").strip()],
         file_paths=[str(item or "") for item in (file_paths or []) if str(item or "").strip()],
+        fast_compute=bool(fast_compute),
     )
     return _call_dl302_rpc("SubmitCASTaskDelta", request, timeout_seconds=timeout_seconds, fallback="submit cas task delta failed", retries=1)
 

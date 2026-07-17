@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
   cancelDL302CasTask,
@@ -156,8 +156,19 @@ const filteredDialogTaskItems = computed(() => {
   })
 })
 
+const dialogPageCount = computed(() => {
+  const total = filteredDialogTaskItems.value.length
+  const size = Math.max(1, Number(casDialog.pageSize || 10))
+  return Math.max(1, Math.ceil(total / size))
+})
+
+const dialogCurrentPage = computed(() => {
+  const page = Math.max(1, Number(casDialog.page || 1))
+  return Math.min(page, dialogPageCount.value)
+})
+
 const pagedDialogTaskItems = computed(() => {
-  const start = (casDialog.page - 1) * casDialog.pageSize
+  const start = (dialogCurrentPage.value - 1) * casDialog.pageSize
   return filteredDialogTaskItems.value.slice(start, start + casDialog.pageSize)
 })
 
@@ -315,6 +326,7 @@ async function loadTaskItems(taskId: string, options: { silent?: boolean } = {})
 
 async function selectTask(accountId: number, taskId: string) {
   casSelectedTaskId[accountId] = taskId
+  casDialog.page = 1
   await loadTaskItems(taskId)
 }
 
@@ -420,9 +432,27 @@ function stopCasPoller() {
 
 async function handleGenerateCas(account: DL302SupportedAccount) {
   if (!canWrite.value || !account.has_302_path) return
+  let fastCompute = false
+  if (account.drive_type === 'cloud139') {
+    try {
+      await ElMessageBox.confirm(
+        '启用后会优先通过云端目录列表返回的 SHA256(contentHash) 生成 CAS，能显著减少下载+本地哈希；拿不到 hash 时会自动回退原流程。',
+        '使用快速计算能力？',
+        {
+          confirmButtonText: '使用快速计算',
+          cancelButtonText: '按原方式',
+          type: 'warning',
+          distinguishCancelAndClose: true,
+        },
+      )
+      fastCompute = true
+    } catch {
+      fastCompute = false
+    }
+  }
   casSubmitting[account.account_id] = true
   try {
-    const result = await submitDL302CasTask(account.account_id)
+    const result = await submitDL302CasTask(account.account_id, { fast_compute: fastCompute })
     updateAccountTask(account.account_id, result.task)
     if (isDialogAccount(account.account_id)) {
       await loadAccountTasks(account.account_id)
@@ -479,9 +509,11 @@ async function handleCancelCas(account: DL302SupportedAccount) {
 }
 
 watch(
-  () => [casDialog.search, casDialog.status, selectedDialogTask.value?.task_id],
+  () => [filteredDialogTaskItems.value.length, casDialog.pageSize],
   () => {
-    casDialog.page = 1
+    if (casDialog.page > dialogPageCount.value) {
+      casDialog.page = dialogPageCount.value
+    }
   },
 )
 
@@ -1010,7 +1042,7 @@ onUnmounted(stopCasPoller)
           </div>
           <div v-if="filteredDialogTaskItems.length > 0" class="pagination-bar">
             <el-pagination
-              :current-page="casDialog.page"
+              :current-page="dialogCurrentPage"
               :page-size="casDialog.pageSize"
               :page-sizes="[10, 20, 50, 100]"
               :total="filteredDialogTaskItems.length"

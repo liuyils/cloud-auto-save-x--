@@ -34,8 +34,8 @@ export async function generateDL302Strm(payload?: { mode?: 'auto' | 'independent
   return data
 }
 
-export async function submitDL302CasTask(accountId: number) {
-  const { data } = await http.post<DL302CasGenerateResult>(`/dl302/cas/accounts/${accountId}/tasks`)
+export async function submitDL302CasTask(accountId: number, payload?: { fast_compute?: boolean }) {
+  const { data } = await http.post<DL302CasGenerateResult>(`/dl302/cas/accounts/${accountId}/tasks`, payload || {})
   return data
 }
 
