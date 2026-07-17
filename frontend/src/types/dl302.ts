@@ -46,6 +46,8 @@ export type DL302SupportedAccount = {
   username?: string | null
   has_302_path: boolean
   media_base_path?: string | null
+  cache_base_path?: string | null
+  strm_scan_base_path?: string | null
   cas_task?: DL302CASTask | null
 }
 
@@ -71,6 +73,7 @@ export type DL302Config = {
   strm_prefix_url?: string | null
   strm_include_cas_root_dir: boolean
   strm_source_priority: 'video_first' | 'cas_first'
+  cas_workers: number
   strm_summary: {
     enabled: boolean
     mode: 'auto' | 'independent'

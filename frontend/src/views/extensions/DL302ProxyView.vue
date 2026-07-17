@@ -50,6 +50,7 @@ const settings = reactive({
   intranet_cidrs_text: '',
   auto_balance: false,
   cas_root_dir: '',
+  cas_workers: 4,
   strm_enabled: false,
   strm_mode: 'auto' as 'auto' | 'independent',
   strm_root_dir: '/strm',
@@ -78,6 +79,7 @@ function applyConfig(data: DL302Config) {
   settings.intranet_cidrs_text = Array.isArray(data.intranet_cidrs) ? data.intranet_cidrs.filter(Boolean).join('\n') : ''
   settings.auto_balance = Boolean(data.auto_balance)
   settings.cas_root_dir = String(data.cas_root_dir || '')
+  settings.cas_workers = Number.isFinite(Number(data.cas_workers)) && Number(data.cas_workers) > 0 ? Number(data.cas_workers) : 4
   settings.strm_enabled = Boolean(data.strm_enabled)
   settings.strm_mode = data.strm_mode === 'independent' ? 'independent' : 'auto'
   settings.strm_root_dir = String(data.strm_root_dir || '/strm')
@@ -195,7 +197,16 @@ function casStatusLabel(account: DL302SupportedAccount) {
   return casStatusText(currentTask(account)?.status || '')
 }
 
+function accountCasBasePath(account: DL302SupportedAccount) {
+  return String(account.strm_scan_base_path || account.media_base_path || '').trim()
+}
+
+function canGenerateCas(account: DL302SupportedAccount) {
+  return Boolean(accountCasBasePath(account))
+}
+
 function buildCasSummary(account: DL302SupportedAccount) {
+  if (!canGenerateCas(account)) return '未配置 STRM 扫描路径。'
   const task = currentTask(account)
   if (!task) return '尚未创建 CAS 任务。'
   const processed = taskProcessedItems(task)
@@ -431,7 +442,7 @@ function stopCasPoller() {
 }
 
 async function handleGenerateCas(account: DL302SupportedAccount) {
-  if (!canWrite.value || !account.has_302_path) return
+  if (!canWrite.value || !canGenerateCas(account)) return
   let fastCompute = false
   if (account.drive_type === 'cloud139') {
     try {
@@ -590,6 +601,7 @@ async function saveCasSettings() {
   try {
     const data = await patchDL302Config({
       cas_root_dir: settings.cas_root_dir ? String(settings.cas_root_dir).trim() : null,
+      cas_workers: Number(settings.cas_workers) > 0 ? Number(settings.cas_workers) : 4,
     })
     applyConfig(data)
     ElMessage.success('CAS 设置已保存')
@@ -643,7 +655,7 @@ onUnmounted(stopCasPoller)
       <el-tabs v-model="activeTab">
         <el-tab-pane label="CAS管理" name="drivers">
           <div class="tab-copy">
-            展示当前 dl302 支持的账号驱动及其账号卡片。`生成CAS数据` 会复用账号配置中的 `302_path` 作为扫描目录，仅处理目录缓存里缺少 rapid record
+            展示当前 dl302 支持的账号驱动及其账号卡片。`生成CAS数据` 会复用账号配置中的 `STRM 扫描路径` 作为扫描目录，仅处理目录缓存里缺少 rapid record
             的视频文件；生成好秒传数据后，会按目录树在本地临时目录生成 `.cas` 文件，并上传到当前账号对应网盘的 `CAS 文件生成目录（网盘目录）`。<br>
             302 直连需要保留端口：5115/9000。5115 为统一代理端口，9000 为独立端口；不建议将 5115 直接暴露到公网，推荐使用反代服务代理 `/dl`。
           </div>
@@ -653,7 +665,13 @@ onUnmounted(stopCasPoller)
                 <div class="form-field">
                   <el-input v-model="settings.cas_root_dir" placeholder="/cas" :disabled="!canWrite" />
                   <div class="form-field-hint">CAS 文件上传到网盘的统一目录；所有支持驱动共用这一目标路径。</div>
-                  <div class="form-field-hint">生成时会按账号 `302_path` 的相对目录树，上传 `<原文件名>.cas` 到该目录下。</div>
+                  <div class="form-field-hint">生成时会按账号 `STRM 扫描路径` 的相对目录树，上传 `<原文件名>.cas` 到该目录下。</div>
+                </div>
+              </el-form-item>
+              <el-form-item label="CAS 并发 Worker">
+                <div class="form-field">
+                  <el-input-number v-model="settings.cas_workers" :min="1" :max="32" :step="1" :disabled="!canWrite" />
+                  <div class="form-field-hint">控制 CAS 生成任务的并发 worker 数量，与复制任务独立；默认 4。</div>
                 </div>
               </el-form-item>
               <el-form-item>
@@ -699,14 +717,14 @@ onUnmounted(stopCasPoller)
                   </div>
                   <div class="driver-account-card__body">
                     <div class="driver-account-card__path">
-                      <span class="driver-account-card__label">302_path</span>
-                      <code>{{ account.media_base_path || '未配置' }}</code>
+                      <span class="driver-account-card__label">STRM 扫描路径</span>
+                      <code>{{ accountCasBasePath(account) || '未配置' }}</code>
                     </div>
                     <div class="driver-account-card__summary">{{ buildCasSummary(account) }}</div>
                   </div>
                   <div class="driver-account-card__actions">
                     <el-button
-                      v-if="account.has_302_path"
+                      v-if="canGenerateCas(account)"
                       type="primary"
                       :loading="Boolean(casSubmitting[account.account_id])"
                       :disabled="!canWrite"
@@ -742,7 +760,7 @@ onUnmounted(stopCasPoller)
                       停止
                     </el-button>
                     <el-button
-                      v-if="account.has_302_path"
+                      v-if="canGenerateCas(account)"
                       link
                       type="primary"
                       :disabled="Boolean(casTaskLoading[account.account_id])"
@@ -750,9 +768,9 @@ onUnmounted(stopCasPoller)
                     >
                       管理任务
                     </el-button>
-                    <el-tag v-else type="info" effect="plain" round>未配置 302_path</el-tag>
+                    <el-tag v-else type="info" effect="plain" round>未配置 STRM 扫描路径</el-tag>
                   </div>
-                  <div v-if="account.has_302_path && currentTask(account)" class="cas-task-overview">
+                  <div v-if="canGenerateCas(account) && currentTask(account)" class="cas-task-overview">
                     <el-progress :percentage="taskPercent(currentTask(account))" :stroke-width="8" />
                     <div class="cas-task-overview__meta">
                       <span>任务进度：{{ taskProgressText(currentTask(account)) }}</span>
@@ -857,7 +875,7 @@ onUnmounted(stopCasPoller)
                 <div class="form-field">
                   <el-switch v-model="settings.strm_enabled" :disabled="!canWrite" />
                   <div class="form-field-hint">
-                    开启后会在驱动目录扫描/缓存巡检完成时自动对账生成。默认复用各账号驱动配置里的 `302代理基础路径`。
+                    开启后会在驱动目录扫描/缓存巡检完成时自动对账生成。默认复用各账号驱动配置里的 `STRM 扫描路径`；为空时回退到 `缓存路径`。
                   </div>
                   <div class="form-field-hint">
                     可参与账号：{{ strmSummary.path_ready_account_count }} / {{ strmSummary.source_account_count }}，缺少源路径账号：{{
@@ -870,7 +888,7 @@ onUnmounted(stopCasPoller)
                 <div class="form-field">
                   <el-switch v-model="settings.strm_include_cas_root_dir" :disabled="!canWrite" />
                   <div class="form-field-hint">
-                    开启后，仅对“已配置 `302_path`”的账号，额外扫描 `CAS 文件生成目录`，为其中 `.cas` 文件补充生成 STRM。
+                    开启后，仅对“已配置 `STRM 扫描路径`”的账号，额外扫描 `CAS 文件生成目录`，为其中 `.cas` 文件补充生成 STRM。
                   </div>
                 </div>
               </el-form-item>
@@ -881,7 +899,7 @@ onUnmounted(stopCasPoller)
                     <el-radio value="cas_first">CAS 优先</el-radio>
                   </el-radio-group>
                   <div class="form-field-hint">
-                    当 `302_path` 下的视频与 `CAS 文件生成目录` 下的 `.cas` 生成出同名 `.strm` 时，按这里的优先级决定最终写入哪个链接。
+                    当 `STRM 扫描路径` 下的视频与 `CAS 文件生成目录` 下的 `.cas` 生成出同名 `.strm` 时，按这里的优先级决定最终写入哪个链接。
                   </div>
                 </div>
               </el-form-item>

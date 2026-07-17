@@ -128,7 +128,7 @@ function submit() {
         </el-form-item>
         <div class="drawer-form__switch-row">
           <el-switch v-model="state.enabled" active-text="启用账号" inactive-text="禁用账号" />
-          <el-switch v-model="state.is_default" active-text="设为默认账号" inactive-text="普通账号" />
+          <el-switch v-model="state.is_default" active-text="设为该驱动默认账号" inactive-text="普通账号" />
         </div>
       </div>
 

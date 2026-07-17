@@ -83,7 +83,7 @@ def _sync_endpoint_lines(title: str, endpoint: dict[str, Any]) -> list[str]:
         lines.append(f"   账号: {account_name}")
     base_path = str(endpoint.get("base_path") or "").strip()
     if base_path:
-        lines.append(f"   302_path: {_short_text(base_path, 84)}")
+        lines.append(f"   缓存路径: {_short_text(base_path, 84)}")
     lines.append(f"   {_short_text(endpoint.get('path') or '-', 88)}")
     return lines
 

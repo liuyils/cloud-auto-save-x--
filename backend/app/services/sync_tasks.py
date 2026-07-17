@@ -16,7 +16,7 @@ from app.models.sync_execution import SyncExecution
 from app.models.sync_execution_file import SyncExecutionFile
 from app.models.sync_task import SyncTask
 from app.models.sync_task_drama_link import SyncTaskDramaLink
-from app.services.dl302_settings import extract_dl302_media_base_path
+from app.services.dl302_settings import extract_dl302_sync_base_path
 
 
 DL302_SYNC_DRIVE_TYPES = {"115", "cloud139", "cloud189", "quark", "uc"}
@@ -72,20 +72,20 @@ def validate_netdisk_sync_account(db: Session, account_id: Any) -> DriveAccount:
 
 
 def get_netdisk_sync_base_path(account: DriveAccount) -> str:
-    base_path = extract_dl302_media_base_path(account)
+    base_path = extract_dl302_sync_base_path(account)
     if not base_path:
-        raise bad_request("SYNC_NETDISK_302_PATH_REQUIRED", "网盘账号未配置 302_path")
-    return _normalize_posix_abs_path(base_path, error_code="SYNC_NETDISK_302_PATH_REQUIRED", error_message="网盘账号未配置 302_path")
+        raise bad_request("SYNC_NETDISK_302_PATH_REQUIRED", "网盘账号未配置缓存路径")
+    return _normalize_posix_abs_path(base_path, error_code="SYNC_NETDISK_302_PATH_REQUIRED", error_message="网盘账号未配置缓存路径")
 
 
 def is_path_within_base(path: str, base_path: str) -> bool:
     normalized_path = _normalize_posix_abs_path(path, error_code="SYNC_NETDISK_PATH_INVALID", error_message="网盘路径不能为空")
-    normalized_base = _normalize_posix_abs_path(base_path, error_code="SYNC_NETDISK_302_PATH_REQUIRED", error_message="网盘账号未配置 302_path")
+    normalized_base = _normalize_posix_abs_path(base_path, error_code="SYNC_NETDISK_302_PATH_REQUIRED", error_message="网盘账号未配置缓存路径")
     return normalized_path == normalized_base or normalized_path.startswith(f"{normalized_base.rstrip('/')}/")
 
 
 def coerce_netdisk_path_to_base(path: str, base_path: str) -> str:
-    normalized_base = _normalize_posix_abs_path(base_path, error_code="SYNC_NETDISK_302_PATH_REQUIRED", error_message="网盘账号未配置 302_path")
+    normalized_base = _normalize_posix_abs_path(base_path, error_code="SYNC_NETDISK_302_PATH_REQUIRED", error_message="网盘账号未配置缓存路径")
     text = str(path or "").strip()
     if not text:
         return normalized_base
@@ -113,7 +113,7 @@ def _validate_endpoint(db: Session, tp: str, path: str, account_id: Any = None) 
     netdisk_path = _normalize_posix_abs_path(path, error_code="SYNC_NETDISK_PATH_INVALID", error_message="网盘路径不能为空")
     base_path = get_netdisk_sync_base_path(account)
     if not is_path_within_base(netdisk_path, base_path):
-        raise bad_request("SYNC_NETDISK_PATH_OUT_OF_302_SCOPE", "网盘路径必须位于 302_path 下")
+        raise bad_request("SYNC_NETDISK_PATH_OUT_OF_302_SCOPE", "网盘路径必须位于缓存路径下")
     return tp, netdisk_path, int(account.id)
 
 

@@ -601,12 +601,16 @@ def run_drive_account_lsdir_cache_refresh() -> None:
             meta = AdapterRegistry.get_drive_type_meta(str(getattr(account, "drive_type", "") or ""))
             default_config = meta.get("default_config") or {}
             fields = meta.get("config_fields") or []
-            supports_302_path = bool("302_path" in default_config) or any(str(item.get("key") or "") == "302_path" for item in fields if isinstance(item, dict))
-            if not supports_302_path:
+            supports_cache_path = (
+                bool("lsdir_cache_path" in default_config)
+                or bool("302_path" in default_config)
+                or any(str(item.get("key") or "") in {"lsdir_cache_path", "302_path"} for item in fields if isinstance(item, dict))
+            )
+            if not supports_cache_path:
                 unsupported += 1
                 continue
             runtime_config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
-            raw_path = str(runtime_config.get("302_path") or "").strip()
+            raw_path = str(runtime_config.get("lsdir_cache_path") or runtime_config.get("302_path") or "").strip()
             if not raw_path:
                 missing_path += 1
                 continue
@@ -628,14 +632,14 @@ def run_drive_account_lsdir_cache_refresh() -> None:
             savepath=base_path,
             relative_dir_paths=None,
             recursive_savepath=True,
-            source="scheduler.drive_account_lsdir_cache_refresh.302_path",
+            source="scheduler.drive_account_lsdir_cache_refresh.cache_path",
         ):
             triggered += 1
         else:
             skipped_running += 1
 
     logger.info(
-        "驱动账号 ls_dir 缓存巡检完成 accounts=%s checked=%s triggered=%s skipped_fresh=%s skipped_running=%s unsupported=%s missing_302_path=%s",
+        "驱动账号 ls_dir 缓存巡检完成 accounts=%s checked=%s triggered=%s skipped_fresh=%s skipped_running=%s unsupported=%s missing_cache_path=%s",
         len(accounts),
         checked,
         triggered,

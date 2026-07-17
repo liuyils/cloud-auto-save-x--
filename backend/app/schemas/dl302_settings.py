@@ -66,6 +66,8 @@ class DL302SupportedAccountOut(BaseModel):
     username: str | None = None
     has_302_path: bool = False
     media_base_path: str | None = None
+    cache_base_path: str | None = None
+    strm_scan_base_path: str | None = None
     cas_task: DL302CASTaskOut | None = None
 
 
@@ -94,6 +96,7 @@ class DL302ConfigOut(BaseModel):
     strm_include_cas_root_dir: bool = False
     strm_source_priority: Literal["video_first", "cas_first"] = "video_first"
     cas_root_dir: str | None = None
+    cas_workers: int = 4
     strm_summary: DL302StrmSummaryOut = Field(default_factory=DL302StrmSummaryOut)
 
 
@@ -110,6 +113,7 @@ class DL302ConfigUpdateIn(BaseModel):
     strm_include_cas_root_dir: bool | None = Field(default=None)
     strm_source_priority: Literal["video_first", "cas_first"] | None = Field(default=None)
     cas_root_dir: str | None = Field(default=None)
+    cas_workers: int | None = Field(default=None)
 
 
 class DL302StrmGenerateIn(BaseModel):

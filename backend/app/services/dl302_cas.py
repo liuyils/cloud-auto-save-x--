@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import PurePosixPath
 
+import grpc
+
 from app.core.errors import ApiError, bad_request, not_found
 from app.models.drive_account import DriveAccount
+from app.services.dl302_settings import extract_dl302_cas_base_path
 
 
 def _normalize_media_base_path(raw: object) -> str | None:
@@ -21,16 +24,25 @@ def _normalize_media_base_path(raw: object) -> str | None:
 
 
 def _extract_account_media_base_path(account: DriveAccount) -> str | None:
-    payload = str(getattr(account, "config_json", "") or "").strip()
-    if not payload:
-        return None
-    try:
-        data = json.loads(payload)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    return _normalize_media_base_path(data.get("302_path"))
+    return _normalize_media_base_path(extract_dl302_cas_base_path(account))
+
+
+def _wrap_dl302_rpc_error(exc: Exception, *, action: str) -> ApiError:
+    if isinstance(exc, ApiError):
+        return exc
+    if isinstance(exc, grpc.RpcError):
+        code_fn = getattr(exc, "code", None)
+        status_code = code_fn() if callable(code_fn) else None
+        detail = str(exc).strip() or None
+        if status_code == grpc.StatusCode.DEADLINE_EXCEEDED:
+            return ApiError(code="DL302_RPC_TIMEOUT", message=f"dl302 {action}超时", http_status=504, detail=detail)
+        if status_code == grpc.StatusCode.UNAVAILABLE:
+            return ApiError(code="DL302_RPC_UNAVAILABLE", message="dl302 服务不可用", http_status=503, detail=detail)
+        return ApiError(code="DL302_RPC_FAILED", message=f"dl302 {action}失败", http_status=502, detail=detail)
+    detail = str(exc).strip() or None
+    if detail == "task not found":
+        return not_found("DL302_CAS_TASK_NOT_FOUND", "CAS 任务不存在")
+    return ApiError(code="DL302_RPC_FAILED", message=f"dl302 {action}失败", http_status=502, detail=detail)
 
 
 def _task_to_dict(task) -> dict[str, object]:
@@ -90,7 +102,7 @@ def _resolve_account(
         raise bad_request("DL302_CAS_DRIVE_UNSUPPORTED", "当前账号类型不支持 dl302 CAS 生成")
     media_base_path = _extract_account_media_base_path(account)
     if require_media_base_path and not media_base_path:
-        raise bad_request("DL302_CAS_302_PATH_REQUIRED", "当前账号未配置 302_path")
+        raise bad_request("DL302_CAS_302_PATH_REQUIRED", "当前账号未配置 STRM 扫描路径")
     if require_enabled and not bool(getattr(account, "enabled", False)):
         raise bad_request("DL302_CAS_ACCOUNT_DISABLED", "当前账号未启用")
     return account
@@ -104,11 +116,14 @@ def submit_dl302_cas_task(account_id: int, db, *, fast_compute: bool = False) ->
     if not str(config.get("cas_root_dir") or "").strip():
         raise bad_request("DL302_CAS_ROOT_DIR_REQUIRED", "请先配置 CAS 文件生成目录")
     account = _resolve_account(account_id, db, require_media_base_path=True, require_enabled=True)
-    resp = submit_cas_task(
-        drive_type=str(getattr(account, "drive_type", "") or ""),
-        account=str(getattr(account, "name", "") or ""),
-        fast_compute=bool(fast_compute),
-    )
+    try:
+        resp = submit_cas_task(
+            drive_type=str(getattr(account, "drive_type", "") or ""),
+            account=str(getattr(account, "name", "") or ""),
+            fast_compute=bool(fast_compute),
+        )
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 任务提交") from exc
     return _task_to_dict(getattr(resp, "task", None))
 
 
@@ -136,7 +151,7 @@ def submit_dl302_cas_task_delta(
     ):
         raise bad_request(
             "DL302_CAS_BASE_PATH_OUTSIDE_302_PATH",
-            f"CAS base_path 不在账号 302_path 范围内: base_path={effective_base_path} 302_path={media_base_path}",
+            f"CAS base_path 不在账号 STRM 扫描路径范围内: base_path={effective_base_path} strm_scan_path={media_base_path}",
         )
     input_dir_count = len([x for x in (dir_paths or []) if str(x or "").strip()])
     input_file_count = len([x for x in (file_paths or []) if str(x or "").strip()])
@@ -160,20 +175,23 @@ def submit_dl302_cas_task_delta(
     if (input_dir_count > 0 or input_file_count > 0) and not filtered_dirs and not filtered_files:
         raise bad_request(
             "DL302_CAS_DELTA_OUTSIDE_302_PATH",
-            f"增量路径不在账号 302_path 范围内: 302_path={media_base_path}",
+            f"增量路径不在账号 STRM 扫描路径范围内: strm_scan_path={media_base_path}",
         )
 
     if len(filtered_files) > 5000:
         raise bad_request("DL302_CAS_DELTA_TOO_LARGE", "增量文件数过大，请改用目录增量或分批提交")
 
-    resp = submit_cas_task_delta(
-        drive_type=str(getattr(account, "drive_type", "") or ""),
-        account=str(getattr(account, "name", "") or ""),
-        base_path=effective_base_path,
-        dir_paths=filtered_dirs,
-        file_paths=filtered_files,
-        fast_compute=bool(fast_compute),
-    )
+    try:
+        resp = submit_cas_task_delta(
+            drive_type=str(getattr(account, "drive_type", "") or ""),
+            account=str(getattr(account, "name", "") or ""),
+            base_path=effective_base_path,
+            dir_paths=filtered_dirs,
+            file_paths=filtered_files,
+            fast_compute=bool(fast_compute),
+        )
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 增量任务提交") from exc
     return _task_to_dict(getattr(resp, "task", None))
 
 
@@ -181,46 +199,64 @@ def list_dl302_cas_tasks(account_id: int, db, *, limit: int = 5) -> list[dict[st
     from app.thirdparty.dl302_grpc_client import list_cas_tasks
 
     account = _resolve_account(account_id, db)
-    resp = list_cas_tasks(
-        drive_type=str(getattr(account, "drive_type", "") or ""),
-        account=str(getattr(account, "name", "") or ""),
-        limit=int(limit or 5),
-    )
+    try:
+        resp = list_cas_tasks(
+            drive_type=str(getattr(account, "drive_type", "") or ""),
+            account=str(getattr(account, "name", "") or ""),
+            limit=int(limit or 5),
+        )
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 任务列表查询") from exc
     return [_task_to_dict(item) for item in list(getattr(resp, "tasks", []) or [])]
 
 
 def get_dl302_cas_task(task_id: str) -> dict[str, object]:
     from app.thirdparty.dl302_grpc_client import get_cas_task
 
-    resp = get_cas_task(task_id=str(task_id or ""))
+    try:
+        resp = get_cas_task(task_id=str(task_id or ""))
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 任务详情查询") from exc
     return _task_to_dict(getattr(resp, "task", None))
 
 
 def list_dl302_cas_task_items(task_id: str) -> list[dict[str, object]]:
     from app.thirdparty.dl302_grpc_client import list_cas_task_items
 
-    resp = list_cas_task_items(task_id=str(task_id or ""))
+    try:
+        resp = list_cas_task_items(task_id=str(task_id or ""))
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 任务明细查询") from exc
     return [_task_item_to_dict(item) for item in list(getattr(resp, "items", []) or [])]
 
 
 def pause_dl302_cas_task(task_id: str) -> dict[str, object]:
     from app.thirdparty.dl302_grpc_client import pause_cas_task
 
-    resp = pause_cas_task(task_id=str(task_id or ""))
+    try:
+        resp = pause_cas_task(task_id=str(task_id or ""))
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 任务暂停") from exc
     return _task_to_dict(getattr(resp, "task", None))
 
 
 def resume_dl302_cas_task(task_id: str) -> dict[str, object]:
     from app.thirdparty.dl302_grpc_client import resume_cas_task
 
-    resp = resume_cas_task(task_id=str(task_id or ""))
+    try:
+        resp = resume_cas_task(task_id=str(task_id or ""))
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 任务恢复") from exc
     return _task_to_dict(getattr(resp, "task", None))
 
 
 def cancel_dl302_cas_task(task_id: str) -> dict[str, object]:
     from app.thirdparty.dl302_grpc_client import cancel_cas_task
 
-    resp = cancel_cas_task(task_id=str(task_id or ""))
+    try:
+        resp = cancel_cas_task(task_id=str(task_id or ""))
+    except Exception as exc:
+        raise _wrap_dl302_rpc_error(exc, action="CAS 任务取消") from exc
     return _task_to_dict(getattr(resp, "task", None))
 
 

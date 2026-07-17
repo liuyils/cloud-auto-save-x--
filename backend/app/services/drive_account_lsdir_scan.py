@@ -24,7 +24,7 @@ from app.services.drive_account_lsdir_cache import (
     _normalize_parent_path,
     upsert_drive_account_lsdir_items,
 )
-from app.services.dl302_settings import extract_dl302_media_base_path, get_or_create_dl302_setting, load_dl302_config
+from app.services.dl302_settings import extract_dl302_cache_base_path, get_or_create_dl302_setting, load_dl302_config
 from app.services.dl302_strm import maybe_auto_generate_dl302_strm
 
 
@@ -170,7 +170,7 @@ def rebuild_drive_account_lsdir_cache_for_current_302_path(account_id: int, sour
                 "base_path": None,
                 "reason": "account_not_found",
             }
-        base_path = extract_dl302_media_base_path(account)
+        base_path = extract_dl302_cache_base_path(account)
         
         # 如果有旧路径且与新路径不同，清理旧路径缓存
         if old_base_path and old_base_path != base_path:
@@ -190,7 +190,7 @@ def rebuild_drive_account_lsdir_cache_for_current_302_path(account_id: int, sour
 
     if not base_path:
         logger.info(
-            "drive account lsdir rebuild skipped: missing 302_path account_id=%s source=%s cleared=%s",
+            "drive account lsdir rebuild skipped: missing cache_path account_id=%s source=%s cleared=%s",
             account_key,
             source,
             cleared,

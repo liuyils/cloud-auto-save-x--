@@ -24,6 +24,7 @@ export async function patchDL302Config(payload: {
   strm_prefix_url?: string | null
   strm_include_cas_root_dir?: boolean | null
   strm_source_priority?: 'video_first' | 'cas_first' | null
+  cas_workers?: number | null
 }) {
   const { data } = await http.patch<DL302Config>('/dl302/config', payload)
   return data

@@ -113,7 +113,11 @@ def set_drive_account_enabled(db: Session, account_id: int, enabled: bool) -> Dr
 
 def set_default_drive_account(db: Session, account_id: int) -> DriveAccount:
     account = get_drive_account(db, account_id)
-    items = db.execute(select(DriveAccount)).scalars().all()
+    items = (
+        db.execute(select(DriveAccount).where(DriveAccount.drive_type == account.drive_type))
+        .scalars()
+        .all()
+    )
     for item in items:
         item.is_default = item.id == account.id
     return account

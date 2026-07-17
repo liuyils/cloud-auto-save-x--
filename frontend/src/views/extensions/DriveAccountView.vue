@@ -142,7 +142,7 @@ function notifyAccountCreated(payload: {
       h(
         'div',
         { style: { color: 'var(--el-text-color-secondary)', fontSize: '12px' } },
-        `状态：${payload.enabled ? '启用' : '禁用'}${payload.isDefault ? ' / 默认账号' : ''}`,
+        `状态：${payload.enabled ? '启用' : '禁用'}${payload.isDefault ? ' / 该驱动默认账号' : ''}`,
       ),
     ]),
   })
@@ -322,7 +322,7 @@ async function handleToggle(row: DriveAccountItem, enabled: boolean) {
 
 async function handleSetDefault(row: DriveAccountItem) {
   await setDriveAccountDefault(row.id)
-  ElMessage.success('默认账号已更新')
+  ElMessage.success('该驱动默认账号已更新')
   await loadData()
 }
 
@@ -457,9 +457,9 @@ onMounted(loadProbeScheduler)
         <div class="metric-tile__hint">当前参与运行的账户</div>
       </div>
       <div class="glass-panel metric-tile">
-        <div class="metric-tile__label">默认账号</div>
+        <div class="metric-tile__label">默认账号（按驱动）</div>
         <div class="metric-tile__value">{{ summary.default_count }}</div>
-        <div class="metric-tile__hint">默认保存与执行入口</div>
+        <div class="metric-tile__hint">每种网盘类型可设置一个默认账号</div>
       </div>
       <div class="glass-panel metric-tile">
         <div class="metric-tile__label">预警账号</div>

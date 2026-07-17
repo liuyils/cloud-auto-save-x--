@@ -14,6 +14,7 @@ from app.models.drive_account import DriveAccount
 from app.models.drive_account_lsdir_cache import DriveAccountLsdirCache
 from app.services.dl302_settings import (
     DL302_SUPPORTED_DRIVE_TYPES,
+    extract_dl302_strm_scan_base_path,
     get_or_create_dl302_setting,
     load_dl302_config,
     update_dl302_setting,
@@ -142,10 +143,10 @@ def list_strm_source_accounts(db: Session) -> list[DriveAccount]:
 
 
 def extract_account_media_base_path(account: DriveAccount) -> str | None:
-    raw = str(_load_account_config(account).get("302_path") or "").strip()
-    if not raw:
+    resolved = extract_dl302_strm_scan_base_path(account)
+    if not resolved:
         return None
-    return _normalize_posix_dir(raw)
+    return _normalize_posix_dir(resolved)
 
 
 def list_account_strm_sources(config: dict[str, Any], account: DriveAccount) -> list[StrmSource]:

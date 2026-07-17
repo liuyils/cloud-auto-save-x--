@@ -1077,7 +1077,7 @@ class TelegramBotHandler:
         lines = [
             f"选择{ '源' if endpoint == 'source' else '目标' }端网盘账号",
             f"当前: {str(_get_nested(draft, f'{endpoint}.account_name') or '-')}",
-            "仅显示已启用且已配置 302_path 的 netdisk 账号。",
+            "仅显示已启用且已配置缓存路径的 netdisk 账号。",
         ]
         mid = self._edit_or_send(chat_id, "\n".join(lines), message_id=message_id or session.last_message_id, reply_markup=keyboard(rows))
         ctx["sync_account_selector_endpoint"] = endpoint
@@ -1438,7 +1438,7 @@ class TelegramBotHandler:
         if path_type == "netdisk":
             text_lines.append(f"账号: {account_name or '-'}")
             if base_path:
-                text_lines.append(f"302_path: {base_path}")
+                text_lines.append(f"缓存路径: {base_path}")
         if path_type == "local" and dir_path == "":
             text_lines.append("本地根目录仅用于浏览，请继续进入子目录后再选择。")
         if not payload.get("exists"):

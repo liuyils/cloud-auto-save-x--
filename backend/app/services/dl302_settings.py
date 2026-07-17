@@ -12,7 +12,6 @@ from app.core.errors import bad_request
 from app.extensions.runtime.adapter_registry import AdapterRegistry
 from app.models.dl302_setting import DL302Setting
 from app.models.drive_account import DriveAccount
-from app.services.dl302_cas import get_dl302_cas_task_summary
 from app.services.drive_accounts import serialize_drive_account
 
 
@@ -28,6 +27,10 @@ DL302_STRM_PREFIX_URL_KEY = "StrmPrefixURL"
 DL302_STRM_INCLUDE_CAS_ROOT_KEY = "StrmIncludeCASRootDir"
 DL302_STRM_SOURCE_PRIORITY_KEY = "StrmSourcePriority"
 DL302_CAS_ROOT_DIR_KEY = "CASRootDir"
+DL302_CAS_WORKERS_KEY = "CASWorkers"
+DL302_ACCOUNT_LSDIR_CACHE_PATH_KEY = "lsdir_cache_path"
+DL302_ACCOUNT_STRM_SCAN_PATH_KEY = "strm_scan_path"
+DL302_ACCOUNT_LEGACY_MEDIA_PATH_KEY = "302_path"
 DL302_SUPPORTED_DRIVE_TYPES = ("115", "cloud189", "cloud139", "quark", "uc")
 DL302_STRM_MODES = ("auto", "independent")
 DL302_STRM_SOURCE_PRIORITIES = ("video_first", "cas_first")
@@ -84,6 +87,7 @@ def serialize_dl302_config_kv(payload: dict[str, object]) -> str:
         DL302_STRM_INCLUDE_CAS_ROOT_KEY,
         DL302_STRM_SOURCE_PRIORITY_KEY,
         DL302_CAS_ROOT_DIR_KEY,
+        DL302_CAS_WORKERS_KEY,
     ):
         value = payload.get(key)
         if value is None:
@@ -121,6 +125,13 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
     if strm_source_priority not in DL302_STRM_SOURCE_PRIORITIES:
         strm_source_priority = "video_first"
     cas_root_dir = normalize_cas_root_dir(payload.get(DL302_CAS_ROOT_DIR_KEY))
+    cas_workers_raw = str(payload.get(DL302_CAS_WORKERS_KEY, "") or "").strip()
+    try:
+        cas_workers = int(cas_workers_raw) if cas_workers_raw else 4
+    except ValueError:
+        cas_workers = 4
+    if cas_workers <= 0:
+        cas_workers = 4
     return {
         "proxy_url": proxy_url,
         "proxy_path_offset": proxy_path_offset,
@@ -134,6 +145,7 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         "strm_include_cas_root_dir": strm_include_cas_root,
         "strm_source_priority": strm_source_priority,
         "cas_root_dir": cas_root_dir,
+        "cas_workers": cas_workers,
     }
 
 
@@ -250,17 +262,18 @@ def validate_cas_root_dir(value: object) -> str:
     return text.rstrip("/") or "/"
 
 
-def extract_dl302_media_base_path(account: DriveAccount) -> str | None:
-    payload = str(getattr(account, "config_json", "") or "").strip()
-    if not payload:
-        return None
+def validate_cas_workers(value: object) -> int:
     try:
-        data = json.loads(payload)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    text = str(data.get("302_path") or "").strip()
+        workers = int(value)
+    except (TypeError, ValueError) as exc:
+        raise bad_request("DL302_CAS_WORKERS_INVALID", "CAS workers 必须是正整数") from exc
+    if workers <= 0:
+        raise bad_request("DL302_CAS_WORKERS_INVALID", "CAS workers 必须是正整数")
+    return workers
+
+
+def _normalize_account_posix_path(value: object) -> str | None:
+    text = str(value or "").strip()
     if not text:
         return None
     try:
@@ -270,6 +283,47 @@ def extract_dl302_media_base_path(account: DriveAccount) -> str | None:
     if not path.startswith("/"):
         path = "/" + path.lstrip("/")
     return path.rstrip("/") or "/"
+
+
+def _load_drive_account_config(account: DriveAccount) -> dict[str, object]:
+    payload = str(getattr(account, "config_json", "") or "").strip()
+    if not payload:
+        return {}
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def extract_dl302_cache_base_path(account: DriveAccount) -> str | None:
+    data = _load_drive_account_config(account)
+    return _normalize_account_posix_path(
+        data.get(DL302_ACCOUNT_LSDIR_CACHE_PATH_KEY) or data.get(DL302_ACCOUNT_LEGACY_MEDIA_PATH_KEY)
+    )
+
+
+def extract_dl302_strm_scan_base_path(account: DriveAccount) -> str | None:
+    data = _load_drive_account_config(account)
+    return _normalize_account_posix_path(
+        data.get(DL302_ACCOUNT_STRM_SCAN_PATH_KEY)
+        or data.get(DL302_ACCOUNT_LSDIR_CACHE_PATH_KEY)
+        or data.get(DL302_ACCOUNT_LEGACY_MEDIA_PATH_KEY)
+    )
+
+
+def extract_dl302_sync_base_path(account: DriveAccount) -> str | None:
+    return extract_dl302_cache_base_path(account)
+
+
+def extract_dl302_cas_base_path(account: DriveAccount) -> str | None:
+    return extract_dl302_strm_scan_base_path(account)
+
+
+def extract_dl302_media_base_path(account: DriveAccount) -> str | None:
+    return extract_dl302_cache_base_path(account)
 
 
 def validate_strm_root_dir(value: object) -> str:
@@ -384,12 +438,21 @@ def update_dl302_setting(db: Session, *, payload: dict[str, object]) -> DL302Set
         else:
             current[DL302_CAS_ROOT_DIR_KEY] = validate_cas_root_dir(value)
 
+    if "cas_workers" in payload:
+        value = payload.get("cas_workers")
+        if value is None:
+            current.pop(DL302_CAS_WORKERS_KEY, None)
+        else:
+            current[DL302_CAS_WORKERS_KEY] = str(validate_cas_workers(value))
+
     item.config_kv = serialize_dl302_config_kv(current)
     db.flush()
     return item
 
 
 def list_supported_dl302_drivers(db: Session) -> list[dict[str, object]]:
+    from app.services.dl302_cas import get_dl302_cas_task_summary
+
     accounts = db.execute(select(DriveAccount)).scalars().all()
     summary: dict[str, dict[str, object]] = {
         code: {
@@ -412,7 +475,8 @@ def list_supported_dl302_drivers(db: Session) -> list[dict[str, object]]:
             state["default_account_name"] = str(getattr(item, "name", "") or "").strip() or None
         account_data = serialize_drive_account(item)
         profile = dict(account_data.get("profile") or {})
-        media_base_path = extract_dl302_media_base_path(item)
+        cache_base_path = extract_dl302_cache_base_path(item)
+        strm_scan_base_path = extract_dl302_strm_scan_base_path(item)
         state["accounts"].append(
             {
                 "account_id": int(account_data.get("id") or 0),
@@ -424,8 +488,10 @@ def list_supported_dl302_drivers(db: Session) -> list[dict[str, object]]:
                 "runtime_status": account_data.get("runtime_status"),
                 "nickname": str(profile.get("nickname") or "").strip() or None,
                 "username": str(profile.get("username") or "").strip() or None,
-                "has_302_path": bool(media_base_path),
-                "media_base_path": media_base_path,
+                "has_302_path": bool(cache_base_path),
+                "media_base_path": strm_scan_base_path,
+                "cache_base_path": cache_base_path,
+                "strm_scan_base_path": strm_scan_base_path,
                 "cas_task": get_dl302_cas_task_summary(int(account_data.get("id") or 0), db),
             }
         )

@@ -204,6 +204,7 @@ class AccountManager:
     def __init__(self):
         self.adapters: Dict[str, BaseCloudDriveAdapter] = {}
         self.default_adapter: Optional[BaseCloudDriveAdapter] = None
+        self.default_adapters_by_type: Dict[str, BaseCloudDriveAdapter] = {}
 
     def load_accounts(self, config_data: Dict, *, no_login: bool = False) -> bool:
         """
@@ -216,6 +217,7 @@ class AccountManager:
         """
         self.adapters.clear()
         self.default_adapter = None
+        self.default_adapters_by_type.clear()
 
         # 新格式：accounts 列表
         if "accounts" in config_data:
@@ -238,6 +240,9 @@ class AccountManager:
                 )
                 if adapter:
                     self.adapters[name] = adapter
+                    self.default_adapters_by_type.setdefault(drive_type, adapter)
+                    if account.get("default", False):
+                        self.default_adapters_by_type[drive_type] = adapter
                     if account.get("default", False) or self.default_adapter is None:
                         self.default_adapter = adapter
 
@@ -257,6 +262,7 @@ class AccountManager:
                 adapter = AdapterFactory.create_adapter("quark", cookie.strip(), i, no_login=no_login)
                 if adapter:
                     self.adapters[name] = adapter
+                    self.default_adapters_by_type.setdefault("quark", adapter)
                     if self.default_adapter is None:
                         self.default_adapter = adapter
 
@@ -291,6 +297,11 @@ class AccountManager:
         drive_type = AdapterFactory.get_drive_type_by_url(shareurl)
 
         if drive_type:
+            preferred = self.default_adapters_by_type.get(drive_type)
+            if preferred is not None:
+                if allow_inactive or preferred.is_active:
+                    return preferred
+
             # 查找该类型的第一个可用账户
             for adapter in self.adapters.values():
                 if adapter.DRIVE_TYPE != drive_type:
@@ -301,8 +312,8 @@ class AccountManager:
             logger.warning("分享链接推断网盘类型为 '%s'，但没有可用的同类型账户", drive_type)
             return None
 
-        # 3. 使用默认适配器
-        return self.default_adapter
+        logger.warning("无法识别分享链接网盘类型，且任务未指定账号")
+        return None
 
     def get_all_adapters(self) -> Dict[str, BaseCloudDriveAdapter]:
         """获取所有适配器"""

@@ -39,7 +39,7 @@ from app.services.drive_accounts import (
 )
 from app.services.drive_account_lsdir_cache import delete_drive_account_lsdir_cache_by_account, get_drive_account_lsdir_cache_subtree_stats
 from app.services.drive_account_lsdir_scan import rebuild_drive_account_lsdir_cache_for_current_302_path, trigger_drive_account_lsdir_scan_if_stale
-from app.services.dl302_settings import extract_dl302_media_base_path
+from app.services.dl302_settings import extract_dl302_cache_base_path
 from app.services.drive_account_signin_jobs import get_drive_account_signin_job, submit_drive_account_signin_job
 from app.thirdparty.dl302_grpc_client import reload_dl302
 
@@ -57,7 +57,7 @@ def _reload_dl302_if_needed(drive_type: str | None) -> None:
 
 def _out(item, *, db: Session | None = None) -> DriveAccountOut:
     payload = serialize_drive_account(item)
-    base_path = extract_dl302_media_base_path(item)
+    base_path = extract_dl302_cache_base_path(item)
     payload["has_302_path"] = bool(base_path)
     payload["lsdir_cache_base_path"] = base_path
     payload["lsdir_cache_file_total"] = 0
@@ -84,7 +84,7 @@ def _drive_account_cache_signature(account: DriveAccount | None) -> dict[str, ob
     return {
         "config": config,
         "cookie": AdapterRegistry.serialize_config(account.drive_type, config),
-        "base_path": extract_dl302_media_base_path(account),
+        "base_path": extract_dl302_cache_base_path(account),
         "drive_type": account.drive_type,
     }
 
@@ -268,9 +268,9 @@ def post_account_default(request: Request, account_id: int, current: CurrentUser
 @router.post('/{account_id}/lsdir-cache/refresh', response_model=DriveAccountLsdirCacheRefreshOut, dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_WRITE))])
 def post_account_lsdir_cache_refresh(request: Request, account_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
     account = get_drive_account(db, account_id)
-    base_path = extract_dl302_media_base_path(account)
+    base_path = extract_dl302_cache_base_path(account)
     if not base_path:
-        raise bad_request("DRIVE_ACCOUNT_302_PATH_REQUIRED", "当前账号未配置 302_path")
+        raise bad_request("DRIVE_ACCOUNT_302_PATH_REQUIRED", "当前账号未配置缓存路径")
     result = rebuild_drive_account_lsdir_cache_for_current_302_path(int(account_id), source="api.drive_accounts.lsdir_cache_refresh")
     audit.write_audit_log(
         db,

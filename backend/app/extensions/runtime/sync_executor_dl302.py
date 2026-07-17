@@ -466,7 +466,7 @@ class Dl302SyncExecutor:
             raise bad_request("SYNC_NETDISK_ACCOUNT_INVALID", "网盘账号不存在")
         base_path = get_netdisk_sync_base_path(account)
         if not is_path_within_base(path, base_path):
-            raise bad_request("SYNC_NETDISK_PATH_OUT_OF_302_SCOPE", "网盘路径必须位于 302_path 下")
+            raise bad_request("SYNC_NETDISK_PATH_OUT_OF_302_SCOPE", "网盘路径必须位于缓存路径下")
         return Dl302Endpoint(
             type="netdisk",
             path=path,

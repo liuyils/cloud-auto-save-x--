@@ -63,7 +63,6 @@ const runStatsGridStyle = computed(() => ({
   gap: '10px',
   marginBottom: '12px',
 }))
-const transferStyle = computed(() => ({ width: '100%', minWidth: isMobile.value ? '520px' : '740px' }))
 const runEventsTableHeight = computed(() => (isMobile.value ? '50vh' : 360))
 const runTreeStyle = computed(() => ({ maxHeight: isMobile.value ? '50vh' : '360px', overflow: 'auto' }))
 const runFileCurrentOffset = computed(() => Math.max(0, (Number(runFilePage.page) - 1) * Number(runFilePage.pageSize)))
@@ -71,14 +70,6 @@ const runFileDisplayStart = computed(() => (runFilePage.items.length > 0 ? runFi
 const runFileDisplayEnd = computed(() => runFileCurrentOffset.value + runFilePage.items.length)
 const runFileUsingLiveFallback = computed(() => runFilePage.items.length === 0 && runFileLiveItems.value.length > 0)
 const runFileDisplayItems = computed(() => (runFileUsingLiveFallback.value ? runFileLiveItems.value : runFilePage.items))
-
-const dramaTransferData = computed(() =>
-  dramaTasks.value.map((t) => ({
-    key: t.task_uid,
-    label: t.taskname,
-    disabled: !t.enabled,
-  })),
-)
 
 const filters = reactive({
   keyword: '',
@@ -1731,23 +1722,9 @@ onMounted(loadData)
 
           <el-divider content-position="left">关联追剧任务</el-divider>
           <el-form-item label="追剧任务">
-            <template v-if="isMobile">
-              <el-select v-model="drawer.dramaTaskUids" multiple filterable clearable style="width: 100%" placeholder="选择追剧任务">
-                <el-option v-for="t in dramaTasks" :key="t.task_uid" :label="t.taskname" :value="t.task_uid" :disabled="!t.enabled" />
-              </el-select>
-            </template>
-            <template v-else>
-              <div style="overflow-x: auto">
-                <el-transfer
-                  v-model="drawer.dramaTaskUids"
-                  :data="dramaTransferData"
-                  filterable
-                  filter-placeholder="搜索追剧任务"
-                  :titles="['可选', '已关联']"
-                  :style="transferStyle"
-                />
-              </div>
-            </template>
+            <el-select v-model="drawer.dramaTaskUids" multiple filterable clearable style="width: 100%" placeholder="选择追剧任务">
+              <el-option v-for="t in dramaTasks" :key="t.task_uid" :label="t.taskname" :value="t.task_uid" :disabled="!t.enabled" />
+            </el-select>
           </el-form-item>
 
           <el-divider content-position="left">策略</el-divider>

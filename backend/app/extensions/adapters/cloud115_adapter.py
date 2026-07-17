@@ -26,7 +26,8 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
     CONFIG_FORMAT = "raw"
     default_config = {
         "cookie": "",
-        "302_path": "",
+        "lsdir_cache_path": "",
+        "strm_scan_path": "",
     }
     config_fields = [
         {
@@ -39,11 +40,20 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
             "placeholder": "UID=...; CID=...; SEID=...",
         },
         {
-            "key": "302_path",
-            "label": "302代理基础路径",
-            "description": "302/STRM 生成使用的媒体根目录（网盘内路径）。",
+            "key": "lsdir_cache_path",
+            "label": "缓存路径",
+            "description": "lsdir 缓存刷新与网盘同步默认范围使用的根目录（网盘内路径）。",
             "input_type": "text",
             "required": True,
+            "secret": True,
+            "placeholder": "/",
+        },
+        {
+            "key": "strm_scan_path",
+            "label": "STRM 扫描路径",
+            "description": "STRM/CAS 使用的扫描根目录（网盘内路径）；为空时默认与缓存路径一致。",
+            "input_type": "text",
+            "required": False,
             "secret": True,
             "placeholder": "/",
         }
