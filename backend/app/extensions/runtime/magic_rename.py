@@ -11,7 +11,7 @@ from natsort import natsorted
 class MagicRename:
     magic_regex: dict[str, dict[str, str]] = {
         "$TV_REGEX": {
-            "pattern": r".*?([Ss]\d{1,2})?(?:[第EePpXx\.\-\_\( ]{1,2}|^)(\d{1,3})(?!\d).*?\.(mp4|mkv|mov|m4v|avi|mpeg|ts|zip|cas)",
+            "pattern": r".*?([Ss]\d{1,2})?(?:[第EePpXx\.\-\_\( ]{1,2}|^)(\d{1,3})(?!\d).*?\.(mp4|mkv|mov|m4v|avi|mpeg|ts|zip|cas|iso)",
             "replace": r"\1E\2.\3",
         },
         "$BLACK_WORD": {
@@ -19,7 +19,7 @@ class MagicRename:
             "replace": "",
         },
         "$TV_MAGIC": {
-            "pattern": r".*\.(mp4|mkv|mov|m4v|avi|mpeg|ts|zip|cas)$",
+            "pattern": r".*\.(mp4|mkv|mov|m4v|avi|mpeg|ts|zip|cas|iso)$",
             "replace": r"{TASKNAME}.{SXX}E{E}.{EXT}",
         },
         "$SHOW_MAGIC": {

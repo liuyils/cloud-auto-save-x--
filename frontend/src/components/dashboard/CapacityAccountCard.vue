@@ -83,7 +83,7 @@ const hasLsdirCache = computed(() => Boolean(props.account.has_302_path))
 
     <div class="account-card__cache" :class="{ 'account-card__cache--placeholder': !hasLsdirCache }">
       <template v-if="hasLsdirCache">
-        <span>302 路径：{{ account.lsdir_cache_base_path || account.config?.['302_path'] || '-' }}</span>
+        <span>缓存路径：{{ account.lsdir_cache_base_path || account.config?.['302_path'] || '-' }}</span>
         <span>缓存文件：{{ account.lsdir_cache_file_total ?? 0 }}</span>
       </template>
       <span v-else aria-hidden="true">&nbsp;</span>

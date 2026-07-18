@@ -1,19 +1,30 @@
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, get_current_user, require_permissions
+from app.core.errors import unauthorized
+from app.core.settings import settings
 from app.core.permissions import NOTIFY_READ, NOTIFY_WRITE
 from app.db.session import get_db
-from app.schemas.notification import NotificationConfigOut, NotificationConfigUpdateIn, NotificationTestIn, NotificationTestOut
+from app.schemas.notification import NotificationConfigOut, NotificationConfigUpdateIn, NotificationRuntimeIn, NotificationTestIn, NotificationTestOut
 from app.services import audit
 from app.services.notifications import legacy_notify
-from app.services.notifications.sender import send_test
+from app.services.notifications.sender import send_runtime, send_test
 from app.services.notifications.settings import get_or_create_notification_setting, load_notification_config, update_notification_setting
 
 
 router = APIRouter()
+
+
+def _require_internal_runtime_token(request: Request) -> None:
+    expected = str(settings.internal_runtime_notify_token or "").strip()
+    provided = str(request.headers.get("x-internal-token") or "").strip()
+    if not expected or not provided or not secrets.compare_digest(provided, expected):
+        raise unauthorized("NOTIFY_INTERNAL_TOKEN_INVALID", "内部通知凭证无效")
 
 
 @router.get("/config", response_model=NotificationConfigOut, dependencies=[Depends(require_permissions(NOTIFY_READ))])
@@ -77,4 +88,15 @@ def post_notification_test(
         detail=f"channels={len(results)} filter={'1' if payload.channels else '0'}",
     )
     db.commit()
+    return NotificationTestOut(results=results)
+
+
+@router.post("/internal/runtime", response_model=NotificationTestOut)
+def post_internal_runtime_notification(
+    request: Request,
+    payload: NotificationRuntimeIn,
+    db: Session = Depends(get_db),
+):
+    _require_internal_runtime_token(request)
+    results = send_runtime(db, payload.title, payload.content, channels=payload.channels)
     return NotificationTestOut(results=results)

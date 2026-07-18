@@ -41,6 +41,10 @@ def _load_or_init_secrets() -> dict[str, str]:
         data["refresh_token_pepper"] = secrets.token_urlsafe(48)
         changed = True
 
+    if not data.get("internal_runtime_notify_token"):
+        data["internal_runtime_notify_token"] = secrets.token_urlsafe(48)
+        changed = True
+
     if changed:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -111,6 +115,7 @@ class Settings(BaseSettings):
     refresh_token_cookie_domain: str | None = None
 
     refresh_token_pepper: str | None = None
+    internal_runtime_notify_token: str | None = None
 
     @property
     def database_url(self) -> str:
@@ -155,6 +160,7 @@ class Settings(BaseSettings):
 
         jwt = (self.jwt_secret_key or "").strip()
         pepper = (self.refresh_token_pepper or "").strip()
+        internal_notify = (self.internal_runtime_notify_token or "").strip()
 
         if not jwt:
             self.jwt_secret_key = secrets_data["jwt_secret_key"]
@@ -165,6 +171,11 @@ class Settings(BaseSettings):
             self.refresh_token_pepper = secrets_data["refresh_token_pepper"]
         else:
             secrets_data["refresh_token_pepper"] = pepper
+
+        if not internal_notify:
+            self.internal_runtime_notify_token = secrets_data["internal_runtime_notify_token"]
+        else:
+            secrets_data["internal_runtime_notify_token"] = internal_notify
 
         path = _secrets_file_path()
         tmp = path.with_suffix(".json.tmp")

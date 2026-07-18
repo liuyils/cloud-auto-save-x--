@@ -54,6 +54,7 @@ _VIDEO_EXTS = {
     ".webm",
     ".wmv",
     ".xvid",
+    ".iso"
 }
 _CAS_EXTS = {".cas"}
 

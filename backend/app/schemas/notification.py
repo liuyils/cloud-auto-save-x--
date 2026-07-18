@@ -22,6 +22,13 @@ class NotificationTestIn(BaseModel):
     channels: list[str] | None = None
 
 
+class NotificationRuntimeIn(BaseModel):
+    title: str
+    content: str
+    channels: list[str] | None = None
+    source: str | None = None
+
+
 class NotificationChannelResult(BaseModel):
     channel: str
     ok: bool
