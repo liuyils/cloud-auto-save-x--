@@ -988,6 +988,7 @@ class Pan123Adapter(BaseCloudDriveAdapter):
         to_pdir_fid: str,
         pwd_id: str,
         stoken: str,
+        file_names: List[str] | None = None,
     ) -> Dict:
         if not self._ensure_login():
             return {"code": 401, "message": "未登录或登录失败", "data": None}
@@ -996,6 +997,7 @@ class Pan123Adapter(BaseCloudDriveAdapter):
         except Exception:
             to_parent = 0
 
+        before_items = self.snapshot_dest_dir_items(str(to_parent), max_items=1000) if file_names else {}
         created_top_fids: List[str] = []
         if self._debug:
             logger.debug(
@@ -1031,6 +1033,21 @@ class Pan123Adapter(BaseCloudDriveAdapter):
                 return {"code": 500, "message": str(e), "data": None}
 
             time.sleep(random.uniform(0.05, 0.15))
+
+        if file_names:
+            matched_count = sum(1 for fid in created_top_fids if str(fid or "").strip())
+            if len(created_top_fids) != len(file_names) or matched_count < len(file_names):
+                aligned = self.align_saved_fids_from_dir(
+                    str(to_parent),
+                    file_names,
+                    before_items=before_items,
+                    max_items=1000,
+                    timeout_seconds=15,
+                    interval_seconds=0.5,
+                    accept_partial_best=True,
+                )
+                if sum(1 for fid in aligned if str(fid or "").strip()) >= matched_count:
+                    created_top_fids = aligned
 
         if self._debug:
             logger.debug(f"[123pan] save_file done: created={len(created_top_fids)}")

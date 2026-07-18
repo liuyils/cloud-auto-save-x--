@@ -149,6 +149,7 @@ class XunleiAdapter(BaseCloudDriveAdapter):
         super().__init__(cookie, index, config=config, no_login=no_login)
         self._session: requests.Session = requests.Session()
         self._session.headers.update(XUNLEI_HEADERS)
+        self._save_task_contexts: dict[str, dict[str, Any]] = {}
 
         # refresh_token 存储在 cookie 字段中
         self._refresh_token: str = str(self.config.get("refresh_token") or self.cookie or "").strip()
@@ -675,6 +676,7 @@ class XunleiAdapter(BaseCloudDriveAdapter):
 
         try:
             parent_id = to_pdir_fid if to_pdir_fid and str(to_pdir_fid) != "0" else ""
+            before_items = self.snapshot_dest_dir_items(parent_id, max_items=1000) if file_names else {}
 
             body = {
                 "parent_id": parent_id,
@@ -695,13 +697,30 @@ class XunleiAdapter(BaseCloudDriveAdapter):
             task_id = result.get("restore_task_id", "")
             if not task_id:
                 # 没有 task_id 说明是同步完成的
+                aligned = self.align_saved_fids_from_dir(
+                    parent_id,
+                    file_names,
+                    before_items=before_items,
+                    max_items=1000,
+                    timeout_seconds=20,
+                    interval_seconds=0.5,
+                    accept_partial_best=True,
+                ) if file_names else []
                 return {
                     "code": 0,
                     "message": "success",
                     "data": {
-                        "task_id": f"xunlei_sync_{pwd_id}",
+                        "task_id": f"xunlei_sync_{pwd_id}_{int(time.time() * 1000)}",
+                        "save_as_top_fids": aligned,
                         "_sync": True,
                     },
+                }
+
+            if file_names:
+                self._save_task_contexts[task_id] = {
+                    "pdir_fid": str(parent_id),
+                    "file_names": [str(name or "") for name in file_names],
+                    "before_items": before_items,
                 }
 
             return {
@@ -756,6 +775,20 @@ class XunleiAdapter(BaseCloudDriveAdapter):
                                 save_as_top_fids = trace_data
                         except Exception:
                             pass
+
+                    ctx = self._save_task_contexts.pop(str(task_id), None)
+                    if ctx:
+                        aligned = self.align_saved_fids_from_dir(
+                            str(ctx.get("pdir_fid") or ""),
+                            ctx.get("file_names") or [],
+                            before_items=ctx.get("before_items") or {},
+                            max_items=1000,
+                            timeout_seconds=20,
+                            interval_seconds=0.5,
+                            accept_partial_best=True,
+                        )
+                        if sum(1 for fid in aligned if str(fid or "").strip()) >= sum(1 for fid in save_as_top_fids if str(fid or "").strip()):
+                            save_as_top_fids = aligned
 
                     if retry_index > 0:
                         logger.debug("")

@@ -3013,41 +3013,26 @@ class Cloud139Adapter(BaseCloudDriveAdapter):
             )
             task_id = str((data or {}).get("taskID") or (data or {}).get("taskId") or "")
 
-            before_names: set[str] = set()
+            before_items: dict[str, str] = {}
             if file_names:
-                before = self.ls_dir(target_catalog_id, max_items=1000)
-                for item in (((before or {}).get("data") or {}).get("list") or []):
-                    name = str(item.get("file_name") or "")
-                    if name:
-                        before_names.add(name)
+                before_items = self.snapshot_dest_dir_items(target_catalog_id, max_items=1000)
 
-            aligned_fids: list[str] = []
-            if file_names:
-                deadline = time.time() + 60
-                while time.time() < deadline:
-                    listing = self.ls_dir(target_catalog_id, max_items=1000)
-                    if (listing or {}).get("code") != 0:
-                        time.sleep(1.5)
-                        continue
-                    new_map: dict[str, str] = {}
-                    for item in (((listing or {}).get("data") or {}).get("list") or []):
-                        fid = str(item.get("fid") or "")
-                        name = str(item.get("file_name") or "")
-                        if not fid or not name or name in before_names:
-                            continue
-                        if name not in new_map:
-                            new_map[name] = fid
-                    aligned_fids = [new_map.get(str(name or ""), "") for name in file_names]
-                    if any(aligned_fids):
-                        break
-                    time.sleep(1.5)
+            aligned_fids = self.align_saved_fids_from_dir(
+                target_catalog_id,
+                file_names,
+                before_items=before_items,
+                max_items=1000,
+                timeout_seconds=60,
+                interval_seconds=1.5,
+                accept_partial_best=True,
+            )
 
             return {
                 "code": 0,
                 "message": "success",
                 "data": {
                     "task_id": task_id,
-                    "save_as_top_fids": [x for x in aligned_fids if x],
+                    "save_as_top_fids": aligned_fids,
                     "_sync": True,
                 },
             }

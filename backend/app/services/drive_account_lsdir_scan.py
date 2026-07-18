@@ -482,7 +482,7 @@ def _load_scan_account_context(*, account_id: int, source: str, scan_label: str)
 
 
 def _walk_account_tree(*, account_id: int, drive_type: str, adapter) -> ScanStats:
-    ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 30 * 60) or 30 * 60)
+    ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 2 * 60 * 60) or 2 * 60 * 60)
     rate_limit = float(getattr(settings, "drive_account_lsdir_scan_rate_limit_per_second", 1.0) or 1.0)
     stats = ScanStats()
     queue: deque[tuple[str, str]] = deque([("0", "/")])
@@ -540,7 +540,7 @@ def _refresh_account_paths(
     target_paths: list[tuple[str, bool]],
     progress_hook=None,
 ) -> ScanStats:
-    ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 30 * 60) or 30 * 60)
+    ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 2 * 60 * 60) or 2 * 60 * 60)
     rate_limit = float(getattr(settings, "drive_account_lsdir_scan_rate_limit_per_second", 1.0) or 1.0)
     stats = ScanStats()
     queue: deque[tuple[str, str, bool]] = deque()

@@ -128,6 +128,7 @@ class UCAdapter(BaseCloudDriveAdapter):
         self.refresh_token = str(self.config.get("refresh_token") or "").strip()
         self.device_id = self._normalize_device_id(self.config.get("device_id"))
         self.query_token = str(self.config.get("query_token") or "").strip()
+        self._save_task_contexts: dict[str, dict[str, Any]] = {}
         
         # 解析 cookie
         if cookie:
@@ -613,8 +614,10 @@ class UCAdapter(BaseCloudDriveAdapter):
         to_pdir_fid: str,
         pwd_id: str,
         stoken: str,
+        file_names: List[str] | None = None,
     ) -> Dict:
         """转存文件"""
+        before_items = self.snapshot_dest_dir_items(to_pdir_fid, max_items=1000) if file_names else {}
         url = f"{self.BASE_URL}/1/clouddrive/share/sharepage/save"
         params = {
             "entry": "update_share",
@@ -642,6 +645,29 @@ class UCAdapter(BaseCloudDriveAdapter):
             if "capacity limit" in msg.lower():
                 logger.error("[UC] 网盘容量不足，无法转存")
                 return {"code": 1, "status": 400, "message": "UC网盘容量不足，请清理空间后重试", "data": {}}
+            if file_names and result.get("status") in (200, "200", None):
+                data = result.get("data") or {}
+                task_id = str(data.get("task_id") or result.get("task_id") or "").strip()
+                if task_id:
+                    self._save_task_contexts[task_id] = {
+                        "pdir_fid": str(to_pdir_fid),
+                        "file_names": [str(name or "") for name in file_names],
+                        "before_items": before_items,
+                    }
+                else:
+                    aligned = self.align_saved_fids_from_dir(
+                        str(to_pdir_fid),
+                        file_names,
+                        before_items=before_items,
+                        max_items=1000,
+                        timeout_seconds=15,
+                        interval_seconds=0.5,
+                        accept_partial_best=True,
+                    )
+                    data["task_id"] = f"uc_sync_{int(time.time() * 1000)}"
+                    data["save_as_top_fids"] = aligned
+                    data["_sync"] = True
+                    result["data"] = data
             logger.debug(f"[UC] 转存结果: {result}")
             return result
         except Exception as e:
@@ -708,6 +734,23 @@ class UCAdapter(BaseCloudDriveAdapter):
 
                 # 任务完成
                 if task_status == 2:
+                    ctx = self._save_task_contexts.pop(str(task_id), None)
+                    if ctx:
+                        save_as = result.setdefault("data", {}).get("save_as") or {}
+                        existing = save_as.get("save_as_select_top_fids")
+                        existing_fids = [str(x).strip() for x in existing] if isinstance(existing, list) else []
+                        aligned = self.align_saved_fids_from_dir(
+                            str(ctx.get("pdir_fid") or "0"),
+                            ctx.get("file_names") or [],
+                            before_items=ctx.get("before_items") or {},
+                            max_items=1000,
+                            timeout_seconds=15,
+                            interval_seconds=0.5,
+                            accept_partial_best=True,
+                        )
+                        if sum(1 for fid in aligned if fid) >= sum(1 for fid in existing_fids if fid):
+                            save_as["save_as_select_top_fids"] = aligned
+                            result["data"]["save_as"] = save_as
                     if retry_index > 0:
                         logger.info("")
                     break

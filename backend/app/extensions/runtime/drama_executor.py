@@ -433,6 +433,31 @@ class DramaTaskExecutor:
             return fids, "query_task.data.save_as.save_as_top_fids"
         return [], "missing"
 
+    def _recover_saved_fids_from_dir(
+        self,
+        *,
+        dest_fid: str,
+        file_names: list[str],
+    ) -> tuple[list[str], str]:
+        align = getattr(self.adapter, "align_saved_fids_from_dir", None)
+        if not callable(align) or not file_names:
+            return [], "missing"
+        try:
+            aligned = align(
+                str(dest_fid),
+                file_names,
+                before_items={},
+                max_items=1000,
+                timeout_seconds=8,
+                interval_seconds=0.5,
+                accept_partial_best=True,
+            )
+        except Exception:
+            return [], "missing"
+        if not isinstance(aligned, list):
+            return [], "missing"
+        return [str(x).strip() for x in aligned], "adapter.align_saved_fids_from_dir"
+
     def _save_with_saved_fids(
         self,
         *,
@@ -498,6 +523,13 @@ class DramaTaskExecutor:
 
             batch_saved, source = self._extract_saved_fids(save_file_return=save_ret, query_task_return=qret)
             matched_saved = sum(1 for fid in batch_saved if str(fid or "").strip())
+            if matched_saved < len(batch_names):
+                recovered, recovered_source = self._recover_saved_fids_from_dir(dest_fid=actual_save_fid, file_names=batch_names)
+                recovered_matched = sum(1 for fid in recovered if str(fid or "").strip())
+                if recovered_matched > matched_saved:
+                    batch_saved = recovered
+                    source = recovered_source
+                    matched_saved = recovered_matched
             if batch_saved:
                 self._line(f"saved_fids: {matched_saved}/{len(batch_saved)}（来源={source}）")
             else:

@@ -1240,13 +1240,9 @@ class GuangyaAdapter(BaseCloudDriveAdapter):
             if not access_token:
                 return {"code": 1, "message": "分享访问令牌获取失败", "data": {}}
             dest_fid = self._normalize_output_fid(to_pdir_fid)
-            before_fids: set[str] = set()
+            before_items: dict[str, str] = {}
             if file_names:
-                before_payload = self.ls_dir(dest_fid, max_items=1000)
-                if before_payload.get("code") == 0:
-                    for item in ((before_payload.get("data") or {}).get("list") or []):
-                        if isinstance(item, dict) and _clean_text(item.get("fid")):
-                            before_fids.add(_clean_text(item.get("fid")))
+                before_items = self.snapshot_dest_dir_items(dest_fid, max_items=1000)
             payload = self._client.share_restore(access_token, cleaned_fids, parent_id="" if dest_fid == "0" else dest_fid)
             self._raise_if_failed(payload, "转存失败")
             task_id = self._extract_task_id(payload)
@@ -1258,21 +1254,15 @@ class GuangyaAdapter(BaseCloudDriveAdapter):
                     if self._task_is_done(status_payload):
                         break
                     time.sleep(1)
-            aligned: list[str] = []
-            if file_names:
-                best_aligned: list[str] = []
-                best_matched = 0
-                for _ in range(30):
-                    current = self._diff_dest_dir(dest_fid, before_fids, file_names)
-                    current_matched = sum(1 for fid in current if _clean_text(fid))
-                    if current_matched >= best_matched:
-                        best_aligned = current
-                        best_matched = current_matched
-                    if current and current_matched >= len(file_names):
-                        aligned = current
-                        break
-                    aligned = best_aligned
-                    time.sleep(1)
+            aligned = self.align_saved_fids_from_dir(
+                dest_fid,
+                file_names,
+                before_items=before_items,
+                max_items=1000,
+                timeout_seconds=30,
+                interval_seconds=1,
+                accept_partial_best=True,
+            )
             return {
                 "code": 0,
                 "message": "success",

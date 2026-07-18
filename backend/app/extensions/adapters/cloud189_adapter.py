@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import base64
-import binascii
 import json
 import logging
 import os
@@ -9,7 +8,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse, quote, unquote
+from urllib.parse import parse_qs, urlparse, unquote
 from xml.etree import ElementTree as ET
 
 import requests
@@ -2530,18 +2529,7 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
 
             before_items: Dict[str, str] = {}
             if file_names:
-                try:
-                    before_dir = self.ls_dir(target, max_items=1000)
-                    if isinstance(before_dir, dict) and before_dir.get("code") == 0:
-                        for it in before_dir.get("data", {}).get("list", []) or []:
-                            if not isinstance(it, dict):
-                                continue
-                            fid0 = str(it.get("fid") or "")
-                            name0 = str(it.get("file_name") or "")
-                            if fid0:
-                                before_items[fid0] = name0
-                except Exception:
-                    before_items = {}
+                before_items = self.snapshot_dest_dir_items(target, max_items=1000)
 
             task_infos: List[Dict[str, Any]] = []
             for i, fid in enumerate(fid_list):
@@ -2571,63 +2559,15 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             if not file_names:
                 return {"code": 0, "message": "success", "data": {"task_id": task_id}}
 
-            def _clean_name(s: str) -> str:
-                try:
-                    return re.sub(r"[^\w\s\.]", "", str(s or ""))
-                except Exception:
-                    return str(s or "")
-
-            name_to_fids: Dict[str, List[str]] = {}
-            deadline = time.time() + 120
-            while time.time() < deadline:
-                try:
-                    after_dir = self.ls_dir(target, max_items=1000)
-                    if not isinstance(after_dir, dict) or after_dir.get("code") != 0:
-                        time.sleep(1)
-                        continue
-                    items = after_dir.get("data", {}).get("list", []) or []
-                    for it in items:
-                        if not isinstance(it, dict):
-                            continue
-                        fid0 = str(it.get("fid") or "")
-                        name0 = str(it.get("file_name") or "")
-                        if not fid0 or fid0 in before_items:
-                            continue
-                        if not name0:
-                            continue
-                        name_to_fids.setdefault(name0, [])
-                        if fid0 not in name_to_fids[name0]:
-                            name_to_fids[name0].append(fid0)
-                    total_new = sum(len(v) for v in name_to_fids.values())
-                    if total_new >= len(file_names):
-                        break
-                except Exception:
-                    pass
-                time.sleep(2)
-
-            aligned: List[str] = []
-            used: set = set()
-            for fname in file_names:
-                fid0 = ""
-                lst = name_to_fids.get(fname) or []
-                for cand in lst:
-                    if cand and cand not in used:
-                        fid0 = cand
-                        break
-                if not fid0:
-                    fname_clean = _clean_name(fname)
-                    for k, lst2 in name_to_fids.items():
-                        if _clean_name(k) != fname_clean:
-                            continue
-                        for cand in lst2:
-                            if cand and cand not in used:
-                                fid0 = cand
-                                break
-                        if fid0:
-                            break
-                if fid0:
-                    used.add(fid0)
-                aligned.append(fid0)
+            aligned = self.align_saved_fids_from_dir(
+                target,
+                file_names,
+                before_items=before_items,
+                max_items=1000,
+                timeout_seconds=120,
+                interval_seconds=2,
+                accept_partial_best=True,
+            )
 
             return {
                 "code": 0,

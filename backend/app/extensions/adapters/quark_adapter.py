@@ -121,6 +121,7 @@ class QuarkAdapter(BaseCloudDriveAdapter):
         self.refresh_token = str(self.config.get("refresh_token") or "").strip()
         self.device_id = self._normalize_device_id(self.config.get("device_id"))
         self.query_token = str(self.config.get("query_token") or "").strip()
+        self._save_task_contexts: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _clean_message(payload: dict[str, Any] | None, default: str) -> str:
@@ -603,11 +604,13 @@ class QuarkAdapter(BaseCloudDriveAdapter):
         to_pdir_fid: str,
         pwd_id: str,
         stoken: str,
+        file_names: List[str] | None = None,
     ) -> Dict:
         """转存文件"""
         import random
         from datetime import datetime
 
+        before_items = self.snapshot_dest_dir_items(to_pdir_fid, max_items=1000) if file_names else {}
         url = f"{self.BASE_URL}/1/clouddrive/share/sharepage/save"
         querystring = {
             "pr": "ucpro",
@@ -629,6 +632,29 @@ class QuarkAdapter(BaseCloudDriveAdapter):
         response = self._send_request(
             "POST", url, json=payload, params=querystring
         ).json()
+        data = response.get("data") if isinstance(response, dict) else {}
+        task_id = str((data or {}).get("task_id") or response.get("task_id") or "").strip() if isinstance(response, dict) else ""
+        if file_names and isinstance(response, dict) and response.get("status") in (200, "200", None):
+            if task_id:
+                self._save_task_contexts[task_id] = {
+                    "pdir_fid": str(to_pdir_fid),
+                    "file_names": [str(name or "") for name in file_names],
+                    "before_items": before_items,
+                }
+            else:
+                aligned = self.align_saved_fids_from_dir(
+                    str(to_pdir_fid),
+                    file_names,
+                    before_items=before_items,
+                    max_items=1000,
+                    timeout_seconds=15,
+                    interval_seconds=0.5,
+                    accept_partial_best=True,
+                )
+                response_data = response.setdefault("data", {})
+                response_data["task_id"] = f"quark_sync_{int(time.time() * 1000)}"
+                response_data["save_as_top_fids"] = aligned
+                response_data["_sync"] = True
         return response
 
     def query_task(self, task_id: str) -> Dict:
@@ -654,6 +680,23 @@ class QuarkAdapter(BaseCloudDriveAdapter):
                 logger.warning("查询任务状态失败：%s", response)
                 return response
             if response["data"]["status"] == 2:
+                ctx = self._save_task_contexts.pop(str(task_id), None)
+                if ctx:
+                    save_as = response["data"].get("save_as") or {}
+                    existing = save_as.get("save_as_top_fids")
+                    existing_fids = [str(x).strip() for x in existing] if isinstance(existing, list) else []
+                    aligned = self.align_saved_fids_from_dir(
+                        str(ctx.get("pdir_fid") or "0"),
+                        ctx.get("file_names") or [],
+                        before_items=ctx.get("before_items") or {},
+                        max_items=1000,
+                        timeout_seconds=15,
+                        interval_seconds=0.5,
+                        accept_partial_best=True,
+                    )
+                    if sum(1 for fid in aligned if fid) >= sum(1 for fid in existing_fids if fid):
+                        save_as["save_as_top_fids"] = aligned
+                        response["data"]["save_as"] = save_as
                 logger.info("任务[%s]执行完成", response["data"].get("task_title"))
                 break
             else:

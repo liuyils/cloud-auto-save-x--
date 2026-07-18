@@ -1076,14 +1076,7 @@ class BaiduAdapter(BaseCloudDriveAdapter):
             remote_dir = self._resolve_fid_to_path(to_pdir_fid if to_pdir_fid else "0")
 
             # --- 记录转存前目标目录的文件列表 ---
-            before_items = {}  # {fid: file_name}
-            try:
-                before_dir = self.ls_dir(to_pdir_fid if to_pdir_fid else "0")
-                if before_dir.get("code") == 0:
-                    for item in before_dir.get("data", {}).get("list", []):
-                        before_items[item.get("fid", "")] = item.get("file_name", "")
-            except Exception:
-                pass
+            before_items = self.snapshot_dest_dir_items(to_pdir_fid if to_pdir_fid else "0", max_items=1000)
 
             # 访问分享并获取元数据
             self._api_access_shared(share_url, passcode)
@@ -1105,45 +1098,15 @@ class BaiduAdapter(BaseCloudDriveAdapter):
                 remote_dir, fs_ids, uk, share_id_num, bdstoken, share_url
             )
 
-            # --- 转存后列目录，按文件名建立新 fid 映射 ---
-            time.sleep(5)
-            name_to_new_fid = {}  # {file_name: new_fid}
-            try:
-                after_dir = self.ls_dir(to_pdir_fid if to_pdir_fid else "0")
-                if after_dir.get("code") == 0:
-                    for item in after_dir.get("data", {}).get("list", []):
-                        fid = item.get("fid", "")
-                        fname = item.get("file_name", "")
-                        # 只记录新增的文件（不在转存前的 fid 列表中）
-                        if fid and fid not in before_items:
-                            name_to_new_fid[fname] = fid
-            except Exception as e:
-                logger.error(f"[Baidu] 转存后获取目录失败: {e}")
-
-            # --- 按 file_names 顺序组装 save_as_top_fids ---
-            saved_fids = []
-            if file_names:
-                for fname in file_names:
-                    new_fid = name_to_new_fid.get(fname, "")
-                    if new_fid:
-                        saved_fids.append(new_fid)
-                    else:
-                        # 如果按文件名找不到，可能是文件名有特殊字符被改变
-                        # 尝试模糊匹配（去除特殊字符后比较）
-                        fname_clean = re.sub(r'[^\w\s\.]', '', fname)
-                        found = False
-                        for k, v in name_to_new_fid.items():
-                            k_clean = re.sub(r'[^\w\s\.]', '', k)
-                            if fname_clean == k_clean:
-                                saved_fids.append(v)
-                                found = True
-                                break
-                        if not found:
-                            logger.warning(f"[Baidu] 未找到文件 '{fname}' 的新 fid")
-                            saved_fids.append("")  # 占位，保持索引对齐
-            else:
-                # 兼容旧调用方式：直接返回新增文件的 fid 列表
-                saved_fids = list(name_to_new_fid.values())
+            saved_fids = self.align_saved_fids_from_dir(
+                to_pdir_fid if to_pdir_fid else "0",
+                file_names,
+                before_items=before_items,
+                max_items=1000,
+                timeout_seconds=20,
+                interval_seconds=1,
+                accept_partial_best=True,
+            ) if file_names else []
 
             if result.get("errno") == 0 or not result.get("errno"):
                 return {

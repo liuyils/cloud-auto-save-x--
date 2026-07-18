@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Optional, Any
 import logging
 import random
+import re
 import threading
 import time
 
@@ -392,3 +393,120 @@ class BaseCloudDriveAdapter(ABC):
             self.savepath_fid[dir_path["file_path"]] = dir_path["fid"]
 
         return True
+
+    @staticmethod
+    def _extract_dir_item_fid(item: dict[str, Any]) -> str:
+        if not isinstance(item, dict):
+            return ""
+        for key in ("fid", "file_id", "id", "fileId", "fs_id"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _extract_dir_item_name(item: dict[str, Any]) -> str:
+        if not isinstance(item, dict):
+            return ""
+        for key in ("file_name", "name", "server_filename", "fileName", "title"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _normalize_saved_name(name: str) -> str:
+        text = str(name or "").strip()
+        if not text:
+            return ""
+        return re.sub(r"[^\w\s\.]", "", text)
+
+    def snapshot_dest_dir_items(self, pdir_fid: str, *, max_items: int = 1000) -> dict[str, str]:
+        try:
+            payload = self.ls_dir(pdir_fid, max_items=max_items) or {}
+        except Exception:
+            return {}
+        if payload.get("code") not in (0, "0", None):
+            return {}
+        items = ((payload.get("data") or {}).get("list") or [])
+        result: dict[str, str] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            fid = self._extract_dir_item_fid(item)
+            if not fid:
+                continue
+            result[fid] = self._extract_dir_item_name(item)
+        return result
+
+    def align_saved_fids_from_dir(
+        self,
+        pdir_fid: str,
+        file_names: List[str] | None,
+        *,
+        before_items: dict[str, str] | None = None,
+        max_items: int = 1000,
+        timeout_seconds: float = 0.0,
+        interval_seconds: float = 1.0,
+        accept_partial_best: bool = True,
+    ) -> list[str]:
+        ordered_names = [str(name or "") for name in (file_names or [])]
+        if not ordered_names:
+            return []
+
+        before_fids = set((before_items or {}).keys())
+        best_aligned: list[str] = []
+        best_matched = -1
+        deadline = time.time() + max(0.0, float(timeout_seconds or 0.0))
+
+        while True:
+            current_items = self.snapshot_dest_dir_items(pdir_fid, max_items=max_items)
+            if current_items:
+                name_to_fids: dict[str, list[str]] = {}
+                normalized_name_to_fids: dict[str, list[str]] = {}
+                for fid, name in current_items.items():
+                    if not fid or fid in before_fids:
+                        continue
+                    raw_name = str(name or "").strip()
+                    if not raw_name:
+                        continue
+                    name_to_fids.setdefault(raw_name, []).append(fid)
+                    normalized = self._normalize_saved_name(raw_name)
+                    if normalized:
+                        normalized_name_to_fids.setdefault(normalized, []).append(fid)
+
+                aligned: list[str] = []
+                used: set[str] = set()
+                for file_name in ordered_names:
+                    matched_fid = ""
+                    raw_name = str(file_name or "").strip()
+                    for candidate in name_to_fids.get(raw_name, []):
+                        if candidate and candidate not in used:
+                            matched_fid = candidate
+                            break
+                    if not matched_fid:
+                        normalized = self._normalize_saved_name(raw_name)
+                        for candidate in normalized_name_to_fids.get(normalized, []):
+                            if candidate and candidate not in used:
+                                matched_fid = candidate
+                                break
+                    if matched_fid:
+                        used.add(matched_fid)
+                    aligned.append(matched_fid)
+
+                matched = sum(1 for fid in aligned if fid)
+                if matched > best_matched:
+                    best_aligned = aligned
+                    best_matched = matched
+                if matched >= len(ordered_names):
+                    return aligned
+
+            if time.time() >= deadline:
+                break
+            time.sleep(max(0.1, float(interval_seconds or 0.0)))
+
+        if accept_partial_best:
+            if best_aligned:
+                return best_aligned
+            return ["" for _ in ordered_names]
+        return []

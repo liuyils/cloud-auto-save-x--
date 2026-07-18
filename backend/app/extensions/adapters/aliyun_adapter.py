@@ -223,6 +223,7 @@ class AliyunAdapter(BaseCloudDriveAdapter):
         self._token: Optional[AliyunToken] = None
         self._account_name: str = account_name or ""
         self._token_lock = threading.Lock()
+        self._save_task_contexts: dict[str, dict[str, Any]] = {}
 
     def _get_error_message(self, code: str) -> str:
         """获取错误码对应的提示信息"""
@@ -791,6 +792,7 @@ class AliyunAdapter(BaseCloudDriveAdapter):
         try:
             to_parent_id = to_pdir_fid if to_pdir_fid and str(to_pdir_fid) != "0" else "root"
             to_drive_id = str(self._token.default_drive_id) if self._token.default_drive_id else ""
+            before_items = self.snapshot_dest_dir_items(to_parent_id, max_items=1000) if file_names else {}
             
             # 验证 drive_id 格式
             if not to_drive_id:
@@ -837,6 +839,21 @@ class AliyunAdapter(BaseCloudDriveAdapter):
                     saved_fids.append(body.get("file_id", ""))
                 else:
                     saved_fids.append("")
+
+            if file_names:
+                matched_count = sum(1 for fid in saved_fids if str(fid or "").strip())
+                if len(saved_fids) != len(file_names) or matched_count < len(file_names):
+                    aligned = self.align_saved_fids_from_dir(
+                        to_parent_id,
+                        file_names,
+                        before_items=before_items,
+                        max_items=1000,
+                        timeout_seconds=20,
+                        interval_seconds=1,
+                        accept_partial_best=True,
+                    )
+                    if sum(1 for fid in aligned if str(fid or "").strip()) >= matched_count:
+                        saved_fids = aligned
             
             return {
                 "code": 0,
