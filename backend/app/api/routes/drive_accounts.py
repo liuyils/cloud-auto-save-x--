@@ -8,7 +8,7 @@ from app.core.errors import ApiError, bad_request, not_found
 from app.core.deps import CurrentUser, get_current_user, require_permissions
 from app.core.permissions import DRIVE_ACCOUNT_READ, DRIVE_ACCOUNT_WRITE
 from app.db.session import get_db
-from app.schemas.drive_account import DriveAccountCreateIn, DriveAccountLsdirCacheRefreshOut, DriveAccountOut, DriveAccountStatusIn, DriveAccountUpdateIn, DriveTypeOut
+from app.schemas.drive_account import DriveAccountCreateIn, DriveAccountLsdirCacheRefreshIn, DriveAccountLsdirCacheRefreshOut, DriveAccountOut, DriveAccountStatusIn, DriveAccountUpdateIn, DriveTypeOut
 from app.schemas.drive_account_auth import DriveAccountCaptchaSubmitIn, DriveAccountSmsSubmitIn
 from app.schemas.drive_account_probe_scheduler import DriveAccountProbeSchedulerSettingOut, DriveAccountProbeSchedulerSettingUpdateIn
 from app.extensions.adapters.adapter_factory import AdapterFactory
@@ -39,7 +39,8 @@ from app.services.drive_accounts import (
 )
 from app.services.drive_account_lsdir_cache import delete_drive_account_lsdir_cache_by_account, get_drive_account_lsdir_cache_subtree_stats
 from app.services.drive_account_lsdir_scan import rebuild_drive_account_lsdir_cache_for_current_302_path, trigger_drive_account_lsdir_scan_if_stale
-from app.services.dl302_settings import extract_dl302_cache_base_path
+from app.services.drive_account_lsdir_static_state import clear_lsdir_scan_state, clear_static_scan_state
+from app.services.dl302_settings import extract_dl302_cache_base_path, extract_dl302_static_cache_base_path
 from app.services.drive_account_signin_jobs import get_drive_account_signin_job, submit_drive_account_signin_job
 from app.thirdparty.dl302_grpc_client import reload_dl302
 
@@ -58,12 +59,14 @@ def _reload_dl302_if_needed(drive_type: str | None) -> None:
 def _out(item, *, db: Session | None = None) -> DriveAccountOut:
     payload = serialize_drive_account(item)
     base_path = extract_dl302_cache_base_path(item)
-    payload["has_302_path"] = bool(base_path)
-    payload["lsdir_cache_base_path"] = base_path
+    static_base_path = extract_dl302_static_cache_base_path(item)
+    stats_base_path = base_path or static_base_path
+    payload["has_302_path"] = bool(stats_base_path)
+    payload["lsdir_cache_base_path"] = stats_base_path
     payload["lsdir_cache_file_total"] = 0
     payload["lsdir_cache_updated_at"] = None
-    if db is not None and getattr(item, "id", None) is not None and base_path:
-        stats = get_drive_account_lsdir_cache_subtree_stats(db, account_id=int(item.id), full_path=base_path)
+    if db is not None and getattr(item, "id", None) is not None and stats_base_path:
+        stats = get_drive_account_lsdir_cache_subtree_stats(db, account_id=int(item.id), full_path=stats_base_path)
         payload["lsdir_cache_file_total"] = int(stats.get("file_total") or 0)
         payload["lsdir_cache_updated_at"] = normalize_api_datetime(stats.get("scanned_at"))
     return DriveAccountOut(**payload)
@@ -81,10 +84,13 @@ def _drive_account_cache_signature(account: DriveAccount | None) -> dict[str, ob
     if account is None:
         return None
     config = resolve_drive_account_config(account)
+    dynamic_config = dict(config)
+    dynamic_config.pop("static_lsdir_cache_path", None)
     return {
-        "config": config,
+        "config": dynamic_config,
         "cookie": AdapterRegistry.serialize_config(account.drive_type, config),
         "base_path": extract_dl302_cache_base_path(account),
+        "static_base_path": extract_dl302_static_cache_base_path(account),
         "drive_type": account.drive_type,
     }
 
@@ -100,16 +106,45 @@ def _should_rebuild_lsdir_cache(before: dict[str, object] | None, after: dict[st
     )
 
 
-def _request_lsdir_cache_rebuild(account_id: int, *, source: str, old_base_path: str | None = None) -> None:
-    result = rebuild_drive_account_lsdir_cache_for_current_302_path(int(account_id), source=source, old_base_path=old_base_path)
+def _should_rebuild_static_lsdir_cache(before: dict[str, object] | None, after: dict[str, object] | None) -> bool:
+    if after is None:
+        return False
+    after_static = after.get("static_base_path")
+    if before is None:
+        return bool(after_static)
+    return before.get("static_base_path") != after_static or before.get("drive_type") != after.get("drive_type")
+
+
+def _request_lsdir_cache_rebuild(
+    account_id: int,
+    *,
+    source: str,
+    old_base_path: str | None = None,
+    old_static_base_path: str | None = None,
+    rebuild_dynamic: bool = True,
+    rebuild_static: bool = False,
+    rescan_static: bool = False,
+) -> None:
+    result = rebuild_drive_account_lsdir_cache_for_current_302_path(
+        int(account_id),
+        source=source,
+        old_base_path=old_base_path,
+        old_static_base_path=old_static_base_path,
+        rebuild_dynamic=rebuild_dynamic,
+        rebuild_static=rebuild_static,
+        rescan_static=rescan_static,
+    )
     logger.info(
-        "drive account lsdir rebuild result account_id=%s source=%s cleared=%s queued=%s base_path=%s reason=%s",
+        "drive account lsdir rebuild result account_id=%s source=%s cleared=%s queued=%s base_path=%s reason=%s static_requested=%s static_queued=%s static_skipped_reason=%s",
         account_id,
         source,
         result.get("cleared"),
         result.get("queued"),
         result.get("base_path"),
         result.get("reason"),
+        result.get("static_requested"),
+        result.get("static_queued"),
+        result.get("static_skipped_reason"),
     )
 
 
@@ -178,7 +213,12 @@ def post_account(request: Request, payload: DriveAccountCreateIn, current: Curre
     db.commit()
     db.refresh(account)
     _reload_dl302_if_needed(account.drive_type)
-    _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.create")
+    _request_lsdir_cache_rebuild(
+        int(account.id),
+        source="api.drive_accounts.create",
+        rebuild_dynamic=True,
+        rebuild_static=bool(extract_dl302_static_cache_base_path(account)),
+    )
     return _out(account, db=db)
 
 
@@ -187,14 +227,24 @@ def patch_account(request: Request, account_id: int, payload: DriveAccountUpdate
     before_account = get_drive_account(db, account_id)
     before_signature = _drive_account_cache_signature(before_account)
     old_base_path = before_signature.get("base_path") if before_signature else None
+    old_static_base_path = before_signature.get("static_base_path") if before_signature else None
     account = update_drive_account(db, account_id, **payload.model_dump(exclude_unset=True))
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.update', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
     db.refresh(account)
     _reload_dl302_if_needed(account.drive_type)
     after_signature = _drive_account_cache_signature(account)
-    if _should_rebuild_lsdir_cache(before_signature, after_signature):
-        _request_lsdir_cache_rebuild(account_id, source="api.drive_accounts.update", old_base_path=old_base_path)
+    rebuild_dynamic = _should_rebuild_lsdir_cache(before_signature, after_signature)
+    rebuild_static = _should_rebuild_static_lsdir_cache(before_signature, after_signature)
+    if rebuild_dynamic or rebuild_static or (old_static_base_path and old_static_base_path != after_signature.get("static_base_path")):
+        _request_lsdir_cache_rebuild(
+            account_id,
+            source="api.drive_accounts.update",
+            old_base_path=str(old_base_path or "") or None,
+            old_static_base_path=str(old_static_base_path or "") or None,
+            rebuild_dynamic=rebuild_dynamic,
+            rebuild_static=rebuild_static,
+        )
     return _out(account, db=db)
 
 
@@ -234,7 +284,6 @@ def patch_account_status(request: Request, account_id: int, payload: DriveAccoun
         db.commit()
         db.refresh(account)
         _reload_dl302_if_needed(account.drive_type)
-        _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.status_enable")
         return _out(account, db=db)
 
     account = set_drive_account_enabled(db, account_id, False)
@@ -266,12 +315,24 @@ def post_account_default(request: Request, account_id: int, current: CurrentUser
 
 
 @router.post('/{account_id}/lsdir-cache/refresh', response_model=DriveAccountLsdirCacheRefreshOut, dependencies=[Depends(require_permissions(DRIVE_ACCOUNT_WRITE))])
-def post_account_lsdir_cache_refresh(request: Request, account_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def post_account_lsdir_cache_refresh(
+    request: Request,
+    account_id: int,
+    payload: DriveAccountLsdirCacheRefreshIn,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     account = get_drive_account(db, account_id)
     base_path = extract_dl302_cache_base_path(account)
-    if not base_path:
+    static_base_path = extract_dl302_static_cache_base_path(account)
+    if not base_path and not static_base_path:
         raise bad_request("DRIVE_ACCOUNT_302_PATH_REQUIRED", "当前账号未配置缓存路径")
-    result = rebuild_drive_account_lsdir_cache_for_current_302_path(int(account_id), source="api.drive_accounts.lsdir_cache_refresh")
+    result = rebuild_drive_account_lsdir_cache_for_current_302_path(
+        int(account_id),
+        source="api.drive_accounts.lsdir_cache_refresh",
+        rebuild_dynamic=True,
+        rescan_static=bool(payload.rescan_static),
+    )
     audit.write_audit_log(
         db,
         actor_user_id=current.user.id,
@@ -281,7 +342,13 @@ def post_account_lsdir_cache_refresh(request: Request, account_id: int, current:
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get('user-agent'),
         success=True,
-        detail=f"queued={bool(result.get('queued'))} reason={result.get('reason') or ''} base_path={base_path}",
+        detail=(
+            f"queued={bool(result.get('queued'))} reason={result.get('reason') or ''} "
+            f"base_path={base_path or static_base_path or ''} "
+            f"static_requested={bool(result.get('static_requested'))} "
+            f"static_queued={bool(result.get('static_queued'))} "
+            f"static_skipped_reason={result.get('static_skipped_reason') or ''}"
+        ),
     )
     db.commit()
     return DriveAccountLsdirCacheRefreshOut(**result)
@@ -291,6 +358,8 @@ def post_account_lsdir_cache_refresh(request: Request, account_id: int, current:
 def delete_account(request: Request, account_id: int, current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
     account = get_drive_account(db, account_id)
     delete_drive_account_lsdir_cache_by_account(db, int(account_id))
+    clear_lsdir_scan_state(int(account_id), str(getattr(account, "drive_type", "") or ""))
+    clear_static_scan_state(int(account_id), str(getattr(account, "drive_type", "") or ""))
     delete_drive_account(db, account_id)
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.delete', target_type='drive_account', target_id=str(account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
@@ -395,7 +464,12 @@ def post_account_auth_qrcode_poll(request: Request, session_id: str, current: Cu
             db.commit()
             db.refresh(account)
             _reload_dl302_if_needed(account.drive_type)
-            _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_qrcode_confirm")
+            _request_lsdir_cache_rebuild(
+                int(account.id),
+                source="api.drive_accounts.auth_qrcode_confirm",
+                rebuild_dynamic=True,
+                rebuild_static=False,
+            )
             return _out(account, db=db)
         session.payload.update({"status": str(data.get("status") or ""), "message": str(data.get("message") or "")})
     else:
@@ -436,7 +510,12 @@ def post_account_auth_qrcode_poll(request: Request, session_id: str, current: Cu
             _reload_dl302_if_needed(account.drive_type)
             audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_confirm', target_type='drive_account', target_id=str(account.id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True, detail="tv_credentials_saved")
             db.commit()
-            _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_qrcode_confirm_tv")
+            _request_lsdir_cache_rebuild(
+                int(account.id),
+                source="api.drive_accounts.auth_qrcode_confirm_tv",
+                rebuild_dynamic=True,
+                rebuild_static=False,
+            )
             return _out(account, db=db)
     audit.write_audit_log(db, actor_user_id=current.user.id, action='drive_account.auth_qrcode_poll', target_type='drive_account', target_id=str(session.account_id), ip=request.client.host if request.client else None, user_agent=request.headers.get('user-agent'), success=True)
     db.commit()
@@ -502,7 +581,12 @@ def post_account_auth_captcha_submit(request: Request, session_id: str, payload:
     db.commit()
     db.refresh(account)
     _reload_dl302_if_needed(account.drive_type)
-    _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_captcha")
+    _request_lsdir_cache_rebuild(
+        int(account.id),
+        source="api.drive_accounts.auth_captcha",
+        rebuild_dynamic=True,
+        rebuild_static=False,
+    )
     return _out(account, db=db)
 
 
@@ -566,7 +650,12 @@ def post_account_auth_sms_submit(request: Request, session_id: str, payload: Dri
     db.commit()
     db.refresh(account)
     _reload_dl302_if_needed(account.drive_type)
-    _request_lsdir_cache_rebuild(int(account.id), source="api.drive_accounts.auth_sms_submit")
+    _request_lsdir_cache_rebuild(
+        int(account.id),
+        source="api.drive_accounts.auth_sms_submit",
+        rebuild_dynamic=True,
+        rebuild_static=False,
+    )
     return _out(account, db=db)
 
 

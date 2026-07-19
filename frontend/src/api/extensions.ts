@@ -61,8 +61,8 @@ export async function probeDriveAccount(accountId: number, options?: { silentToa
   return data
 }
 
-export async function refreshDriveAccountLsdirCache(accountId: number) {
-  const { data } = await http.post<DriveAccountLsdirCacheRefreshResult>(`/drive-accounts/${accountId}/lsdir-cache/refresh`)
+export async function refreshDriveAccountLsdirCache(accountId: number, payload?: { rescan_static?: boolean }) {
+  const { data } = await http.post<DriveAccountLsdirCacheRefreshResult>(`/drive-accounts/${accountId}/lsdir-cache/refresh`, payload || {})
   return data
 }
 

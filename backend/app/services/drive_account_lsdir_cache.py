@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -31,6 +30,33 @@ def _join_full_path(parent_path: str, name: str) -> str:
     if clean_parent == "/":
         return f"/{clean_name}" if clean_name else "/"
     return f"{clean_parent}/{clean_name}" if clean_name else clean_parent
+
+
+def is_same_or_child_path(parent_path: str | None, child_path: str | None) -> bool:
+    parent = _normalize_parent_path(parent_path)
+    child = _normalize_parent_path(child_path)
+    return child == parent or child.startswith(f"{parent.rstrip('/')}/")
+
+
+def is_same_or_parent_path(parent_path: str | None, child_path: str | None) -> bool:
+    return is_same_or_child_path(parent_path=parent_path, child_path=child_path)
+
+
+def is_path_excluded(full_path: str | None, excluded_subtrees: list[str] | tuple[str, ...] | set[str] | None) -> bool:
+    normalized = _normalize_parent_path(full_path)
+    for raw in excluded_subtrees or ():
+        excluded = _normalize_parent_path(raw)
+        if is_same_or_child_path(parent_path=excluded, child_path=normalized):
+            return True
+    return False
+
+
+def get_static_lsdir_cache_expires_at(now: datetime | None = None) -> datetime:
+    base = now or _utcnow()
+    try:
+        return base + timedelta(days=365 * 100)
+    except OverflowError:
+        return datetime.max.replace(tzinfo=base.tzinfo)
 
 
 def _pick_name(payload: dict[str, Any]) -> str:
@@ -167,7 +193,6 @@ def normalize_lsdir_items(parent_path: str, items: list[dict[str, Any]] | None) 
                     raw.get("updated_at") or raw.get("update_time") or raw.get("mtime") or raw.get("modified_at")
                 ),
                 "full_path": _join_full_path(normalized_parent, name),
-                "raw_json": json.dumps(raw, ensure_ascii=False),
             }
         )
     return result
@@ -232,9 +257,10 @@ def upsert_drive_account_lsdir_items(
     items: list[dict[str, Any]] | None,
     ttl_seconds: int,
     scanned_at: datetime | None = None,
+    expires_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     now = scanned_at or _utcnow()
-    expires_at = now + timedelta(seconds=max(1, int(ttl_seconds or 0)))
+    target_expires_at = expires_at or (now + timedelta(seconds=max(1, int(ttl_seconds or 0))))
     deduped_items: dict[str, dict[str, Any]] = {}
     for item in normalize_lsdir_items(parent_path, items):
         deduped_items[str(item["full_path"])] = item
@@ -258,7 +284,13 @@ def upsert_drive_account_lsdir_items(
     for item in normalized_items:
         row = existing_map.get(item["full_path"])
         if row is None:
-            row = DriveAccountLsdirCache(account_id=int(account_id), full_path=item["full_path"], fid=item["fid"], name=item["name"], expires_at=expires_at)
+            row = DriveAccountLsdirCache(
+                account_id=int(account_id),
+                full_path=item["full_path"],
+                fid=item["fid"],
+                name=item["name"],
+                expires_at=target_expires_at,
+            )
             db.add(row)
             existing_map[str(item["full_path"])] = row
         row.account_id = int(account_id)
@@ -271,9 +303,8 @@ def upsert_drive_account_lsdir_items(
         row.size = item["size"]
         row.updated_at_remote = item["updated_at_remote"]
         row.children_count = item["children_count"]
-        row.raw_json = item["raw_json"]
         row.scanned_at = now
-        row.expires_at = expires_at
+        row.expires_at = target_expires_at
 
     existing_children = (
         db.execute(

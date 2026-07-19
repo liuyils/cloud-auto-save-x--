@@ -165,6 +165,8 @@ services:
 | `DB_USER`        | `root`     | MySQL 用户名，仅 `DB_DRIVER=mysql` 时生效 |
 | `DB_PASSWORD`    | 空         | MySQL 密码，仅 `DB_DRIVER=mysql` 时生效 |
 | `DB_CHARSET`     | `utf8mb4`  | MySQL 字符集，仅 `DB_DRIVER=mysql` 时生效 |
+| `DRIVE_ACCOUNT_LSDIR_CACHE_TTL_SECONDS` | `7200` | 网盘目录 `lsdir` 缓存过期时间，单位秒，默认 2 小时 |
+| `DRIVE_ACCOUNT_LSDIR_SCAN_RATE_LIMIT_PER_SECOND` | `1.0` | 网盘目录 `lsdir` 扫描速率限制，单位为每秒请求数 |
 | `DRAMA_RUNTIME_RETRY_MAX_ATTEMPTS`        | `0`        | 最大重试次数，默认3次，0表示不重试 |
 | `DRAMA_RUNTIME_RETRY_BACKOFF_SECONDS`        | `1`        | 重试延迟时间，默认1秒 |
 | `DRAMA_RUNTIME_RETRY_MAX_BACKOFF_SECONDS`        | `8`        | 最大重试延迟时间，默认8秒 |

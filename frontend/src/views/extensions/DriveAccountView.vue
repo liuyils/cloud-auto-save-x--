@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import axios, { type AxiosError } from 'axios'
-import { ElMessage, ElNotification } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { h } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -348,11 +348,35 @@ function isCacheRefreshing(accountId: number) {
 
 async function handleRefreshLsdirCache(row: DriveAccountItem) {
   if (!canWrite.value || !row.has_302_path) return
+  let rescanStatic = false
+  try {
+    await ElMessageBox.confirm(
+      '是否同时重扫静态 lsdir 目录？默认不会重扫；只有你确认后才会强制重新扫描静态目录。',
+      '刷新 lsdir 缓存',
+      {
+        confirmButtonText: '重扫静态目录',
+        cancelButtonText: '仅刷新普通缓存',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      },
+    )
+    rescanStatic = true
+  } catch (error) {
+    if (error === 'cancel') {
+      rescanStatic = false
+    } else {
+      return
+    }
+  }
   cacheRefreshingIds.value = [...cacheRefreshingIds.value, row.id]
   try {
-    const result = await refreshDriveAccountLsdirCache(row.id)
+    const result = await refreshDriveAccountLsdirCache(row.id, { rescan_static: rescanStatic })
     if (result.reason === 'running') {
       ElMessage.info('缓存刷新任务已在后台执行中')
+    } else if (result.static_requested && result.static_queued) {
+      ElMessage.success('普通缓存与静态目录重扫任务已提交')
+    } else if (result.static_requested && !result.static_queued) {
+      ElMessage.warning(`普通缓存刷新已提交，静态目录未重扫：${result.static_skipped_reason || '未配置静态目录'}`)
     } else {
       ElMessage.success('缓存刷新任务已提交')
     }

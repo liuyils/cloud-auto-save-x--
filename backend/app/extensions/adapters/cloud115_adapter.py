@@ -24,6 +24,7 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
     default_config = {
         "cookie": "",
         "lsdir_cache_path": "",
+        "static_lsdir_cache_path": "",
         "strm_scan_path": "",
     }
     config_fields = [
@@ -44,6 +45,15 @@ class Cloud115Adapter(BaseCloudDriveAdapter):
             "required": True,
             "secret": True,
             "placeholder": "/",
+        },
+        {
+            "key": "static_lsdir_cache_path",
+            "label": "静态缓存路径",
+            "description": "只做一次首扫并生成 lsdir 缓存的静态目录，适合完结类资源；仅在首次成功扫描或修改此配置后重扫，若位于缓存路径子树内会被普通扫描自动忽略。",
+            "input_type": "text",
+            "required": False,
+            "secret": True,
+            "placeholder": "/电影库",
         },
         {
             "key": "strm_scan_path",

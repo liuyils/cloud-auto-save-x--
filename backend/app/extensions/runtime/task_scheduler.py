@@ -21,7 +21,11 @@ from app.services.tmdb_cache import purge_cold_cache, refresh_expired_cache, ref
 from app.services.tmdb_cache_scheduler import get_or_create_tmdb_cache_scheduler_setting
 from app.services.drive_account_probe_scheduler import get_or_create_drive_account_probe_scheduler_setting
 from app.services.drive_accounts import probe_drive_account, sign_in_drive_account
-from app.services.drive_account_lsdir_scan import trigger_drive_account_lsdir_targeted_scan
+from app.services.drive_account_lsdir_scan import (
+    recover_incomplete_drive_account_lsdir_scans,
+    recover_incomplete_drive_account_static_scans,
+    trigger_drive_account_lsdir_targeted_scan,
+)
 from app.services.drive_account_lsdir_cache import get_drive_account_lsdir_cache_subtree_freshness
 from app.services.dl302_strm import maybe_auto_generate_dl302_strm
 from app.services.drama_linked_pipeline import DramaLinkedBatchItem, run_drama_linked_batch_pipeline
@@ -580,6 +584,8 @@ def run_drive_account_probe() -> None:
 
 
 def run_drive_account_lsdir_cache_refresh() -> None:
+    recover_incomplete_drive_account_lsdir_scans(source="scheduler.drive_account_lsdir_cache_refresh.recover")
+    recover_incomplete_drive_account_static_scans(source="scheduler.drive_account_lsdir_cache_refresh.static_recover")
     with SessionLocal() as db:
         accounts = (
             db.execute(

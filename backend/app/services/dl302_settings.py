@@ -29,6 +29,7 @@ DL302_STRM_SOURCE_PRIORITY_KEY = "StrmSourcePriority"
 DL302_CAS_ROOT_DIR_KEY = "CASRootDir"
 DL302_CAS_WORKERS_KEY = "CASWorkers"
 DL302_ACCOUNT_LSDIR_CACHE_PATH_KEY = "lsdir_cache_path"
+DL302_ACCOUNT_STATIC_LSDIR_CACHE_PATH_KEY = "static_lsdir_cache_path"
 DL302_ACCOUNT_STRM_SCAN_PATH_KEY = "strm_scan_path"
 DL302_ACCOUNT_LEGACY_MEDIA_PATH_KEY = "302_path"
 DL302_SUPPORTED_DRIVE_TYPES = ("115", "cloud189", "cloud139", "quark", "uc")
@@ -319,6 +320,36 @@ def extract_dl302_cache_base_path(account: DriveAccount) -> str | None:
     return _normalize_account_posix_path(
         data.get(DL302_ACCOUNT_LSDIR_CACHE_PATH_KEY) or data.get(DL302_ACCOUNT_LEGACY_MEDIA_PATH_KEY)
     )
+
+
+def extract_dl302_static_cache_base_path(account: DriveAccount) -> str | None:
+    data = _load_drive_account_config(account)
+    return _normalize_account_posix_path(data.get(DL302_ACCOUNT_STATIC_LSDIR_CACHE_PATH_KEY))
+
+
+def extract_dl302_lsdir_scan_scope(account: DriveAccount) -> dict[str, str | bool | None]:
+    cache_base_path = extract_dl302_cache_base_path(account)
+    static_cache_base_path = extract_dl302_static_cache_base_path(account)
+    static_within_cache = False
+    if cache_base_path and static_cache_base_path:
+        static_within_cache = (
+            static_cache_base_path == cache_base_path
+            or static_cache_base_path.startswith(f"{cache_base_path.rstrip('/')}/")
+        )
+    return {
+        "cache_base_path": cache_base_path,
+        "static_cache_base_path": static_cache_base_path,
+        "static_within_cache": static_within_cache,
+    }
+
+
+def build_dl302_static_lsdir_signature(account: DriveAccount) -> str | None:
+    static_path = extract_dl302_static_cache_base_path(account)
+    if not static_path:
+        return None
+    account_id = int(getattr(account, "id", 0) or 0)
+    drive_type = str(getattr(account, "drive_type", "") or "").strip().lower()
+    return f"{account_id}:{drive_type}:{static_path}"
 
 
 def extract_dl302_strm_scan_base_paths(account: DriveAccount) -> list[str]:

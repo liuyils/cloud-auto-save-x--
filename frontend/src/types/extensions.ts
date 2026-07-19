@@ -61,6 +61,9 @@ export type DriveAccountLsdirCacheRefreshResult = {
   queued: boolean
   base_path?: string | null
   reason?: string | null
+  static_requested?: boolean
+  static_queued?: boolean
+  static_skipped_reason?: string | null
 }
 
 export type PluginItem = {

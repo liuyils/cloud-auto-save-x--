@@ -21,6 +21,7 @@ from app.extensions.runtime.telegram_bot_manager import telegram_bot_manager
 from app.extensions.runtime.task_scheduler import task_scheduler_manager
 from app.middlewares.timing import TimingMiddleware
 from app.services.proxy_image_cache import ensure_dir, resolve_proxy_image_cache_dir
+from app.services.drive_account_lsdir_scan import recover_incomplete_drive_account_lsdir_scans, recover_incomplete_drive_account_static_scans
 from app.services.sync_execution_recovery import recover_running_sync_executions_on_startup, release_all_sync_task_locks_on_startup
 from app.services.setup import ensure_permissions_and_roles
 
@@ -71,6 +72,14 @@ def create_app() -> FastAPI:
                 db.commit()
         except Exception as e:
             logger.warning("权限初始化失败: %s", e, exc_info=True)
+        try:
+            recover_incomplete_drive_account_lsdir_scans()
+        except Exception as e:
+            logger.warning("lsdir 扫描恢复失败: %s", e, exc_info=True)
+        try:
+            recover_incomplete_drive_account_static_scans()
+        except Exception as e:
+            logger.warning("静态 lsdir 扫描恢复失败: %s", e, exc_info=True)
         if bool(getattr(settings, "scheduler_enabled", True)):
             task_scheduler_manager.start()
         telegram_bot_manager.start()

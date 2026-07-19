@@ -73,3 +73,10 @@ class DriveAccountLsdirCacheRefreshOut(BaseModel):
     queued: bool = False
     base_path: str | None = None
     reason: str | None = None
+    static_requested: bool = False
+    static_queued: bool = False
+    static_skipped_reason: str | None = None
+
+
+class DriveAccountLsdirCacheRefreshIn(BaseModel):
+    rescan_static: bool = False
