@@ -37,7 +37,11 @@ from app.services.drive_accounts import (
     supported_drive_types,
     update_drive_account,
 )
-from app.services.drive_account_lsdir_cache import delete_drive_account_lsdir_cache_by_account, get_drive_account_lsdir_cache_subtree_stats
+from app.services.drive_account_lsdir_cache import (
+    delete_drive_account_lsdir_cache_by_account,
+    get_drive_account_lsdir_cache_subtree_stats,
+    is_same_or_child_path,
+)
 from app.services.drive_account_lsdir_scan import rebuild_drive_account_lsdir_cache_for_current_302_path, trigger_drive_account_lsdir_scan_if_stale
 from app.services.drive_account_lsdir_static_state import clear_lsdir_scan_state, clear_static_scan_state
 from app.services.dl302_settings import extract_dl302_cache_base_path, extract_dl302_static_cache_base_path
@@ -66,9 +70,25 @@ def _out(item, *, db: Session | None = None) -> DriveAccountOut:
     payload["lsdir_cache_file_total"] = 0
     payload["lsdir_cache_updated_at"] = None
     if db is not None and getattr(item, "id", None) is not None and stats_base_path:
-        stats = get_drive_account_lsdir_cache_subtree_stats(db, account_id=int(item.id), full_path=stats_base_path)
-        payload["lsdir_cache_file_total"] = int(stats.get("file_total") or 0)
-        payload["lsdir_cache_updated_at"] = normalize_api_datetime(stats.get("scanned_at"))
+        total = 0
+        latest_scanned_at = None
+
+        def _merge_stats(full_path: str | None) -> None:
+            nonlocal total, latest_scanned_at
+            if not full_path:
+                return
+            stats = get_drive_account_lsdir_cache_subtree_stats(db, account_id=int(item.id), full_path=full_path)
+            total += int(stats.get("file_total") or 0)
+            scanned_at = stats.get("scanned_at")
+            if scanned_at and (latest_scanned_at is None or scanned_at > latest_scanned_at):
+                latest_scanned_at = scanned_at
+
+        _merge_stats(base_path)
+        if static_base_path and not is_same_or_child_path(parent_path=base_path, child_path=static_base_path):
+            _merge_stats(static_base_path)
+
+        payload["lsdir_cache_file_total"] = total
+        payload["lsdir_cache_updated_at"] = normalize_api_datetime(latest_scanned_at)
     return DriveAccountOut(**payload)
 
 

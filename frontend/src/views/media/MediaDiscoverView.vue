@@ -4,7 +4,7 @@ import { Search } from '@element-plus/icons-vue'
 
 import { fetchDoubanCategories, fetchDoubanList, fetchTMDBDetail, searchTMDB } from '@/api/media'
 import DramaTaskDrawer from '@/components/tasks/DramaTaskDrawer.vue'
-import { createTask, fetchTasks, updateTask } from '@/api/tasks'
+import { createTask, updateTask } from '@/api/tasks'
 import { fetchSyncTasks } from '@/api/syncTasks'
 import { fetchDriveAccounts, fetchPlugins } from '@/api/extensions'
 import { TASK_WRITE } from '@/constants/permissions'
@@ -60,8 +60,6 @@ const viewMode = ref<'douban' | 'tmdb'>('douban')
 
 const accounts = ref<DriveAccountItem[]>([])
 const plugins = ref<PluginItem[]>([])
-const tasksCache = ref<TaskItem[]>([])
-const tasksLoading = ref(false)
 const syncTasks = ref<SyncTaskItem[]>([])
 const syncTasksLoading = ref(false)
 
@@ -113,6 +111,24 @@ const detail = reactive({
 
 const currentCategory = computed(() => categories.value.find((c) => c.key === filters.main) || null)
 const subOptions = computed(() => currentCategory.value?.subs || [])
+type TMDBMediaType = 'movie' | 'tv'
+
+type DoubanTMDBSearchContext = {
+  mediaType: TMDBMediaType
+  sourceTitle: string
+  sourceDate: string
+  sourceYear: string
+  searchTitle: string
+}
+
+type DoubanTMDBSearchResult = {
+  configured: boolean
+  mediaType: TMDBMediaType
+  sourceTitle: string
+  sourceDate: string
+  sourceYear: string
+  items: TMDBBrief[]
+}
 
 function posterUrlFromTMDB(path?: string | null) {
   if (!path) return ''
@@ -146,37 +162,106 @@ function normalizeDoubanTitleForTMDBSearch(title: string) {
   return out
 }
 
-async function ensureTaskDepsLoaded() {
-  if (tasksLoading.value) return
-  tasksLoading.value = true
-  try {
-    const [acc, pls, ts] = await Promise.all([fetchDriveAccounts(), fetchPlugins(), fetchTasks()])
-    accounts.value = acc || []
-    plugins.value = pls || []
-    tasksCache.value = ts || []
-  } finally {
-    tasksLoading.value = false
+function resolveDoubanTMDBMediaType(): TMDBMediaType {
+  const mediaType = String(currentCategory.value?.media_type || '').trim().toLowerCase()
+  return mediaType === 'movie' ? 'movie' : 'tv'
+}
+
+function getDoubanDateHints(row: DoubanListItem) {
+  const rawYear = String(row.year || '').trim()
+  const subtitle = String(row.card_subtitle || '').trim()
+  const rawDateMatch = rawYear.match(/\b\d{4}-\d{2}-\d{2}\b/)
+  const subtitleDateMatch = subtitle.match(/\b\d{4}-\d{2}-\d{2}\b/)
+  const rawYearMatch = rawYear.match(/\b\d{4}\b/)
+  const subtitleYearMatch = subtitle.match(/\b\d{4}\b/)
+
+  const sourceDate = String(rawDateMatch?.[0] || subtitleDateMatch?.[0] || '').trim()
+  const sourceYear = String(rawYearMatch?.[0] || subtitleYearMatch?.[0] || '').trim()
+  return { sourceDate, sourceYear }
+}
+
+function getDoubanTMDBSearchContext(row: DoubanListItem): DoubanTMDBSearchContext | null {
+  const sourceTitle = String(row.title || '').trim()
+  if (!sourceTitle) {
+    ElMessage.warning('缺少标题')
+    return null
+  }
+  const { sourceDate, sourceYear } = getDoubanDateHints(row)
+  const searchTitle = normalizeDoubanTitleForTMDBSearch(sourceTitle) || sourceTitle
+  return {
+    mediaType: resolveDoubanTMDBMediaType(),
+    sourceTitle,
+    sourceDate,
+    sourceYear,
+    searchTitle,
   }
 }
 
-function pickLatestTask(items: TaskItem[]) {
-  return [...items].sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))[0] || null
+async function searchDoubanTmdbCandidates(
+  row: DoubanListItem,
+  options: { withYear: boolean },
+): Promise<DoubanTMDBSearchResult | null> {
+  const ctx = getDoubanTMDBSearchContext(row)
+  if (!ctx) return null
+  const data = await searchTMDB({
+    q: ctx.searchTitle,
+    type: ctx.mediaType,
+    year: options.withYear ? (ctx.sourceYear || undefined) : undefined,
+    page: 1,
+  })
+  return {
+    configured: Boolean(data.configured),
+    mediaType: ctx.mediaType,
+    sourceTitle: ctx.sourceTitle,
+    sourceDate: ctx.sourceDate,
+    sourceYear: ctx.sourceYear,
+    items: data.items || [],
+  }
 }
 
-function findExistingDramaTasks(tmdb_id: number, tmdb_media_type: 'movie' | 'tv') {
-  return (tasksCache.value || []).filter((t) => {
-    if (!t || t.task_type !== 'drama') return false
-    if (Number(t.tmdb_id) !== Number(tmdb_id)) return false
-    return String(t.tmdb_media_type || '').toLowerCase() === tmdb_media_type
-  })
+function getTMDBItemYear(item: TMDBBrief, mediaType: TMDBMediaType) {
+  const key = mediaType === 'movie' ? 'release_date' : 'first_air_date'
+  return String((item as any)[key] || '').trim()
+}
+
+function pickExactYearCandidate(items: TMDBBrief[], mediaType: TMDBMediaType, year: string, sourceDate?: string) {
+  const exactDate = String(sourceDate || '').trim()
+  if (exactDate) {
+    const exact = items.find((item) => getTMDBItemYear(item, mediaType) === exactDate) || null
+    if (exact) return exact
+  }
+  const y = String(year || '').trim()
+  if (!y) return null
+  return items.find((item) => getTMDBItemYear(item, mediaType).startsWith(y)) || null
+}
+
+function openTmdbManualPick(params: {
+  items: TMDBBrief[]
+  mediaType: TMDBMediaType
+  sourceTitle: string
+  sourceYear: string
+  selectedId?: number
+}) {
+  tmdbPick.visible = true
+  tmdbPick.loading = false
+  tmdbPick.items = params.items || []
+  tmdbPick.selectedId = Number(params.selectedId) || 0
+  tmdbPick.mediaType = params.mediaType
+  tmdbPick.sourceTitle = String(params.sourceTitle || '').trim()
+  tmdbPick.sourceYear = String(params.sourceYear || '').trim()
 }
 
 async function openNewDramaTask(presetTaskname: string, tmdb_id: number, tmdb_media_type: 'movie' | 'tv') {
   syncTasksLoading.value = true
   try {
-    await fetchSyncTasks()
-      .then((data) => { syncTasks.value = data || [] })
-      .catch(() => { syncTasks.value = [] })
+    const [syncList, accountList, pluginList] = await Promise.all([
+      fetchSyncTasks().catch(() => []),
+      fetchDriveAccounts().catch(() => []),
+      fetchPlugins().catch(() => []),
+    ])
+    syncTasks.value = syncList || []
+    accounts.value = accountList || []
+    plugins.value = pluginList || []
   } finally {
     syncTasksLoading.value = false
   }
@@ -189,9 +274,14 @@ async function openNewDramaTask(presetTaskname: string, tmdb_id: number, tmdb_me
 async function openEditDramaTask(task: TaskItem) {
   syncTasksLoading.value = true
   try {
-    await fetchSyncTasks()
-      .then((data) => { syncTasks.value = data || [] })
-      .catch(() => { syncTasks.value = [] })
+    const [syncList, accountList, pluginList] = await Promise.all([
+      fetchSyncTasks().catch(() => []),
+      fetchDriveAccounts().catch(() => []),
+      fetchPlugins().catch(() => []),
+    ])
+    syncTasks.value = syncList || []
+    accounts.value = accountList || []
+    plugins.value = pluginList || []
   } finally {
     syncTasksLoading.value = false
   }
@@ -199,14 +289,6 @@ async function openEditDramaTask(task: TaskItem) {
   taskDrawer.presetTaskname = ''
   taskDrawer.presetTmdb = null
   taskDrawer.visible = true
-}
-
-function openExistingTaskDialog(target: TaskItem, count: number, tmdb: { tmdb_id: number; tmdb_media_type: 'movie' | 'tv' }, presetTaskname: string) {
-  existingTaskDialog.count = Number(count) || 0
-  existingTaskDialog.target = target
-  existingTaskDialog.tmdb = tmdb
-  existingTaskDialog.presetTaskname = String(presetTaskname || '').trim()
-  existingTaskDialog.visible = true
 }
 
 function closeExistingTaskDialog() {
@@ -230,19 +312,6 @@ function confirmCreateNewTask() {
   if (tmdb) openNewDramaTask(name, tmdb.tmdb_id, tmdb.tmdb_media_type)
 }
 
-async function openTaskWithExistingChoice(tmdb: { tmdb_id: number; tmdb_media_type: 'movie' | 'tv' }, presetTaskname: string) {
-  await ensureTaskDepsLoaded()
-  const existed = findExistingDramaTasks(tmdb.tmdb_id, tmdb.tmdb_media_type)
-  if (existed.length) {
-    const target = pickLatestTask(existed)
-    if (target) {
-      openExistingTaskDialog(target, existed.length, tmdb, presetTaskname)
-      return
-    }
-  }
-  openNewDramaTask(presetTaskname, tmdb.tmdb_id, tmdb.tmdb_media_type)
-}
-
 async function oneClickAddFromTmdbRow(row: TMDBBrief) {
   const mt = String(row.media_type || '').trim().toLowerCase()
   if (mt !== 'movie' && mt !== 'tv') {
@@ -254,7 +323,7 @@ async function oneClickAddFromTmdbRow(row: TMDBBrief) {
     ElMessage.warning('缺少 TMDB ID')
     return
   }
-  await openTaskWithExistingChoice({ tmdb_id: tmdbId, tmdb_media_type: mt as any }, bestTitle(row) || '')
+  await openNewDramaTask(bestTitle(row) || '', tmdbId, mt as any)
 }
 
 async function showTmdbPickForDouban(row: DoubanListItem) {
@@ -262,43 +331,82 @@ async function showTmdbPickForDouban(row: DoubanListItem) {
     ElMessage.warning('未配置 TMDB API Key，无法一键添加任务')
     return
   }
-  const title = String(row.title || '').trim()
-  const year = String(row.year || '').trim()
-  if (!title) {
-    ElMessage.warning('缺少标题')
-    return
-  }
-  const searchTitle = normalizeDoubanTitleForTMDBSearch(title) || title
-  const mediaType = String(currentCategory.value?.media_type || '').trim().toLowerCase()
-  const type = mediaType === 'movie' ? 'movie' : 'tv'
-
-  tmdbPick.visible = true
-  tmdbPick.loading = true
-  tmdbPick.items = []
-  tmdbPick.selectedId = 0
-  tmdbPick.mediaType = type as any
-  tmdbPick.sourceTitle = title
-  tmdbPick.sourceYear = year
   try {
-    const data = await searchTMDB({ q: searchTitle, type: type as any, year: year || undefined, page: 1 })
-    if (!data.configured) {
+    const strictResult = await searchDoubanTmdbCandidates(row, { withYear: true })
+    if (!strictResult) return
+    if (!strictResult.configured) {
       ElMessage.warning('未配置 TMDB API Key')
-      tmdbPick.visible = false
       return
     }
-    const list = data.items || []
-    tmdbPick.items = list
-    if (list.length) {
-      let picked: TMDBBrief | null = null
-      if (year) {
-        const key = type === 'movie' ? 'release_date' : 'first_air_date'
-        picked = list.find((x) => String((x as any)[key] || '').startsWith(year)) || null
-      }
-      picked = picked || list[0]
-      tmdbPick.selectedId = Number(picked.id) || 0
+
+    const exact = pickExactYearCandidate(
+      strictResult.items,
+      strictResult.mediaType,
+      strictResult.sourceYear,
+      strictResult.sourceDate,
+    )
+    if (exact?.id) {
+      await openNewDramaTask(
+        candidateTitle(exact, strictResult.mediaType) || '',
+        Number(exact.id),
+        strictResult.mediaType,
+      )
+      return
     }
-  } finally {
+    if (strictResult.items.length === 1 && strictResult.items[0]?.id) {
+      const only = strictResult.items[0]
+      await openNewDramaTask(
+        candidateTitle(only, strictResult.mediaType) || '',
+        Number(only.id),
+        strictResult.mediaType,
+      )
+      return
+    }
+
+    tmdbPick.visible = true
+    tmdbPick.loading = true
+    tmdbPick.items = []
+    tmdbPick.selectedId = 0
+    tmdbPick.mediaType = strictResult.mediaType
+    tmdbPick.sourceTitle = strictResult.sourceTitle
+    tmdbPick.sourceYear = strictResult.sourceYear
+    try {
+      const looseResult = await searchDoubanTmdbCandidates(row, { withYear: false })
+      if (!looseResult) {
+        tmdbPick.visible = false
+        return
+      }
+      if (!looseResult.configured) {
+        ElMessage.warning('未配置 TMDB API Key')
+        tmdbPick.visible = false
+        return
+      }
+      const manualItems = looseResult.items?.length ? looseResult.items : (strictResult.items || [])
+      if (manualItems.length === 1 && manualItems[0]?.id) {
+        const only = manualItems[0]
+        tmdbPick.visible = false
+        await openNewDramaTask(
+          candidateTitle(only, looseResult.mediaType) || '',
+          Number(only.id),
+          looseResult.mediaType,
+        )
+        return
+      }
+      const preferredId = Number(strictResult.items?.[0]?.id) || Number(manualItems?.[0]?.id) || 0
+      openTmdbManualPick({
+        items: manualItems,
+        mediaType: looseResult.mediaType,
+        sourceTitle: looseResult.sourceTitle,
+        sourceYear: looseResult.sourceYear,
+        selectedId: preferredId,
+      })
+    } finally {
+      tmdbPick.loading = false
+    }
+  } catch (e: any) {
     tmdbPick.loading = false
+    tmdbPick.visible = false
+    ElMessage.error(e?.message || 'TMDB 搜索失败')
   }
 }
 
@@ -310,7 +418,7 @@ async function confirmTmdbPick() {
   const mt = tmdbPick.mediaType
   if (mt !== 'movie' && mt !== 'tv') return
   tmdbPick.visible = false
-  await openTaskWithExistingChoice({ tmdb_id: id, tmdb_media_type: mt }, candidateTitle(item, mt) || '')
+  await openNewDramaTask(candidateTitle(item, mt) || '', id, mt)
 }
 
 async function handleTaskSave(payload: any) {
@@ -328,7 +436,6 @@ async function handleTaskSave(payload: any) {
     taskDrawer.currentTask = null
     taskDrawer.presetTaskname = ''
     taskDrawer.presetTmdb = null
-    tasksCache.value = await fetchTasks()
   } finally {
     taskDrawer.submitting = false
   }
@@ -537,41 +644,30 @@ async function openDetailFromDouban(row: DoubanListItem) {
     return
   }
 
-  const mediaType = String(currentCategory.value?.media_type || '').trim().toLowerCase()
-  const type = mediaType === 'movie' ? 'movie' : 'tv'
-  const title = String(row.title || '').trim()
-  const year = String(row.year || '').trim()
-  if (!title) {
-    ElMessage.warning('缺少标题')
-    return
-  }
-  const searchTitle = normalizeDoubanTitleForTMDBSearch(title) || title
-
   detail.visible = true
   detail.loading = true
-  detail.mediaType = type as any
+  detail.mediaType = resolveDoubanTMDBMediaType()
   detail.tmdbId = 0
   detail.data = {}
 
   try {
-    const data = await searchTMDB({ q: searchTitle, type: type as any, year: year || undefined, page: 1 })
-    if (!data.configured) {
+    const result = await searchDoubanTmdbCandidates(row, { withYear: true })
+    if (!result) return
+    if (!result.configured) {
       ElMessage.warning('未配置 TMDB API Key')
       return
     }
-    const list = data.items || []
+    const list = result.items || []
     if (!list.length) {
       ElMessage.warning('未匹配到 TMDB 条目')
       return
     }
 
-    let picked: TMDBBrief | null = null
-    if (year) {
-      const key = type === 'movie' ? 'release_date' : 'first_air_date'
-      picked = list.find((x) => String((x as any)[key] || '').startsWith(year)) || null
-    }
+    let picked = pickExactYearCandidate(list, result.mediaType, result.sourceYear, result.sourceDate)
     picked = picked || list[0]
     await openDetailByBrief(picked)
+  } catch (e: any) {
+    ElMessage.error(e?.message || 'TMDB 搜索失败')
   } finally {
     detail.loading = false
   }
