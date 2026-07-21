@@ -115,7 +115,10 @@ const casActionLoading = reactive<Record<string, boolean>>({})
 const taskDialog = reactive({ open: false, accountId: 0, accountName: '' })
 const fastComputeDialog = reactive({ open: false, account: null as DL302SupportedAccount | null })
 
-let pollTimer: number | null = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let pollInFlight = false
+let pollDelayMs = 3000
+let pollSession = 0
 
 function applyConfig(data: DL302Config) {
   form.proxy_url = String(data.proxy_url || '')
@@ -143,12 +146,13 @@ function applyConfig(data: DL302Config) {
 }
 
 async function loadPage() {
+  stopPoller()
   loading.value = true
   try {
     const [driverData, configData] = await Promise.all([fetchDL302SupportedDrivers(), fetchDL302Config()])
     drivers.value = driverData
     applyConfig(configData)
-    ensurePoller()
+    startPoller()
   } catch (e) {
     toast.error(extractErrorMessage(e, '加载失败'))
   } finally {
@@ -182,27 +186,75 @@ function updateAccountTask(accountId: number, task: DL302CASTask | null) {
 }
 
 // --- polling running tasks (account cards) ---
-function ensurePoller() {
+function nextPollDelay(elapsedMs: number, failed: boolean) {
+  if (failed) return 8000
+  if (elapsedMs > 2500) return 8000
+  if (elapsedMs > 1500) return 5000
+  if (elapsedMs > 800) return 5000
+  return 3000
+}
+
+function clearPollerTimer() {
+  if (pollTimer !== null) {
+    window.clearTimeout(pollTimer)
+    pollTimer = null
+  }
+}
+
+function startPoller() {
   if (!flattenAccounts().some((a) => isTaskActive(currentTask(a)?.status))) {
     stopPoller()
     return
   }
-  if (pollTimer !== null) return
-  pollTimer = window.setInterval(() => {
-    void pollRunning()
-  }, 3000)
+  pollSession += 1
+  pollDelayMs = 3000
+  scheduleNextPoll(0, pollSession)
 }
+
 function stopPoller() {
-  if (pollTimer !== null) {
-    window.clearInterval(pollTimer)
-    pollTimer = null
-  }
+  pollSession += 1
+  clearPollerTimer()
+  pollInFlight = false
+  pollDelayMs = 3000
 }
-async function pollRunning() {
+
+function scheduleNextPoll(delayMs: number, session = pollSession) {
+  clearPollerTimer()
+  if (session !== pollSession) return
+  pollTimer = window.setTimeout(async () => {
+    if (session !== pollSession) return
+    if (pollInFlight) {
+      scheduleNextPoll(Math.max(pollDelayMs, 5000), session)
+      return
+    }
+
+    pollInFlight = true
+    const startedAt = Date.now()
+    let failed = false
+    let shouldContinue = false
+
+    try {
+      shouldContinue = await pollRunningOnce(session)
+    } catch {
+      failed = true
+      shouldContinue = true
+    } finally {
+      pollInFlight = false
+      if (session !== pollSession) return
+      if (!shouldContinue) {
+        stopPoller()
+        return
+      }
+      pollDelayMs = nextPollDelay(Date.now() - startedAt, failed)
+      scheduleNextPoll(pollDelayMs, session)
+    }
+  }, delayMs)
+}
+
+async function pollRunningOnce(session: number) {
   const targets = flattenAccounts().filter((a) => isTaskActive(currentTask(a)?.status))
   if (!targets.length) {
-    stopPoller()
-    return
+    return false
   }
   await Promise.all(
     targets.map(async (a) => {
@@ -210,13 +262,15 @@ async function pollRunning() {
       if (!task?.task_id) return
       try {
         const latest = await fetchDL302CasTask(task.task_id)
+        if (session !== pollSession) return
         updateAccountTask(a.account_id, latest)
       } catch {
         // ignore during polling
       }
     }),
   )
-  if (!flattenAccounts().some((a) => isTaskActive(currentTask(a)?.status))) stopPoller()
+  if (session !== pollSession) return false
+  return flattenAccounts().some((a) => isTaskActive(currentTask(a)?.status))
 }
 
 // --- CAS actions ---
@@ -235,7 +289,7 @@ async function doGenerate(account: DL302SupportedAccount, fastCompute: boolean) 
     const result = await submitDL302CasTask(account.account_id, { fast_compute: fastCompute })
     updateAccountTask(account.account_id, result.task)
     toast.success(result.message || 'CAS 任务已提交')
-    ensurePoller()
+    startPoller()
   } catch (e) {
     toast.error(extractErrorMessage(e, '提交 CAS 任务失败'))
   } finally {
@@ -263,7 +317,7 @@ async function runTaskAction(
     else latest = await cancelDL302CasTask(task.task_id)
     updateAccountTask(account.account_id, latest)
     toast.success(action === 'pause' ? '已请求暂停' : action === 'resume' ? '任务已继续' : '任务已停止')
-    if (action !== 'cancel') ensurePoller()
+    startPoller()
   } catch (e) {
     toast.error(extractErrorMessage(e, '操作失败'))
   } finally {

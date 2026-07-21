@@ -46,7 +46,10 @@ const status = ref('all')
 const page = ref(1)
 const pageSize = ref(10)
 
-let pollTimer: number | null = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let pollInFlight = false
+let pollDelayMs = 3000
+let pollSession = 0
 
 const selectedTask = computed(() => tasks.value.find((t) => t.task_id === selectedTaskId.value) || null)
 
@@ -74,36 +77,89 @@ watch([() => filteredItems.value.length, pageSize], () => {
   if (page.value > pageCount.value) page.value = pageCount.value
 })
 
-function stopPoll() {
+function nextPollDelay(elapsedMs: number, failed: boolean) {
+  if (failed) return 8000
+  if (elapsedMs > 2500) return 8000
+  if (elapsedMs > 1500) return 5000
+  if (elapsedMs > 800) return 5000
+  return 3000
+}
+
+function clearPollTimer() {
   if (pollTimer !== null) {
-    window.clearInterval(pollTimer)
+    window.clearTimeout(pollTimer)
     pollTimer = null
   }
 }
 
-function ensurePoll() {
-  stopPoll()
-  if (!isTaskActive(selectedTask.value?.status)) return
-  pollTimer = window.setInterval(() => {
-    void pollSelected()
-  }, 3000)
+function stopPoll() {
+  pollSession += 1
+  clearPollTimer()
+  pollInFlight = false
+  pollDelayMs = 3000
 }
 
-async function pollSelected() {
+function startPoll() {
   const task = selectedTask.value
   if (!task?.task_id || !isTaskActive(task.status)) {
     stopPoll()
     return
   }
-  try {
-    const latest = await fetchDL302CasTask(task.task_id)
-    tasks.value = tasks.value.map((t) => (t.task_id === latest.task_id ? latest : t))
-    const items = await fetchDL302CasTaskItems(task.task_id)
-    itemsMap[task.task_id] = items
-    if (!isTaskActive(latest.status)) stopPoll()
-  } catch {
-    // silent during polling
+  pollSession += 1
+  pollDelayMs = 3000
+  scheduleNextPoll(0, pollSession)
+}
+
+function scheduleNextPoll(delayMs: number, session = pollSession) {
+  clearPollTimer()
+  if (session !== pollSession) return
+  pollTimer = window.setTimeout(async () => {
+    if (session !== pollSession) return
+    if (pollInFlight) {
+      scheduleNextPoll(Math.max(pollDelayMs, 5000), session)
+      return
+    }
+
+    pollInFlight = true
+    const startedAt = Date.now()
+    let failed = false
+    let shouldContinue = false
+
+    try {
+      shouldContinue = await pollSelectedOnce(session)
+    } catch {
+      failed = true
+      shouldContinue = true
+    } finally {
+      pollInFlight = false
+      if (session !== pollSession) return
+      if (!shouldContinue) {
+        stopPoll()
+        return
+      }
+      pollDelayMs = nextPollDelay(Date.now() - startedAt, failed)
+      scheduleNextPoll(pollDelayMs, session)
+    }
+  }, delayMs)
+}
+
+async function pollSelectedOnce(session: number) {
+  const task = selectedTask.value
+  if (!task?.task_id || !isTaskActive(task.status)) {
+    return false
   }
+  const taskId = task.task_id
+  const latest = await fetchDL302CasTask(taskId)
+  if (session !== pollSession || selectedTaskId.value !== taskId) return false
+
+  tasks.value = tasks.value.map((t) => (t.task_id === latest.task_id ? latest : t))
+  if (!isTaskActive(latest.status)) return false
+
+  const items = await fetchDL302CasTaskItems(taskId)
+  if (session !== pollSession || selectedTaskId.value !== taskId) return false
+  itemsMap[taskId] = items
+
+  return isTaskActive(latest.status)
 }
 
 async function loadTaskItems(taskId: string) {
@@ -120,6 +176,7 @@ async function loadTaskItems(taskId: string) {
 
 async function loadTasks() {
   if (!props.accountId) return
+  stopPoll()
   loadingTasks.value = true
   try {
     const result = await fetchDL302CasTasks(props.accountId)
@@ -128,7 +185,7 @@ async function loadTasks() {
       selectedTaskId.value = tasks.value[0].task_id
     }
     if (selectedTaskId.value) await loadTaskItems(selectedTaskId.value)
-    ensurePoll()
+    startPoll()
   } catch (e) {
     toast.error(extractErrorMessage(e, '加载任务失败'))
   } finally {
@@ -137,10 +194,11 @@ async function loadTasks() {
 }
 
 async function handleSelectTask(taskId: string) {
+  stopPoll()
   selectedTaskId.value = taskId
   page.value = 1
   await loadTaskItems(taskId)
-  ensurePoll()
+  startPoll()
 }
 
 function handleClose() {

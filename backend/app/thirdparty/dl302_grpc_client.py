@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Tuple
 
 import grpc
@@ -59,7 +60,16 @@ def _call_dl302_rpc(method_name: str, request, *, timeout_seconds: float, fallba
             last_exc = exc
             if attempt >= attempts or not _is_retryable_rpc_error(exc):
                 raise
-            logger.warning("dl302 rpc retry method=%s attempt=%s/%s err=%s", method_name, attempt, attempts, exc)
+            delay_seconds = min(0.8, 0.2 * (2 ** (attempt - 1)))
+            logger.warning(
+                "dl302 rpc retry method=%s attempt=%s/%s wait=%.3fs err=%s",
+                method_name,
+                attempt,
+                attempts,
+                delay_seconds,
+                exc,
+            )
+            time.sleep(delay_seconds)
     if last_exc is not None:
         raise last_exc
     raise RuntimeError(fallback)
