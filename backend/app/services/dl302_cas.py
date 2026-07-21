@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 from pathlib import PurePosixPath
 
 import grpc
 
 from app.core.errors import ApiError, bad_request, not_found
 from app.models.drive_account import DriveAccount
-from app.services.dl302_settings import extract_dl302_cas_base_path, extract_dl302_cas_base_paths
+from app.services.drive_account_lsdir_scan import refresh_drive_account_lsdir_paths
+from app.services.dl302_settings import extract_dl302_cas_base_paths
 
 
 def _normalize_media_base_path(raw: object) -> str | None:
@@ -21,10 +21,6 @@ def _normalize_media_base_path(raw: object) -> str | None:
     if not normalized.startswith("/"):
         normalized = "/" + normalized.lstrip("/")
     return normalized.rstrip("/") or "/"
-
-
-def _extract_account_media_base_path(account: DriveAccount) -> str | None:
-    return _normalize_media_base_path(extract_dl302_cas_base_path(account))
 
 
 def _extract_account_media_base_paths(account: DriveAccount) -> list[str]:
@@ -70,6 +66,19 @@ def _wrap_dl302_rpc_error(exc: Exception, *, action: str) -> ApiError:
     if detail == "task not found":
         return not_found("DL302_CAS_TASK_NOT_FOUND", "CAS 任务不存在")
     return ApiError(code="DL302_RPC_FAILED", message=f"dl302 {action}失败", http_status=502, detail=detail)
+
+
+def _normalize_relative_dir(raw: object) -> str | None:
+    text = str(raw or "").strip().strip("/")
+    if not text:
+        return None
+    try:
+        normalized = str(PurePosixPath(text)).strip().strip("/")
+    except Exception:
+        return None
+    if not normalized or normalized == ".":
+        return None
+    return normalized
 
 
 def _task_to_dict(task) -> dict[str, object]:
@@ -152,6 +161,70 @@ def submit_dl302_cas_task(account_id: int, db, *, fast_compute: bool = False) ->
     except Exception as exc:
         raise _wrap_dl302_rpc_error(exc, action="CAS 任务提交") from exc
     return _task_to_dict(getattr(resp, "task", None))
+
+
+def refresh_dl302_cas_output_directory_cache(
+    db,
+    *,
+    drive_type: str,
+    account: str,
+    task_id: str = "",
+    relative_dir_paths: list[str] | None = None,
+) -> dict[str, object]:
+    from app.services.dl302_settings import get_or_create_dl302_setting, load_dl302_config
+
+    drive_type_text = str(drive_type or "").strip()
+    account_name = str(account or "").strip()
+    if not drive_type_text or not account_name:
+        raise bad_request("DL302_CAS_REFRESH_ACCOUNT_REQUIRED", "驱动类型和账号名称不能为空")
+
+    row = (
+        db.query(DriveAccount)
+        .filter(
+            DriveAccount.drive_type == drive_type_text,
+            DriveAccount.name == account_name,
+        )
+        .order_by(DriveAccount.enabled.desc(), DriveAccount.id.asc())
+        .first()
+    )
+    if row is None:
+        raise not_found("DL302_CAS_REFRESH_ACCOUNT_NOT_FOUND", "未找到对应的驱动账号")
+
+    config = load_dl302_config(get_or_create_dl302_setting(db))
+    cas_root_dir = _normalize_media_base_path(config.get("cas_root_dir"))
+    if not cas_root_dir:
+        raise bad_request("DL302_CAS_ROOT_DIR_REQUIRED", "请先配置 CAS 文件生成目录")
+
+    normalized_relative_dirs: list[str] = []
+    seen_relative_dirs: set[str] = set()
+    for raw in relative_dir_paths or []:
+        normalized = _normalize_relative_dir(raw)
+        if not normalized or normalized in seen_relative_dirs:
+            continue
+        seen_relative_dirs.add(normalized)
+        normalized_relative_dirs.append(normalized)
+
+    stats = refresh_drive_account_lsdir_paths(
+        account_id=int(getattr(row, "id", 0) or 0),
+        savepath=cas_root_dir,
+        relative_dir_paths=normalized_relative_dirs or None,
+        recursive_savepath=False,
+        source=f"dl302.cas.done:{str(task_id or '').strip() or 'unknown'}",
+        wait_if_busy=True,
+        max_wait_seconds=600.0,
+        include_cas_root_dir=False,
+    )
+    return {
+        "ok": True,
+        "account_id": int(getattr(row, "id", 0) or 0),
+        "drive_type": drive_type_text,
+        "account": account_name,
+        "savepath": cas_root_dir,
+        "relative_dir_paths": normalized_relative_dirs,
+        "scanned_dirs": int(getattr(stats, "scanned_dirs", 0) or 0),
+        "cached_items": int(getattr(stats, "cached_items", 0) or 0),
+        "message": "CAS 输出目录缓存刷新完成",
+    }
 
 
 def submit_dl302_cas_task_delta(

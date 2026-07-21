@@ -95,11 +95,6 @@ class Settings(BaseSettings):
     tasks_share_preview_batch_db_cache_ttl_seconds: int = 6 * 60 * 60
     tasks_share_preview_batch_db_cache_retention_seconds: int = 7 * 24 * 60 * 60
 
-    drive_account_lsdir_cache_ttl_seconds: int = Field(
-        default=2 * 60 * 60,
-        validation_alias="DRIVE_ACCOUNT_LSDIR_CACHE_TTL_SECONDS",
-    )
-    drive_account_lsdir_cache_retention_seconds: int = 7 * 24 * 60 * 60
     drive_account_lsdir_scan_rate_limit_per_second: float = Field(
         default=1.0,
         validation_alias="DRIVE_ACCOUNT_LSDIR_SCAN_RATE_LIMIT_PER_SECOND",

@@ -18,11 +18,8 @@ from app.services.drive_account_lsdir_cache import (
     delete_drive_account_lsdir_cache_by_path,
     delete_drive_account_lsdir_cache_subtree_by_path,
     get_drive_account_lsdir_cache_subtree_freshness,
-    get_static_lsdir_cache_expires_at,
     is_path_excluded,
     is_same_or_child_path,
-    purge_expired_drive_account_lsdir_cache,
-    purge_old_drive_account_lsdir_cache,
     _join_full_path,
     _normalize_parent_path,
     upsert_drive_account_lsdir_items,
@@ -36,12 +33,12 @@ from app.services.drive_account_lsdir_static_state import (
     mark_static_scan_completed,
     mark_static_scan_failed,
     mark_static_scan_running,
+    load_lsdir_scan_state,
     should_rescan_lsdir_path,
     should_rescan_static_path,
 )
 from app.services.dl302_settings import (
     extract_dl302_cache_base_path,
-    extract_dl302_lsdir_scan_scope,
     extract_dl302_static_cache_base_path,
     get_or_create_dl302_setting,
     load_dl302_config,
@@ -227,35 +224,6 @@ def trigger_drive_account_lsdir_scan(account_id: int, source: str) -> bool:
     return True
 
 
-def trigger_drive_account_lsdir_scan_if_stale(account_id: int, source: str, *, force: bool = False) -> bool:
-    account_key = int(account_id)
-    if not force:
-        with SessionLocal() as db:
-            account = db.get(DriveAccount, account_key)
-            if account is None:
-                return False
-            scope = extract_dl302_lsdir_scan_scope(account)
-            cache_base_path = scope.get("cache_base_path")
-            if not cache_base_path:
-                return False
-            freshness = get_drive_account_lsdir_cache_subtree_freshness(
-                db,
-                account_id=account_key,
-                full_path=str(cache_base_path),
-            )
-            if bool(freshness.get("is_fresh")):
-                logger.info(
-                    "drive account lsdir scan skipped: cache subtree fresh account_id=%s source=%s base_path=%s expires_at=%s total=%s",
-                    account_key,
-                    source,
-                    cache_base_path,
-                    freshness.get("expires_at"),
-                    freshness.get("total"),
-                )
-                return False
-    return trigger_drive_account_lsdir_scan(account_key, source)
-
-
 def trigger_drive_account_lsdir_targeted_scan(
     account_id: int,
     *,
@@ -349,11 +317,6 @@ def rebuild_drive_account_lsdir_cache_for_current_302_path(
             )
             clear_static_scan_state(account_key, str(account.drive_type or ""))
         if rebuild_static and static_base_path:
-            static_cleared += delete_drive_account_lsdir_cache_subtree_by_path(
-                db,
-                account_id=account_key,
-                full_path=static_base_path,
-            )
             clear_static_scan_state(account_key, str(account.drive_type or ""))
         if rebuild_dynamic and base_path:
             clear_lsdir_scan_state(account_key, str(account.drive_type or ""))
@@ -476,9 +439,6 @@ def refresh_drive_account_lsdir_paths(
             ok = adapter.init()
             if not ok:
                 raise RuntimeError(f"drive account adapter init failed account_id={account_key} drive_type={context.drive_type}")
-        with SessionLocal() as db:
-            purge_expired_drive_account_lsdir_cache(db)
-            db.commit()
         target_specs = _build_requested_target_specs(
             savepath=normalized_savepath,
             relative_dir_paths=relative_dir_paths,
@@ -595,9 +555,11 @@ def recover_incomplete_drive_account_lsdir_scans(source: str = "startup.recover_
         if not base_path:
             continue
         checked += 1
+        state = load_lsdir_scan_state(int(account.id), str(account.drive_type or ""))
         with SessionLocal() as db:
             freshness = get_drive_account_lsdir_cache_subtree_freshness(db, account_id=int(account.id), full_path=base_path)
-        if bool(freshness.get("is_fresh")) and int(freshness.get("total") or 0) > 0:
+        total = int(freshness.get("total") or 0)
+        if state is None and total > 0:
             mark_lsdir_scan_completed(
                 int(account.id),
                 str(account.drive_type or ""),
@@ -670,21 +632,12 @@ def _scan_drive_account_worker(account_id: int, source: str) -> None:
                     source,
                 )
                 return
-        with SessionLocal() as db:
-            purge_expired_drive_account_lsdir_cache(db)
-            db.commit()
         stats = _walk_account_tree(
             account_id=context.account_id,
             drive_type=context.drive_type,
             adapter=adapter,
             lsdir_scope=context.lsdir_scope,
         )
-        with SessionLocal() as db:
-            purge_old_drive_account_lsdir_cache(
-                db,
-                retention_seconds=int(getattr(settings, "drive_account_lsdir_cache_retention_seconds", 7 * 24 * 60 * 60) or 7 * 24 * 60 * 60),
-            )
-            db.commit()
         with SessionLocal() as db:
             _trigger_dl302_strm_after_scan(db=db, source=f"{source}.full")
             db.commit()
@@ -753,9 +706,6 @@ def _scan_drive_account_targeted_worker(
                     source,
                 )
                 return
-        with SessionLocal() as db:
-            purge_expired_drive_account_lsdir_cache(db)
-            db.commit()
         target_specs = _build_requested_target_specs(
             savepath=savepath,
             relative_dir_paths=relative_dir_paths,
@@ -884,7 +834,6 @@ def _refresh_account_paths(
     lsdir_scope: dict[str, Any],
     progress_hook=None,
 ) -> ScanStats:
-    ttl_seconds = int(getattr(settings, "drive_account_lsdir_cache_ttl_seconds", 2 * 60 * 60) or 2 * 60 * 60)
     rate_limit = float(getattr(settings, "drive_account_lsdir_scan_rate_limit_per_second", 1.0) or 1.0)
     stats = ScanStats()
     queue: deque[tuple[str, TargetPathSpec]] = deque()
@@ -970,9 +919,7 @@ def _refresh_account_paths(
                     parent_fid=str(parent_fid),
                     parent_path=parent_path,
                     items=raw_items,
-                    ttl_seconds=ttl_seconds,
                     scanned_at=now,
-                    expires_at=get_static_lsdir_cache_expires_at(now) if spec.is_static else None,
                 )
                 if parent_path != "/" and not normalized_items:
                     delete_drive_account_lsdir_cache_by_path(

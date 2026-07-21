@@ -42,7 +42,7 @@ from app.services.drive_account_lsdir_cache import (
     get_drive_account_lsdir_cache_subtree_stats,
     is_same_or_child_path,
 )
-from app.services.drive_account_lsdir_scan import rebuild_drive_account_lsdir_cache_for_current_302_path, trigger_drive_account_lsdir_scan_if_stale
+from app.services.drive_account_lsdir_scan import rebuild_drive_account_lsdir_cache_for_current_302_path
 from app.services.drive_account_lsdir_static_state import clear_lsdir_scan_state, clear_static_scan_state
 from app.services.dl302_settings import extract_dl302_cache_base_path, extract_dl302_static_cache_base_path
 from app.services.drive_account_signin_jobs import get_drive_account_signin_job, submit_drive_account_signin_job
@@ -90,14 +90,6 @@ def _out(item, *, db: Session | None = None) -> DriveAccountOut:
         payload["lsdir_cache_file_total"] = total
         payload["lsdir_cache_updated_at"] = normalize_api_datetime(latest_scanned_at)
     return DriveAccountOut(**payload)
-
-
-def _trigger_lsdir_scan_if_active(account: DriveAccount, *, source: str) -> None:
-    if getattr(account, "id", None) is None:
-        return
-    if str(getattr(account, "runtime_status", "") or "") != "active":
-        return
-    trigger_drive_account_lsdir_scan_if_stale(int(account.id), source=source)
 
 
 def _drive_account_cache_signature(account: DriveAccount | None) -> dict[str, object] | None:
@@ -394,7 +386,6 @@ def post_account_probe(request: Request, account_id: int, current: CurrentUser =
     db.commit()
     db.refresh(account)
     _reload_dl302_if_needed(account.drive_type)
-    _trigger_lsdir_scan_if_active(account, source="api.drive_accounts.probe")
     return _out(account, db=db)
 
 

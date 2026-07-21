@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import secrets
 
 from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, get_current_user, require_permissions
+from app.core.errors import unauthorized
 from app.core.permissions import TASK_READ, TASK_WRITE
+from app.core.settings import settings
 from app.db.session import get_db
 from app.schemas.dl302_settings import (
     DL302CASTaskItemOut,
@@ -16,6 +19,8 @@ from app.schemas.dl302_settings import (
     DL302CasGenerateOut,
     DL302ConfigOut,
     DL302ConfigUpdateIn,
+    DL302InternalCasRefreshIn,
+    DL302InternalCasRefreshOut,
     DL302StrmGenerateIn,
     DL302StrmGenerateOut,
     DL302SupportedDriverOut,
@@ -27,6 +32,7 @@ from app.services.dl302_cas import (
     list_dl302_cas_task_items,
     list_dl302_cas_tasks,
     pause_dl302_cas_task,
+    refresh_dl302_cas_output_directory_cache,
     resume_dl302_cas_task,
     submit_dl302_cas_task,
 )
@@ -37,6 +43,13 @@ from app.thirdparty.dl302_grpc_client import reload_dl302
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _require_internal_runtime_token(request: Request) -> None:
+    expected = str(settings.internal_runtime_notify_token or "").strip()
+    provided = str(request.headers.get("x-internal-token") or "").strip()
+    if not expected or not provided or not secrets.compare_digest(provided, expected):
+        raise unauthorized("DL302_INTERNAL_TOKEN_INVALID", "内部调用凭证无效")
 
 
 def _build_dl302_config_out(db: Session, item) -> DL302ConfigOut:
@@ -175,6 +188,23 @@ def post_dl302_cas_task(
         task=DL302CASTaskOut(**task),
         message="CAS 任务已提交",
     )
+
+
+@router.post("/internal/cas/refresh-lsdir", response_model=DL302InternalCasRefreshOut)
+def post_dl302_internal_cas_refresh_lsdir(
+    request: Request,
+    payload: DL302InternalCasRefreshIn,
+    db: Session = Depends(get_db),
+) -> DL302InternalCasRefreshOut:
+    _require_internal_runtime_token(request)
+    result = refresh_dl302_cas_output_directory_cache(
+        db,
+        drive_type=payload.drive_type,
+        account=payload.account,
+        task_id=payload.task_id,
+        relative_dir_paths=payload.relative_dir_paths,
+    )
+    return DL302InternalCasRefreshOut(**result)
 
 
 @router.get("/cas/accounts/{account_id}/tasks", response_model=DL302CASTaskListOut, dependencies=[Depends(require_permissions(TASK_READ))])

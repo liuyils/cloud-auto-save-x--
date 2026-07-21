@@ -7,7 +7,6 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from app.core.settings import settings
@@ -21,19 +20,10 @@ from app.services.tmdb_cache import purge_cold_cache, refresh_expired_cache, ref
 from app.services.tmdb_cache_scheduler import get_or_create_tmdb_cache_scheduler_setting
 from app.services.drive_account_probe_scheduler import get_or_create_drive_account_probe_scheduler_setting
 from app.services.drive_accounts import probe_drive_account, sign_in_drive_account
-from app.services.drive_account_lsdir_scan import (
-    recover_incomplete_drive_account_lsdir_scans,
-    recover_incomplete_drive_account_static_scans,
-    trigger_drive_account_lsdir_targeted_scan,
-)
-from app.services.drive_account_lsdir_cache import get_drive_account_lsdir_cache_subtree_freshness
-from app.services.dl302_strm import maybe_auto_generate_dl302_strm
 from app.services.drama_linked_pipeline import DramaLinkedBatchItem, run_drama_linked_batch_pipeline
 from app.services.sync_execution_cleanup import purge_old_sync_executions
 from app.services.sync_execution_recovery import abort_stale_running_sync_executions
 from app.services.sync_task_triggers import should_trigger_linked_sync_for_drama_execution
-from app.models.drive_account import DriveAccount
-from app.extensions.runtime.adapter_registry import AdapterRegistry
 from app.extensions.runtime.account_manager import DatabaseAccountManager
 from app.extensions.runtime.task_executor import TaskExecutor
 from app.extensions.runtime.execution_log import ExecutionLog
@@ -84,19 +74,6 @@ class TaskSchedulerManager:
             )
         except Exception as e:
             logger.error(f"同步执行兜底调度加载失败: {e}")
-        try:
-            self.scheduler.add_job(
-                run_drive_account_lsdir_cache_refresh,
-                trigger=CronTrigger(minute="*", timezone="Asia/Shanghai"),
-                id="drive_account_lsdir_cache_refresh",
-                replace_existing=True,
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=60,
-            )
-        except Exception as e:
-            logger.error(f"驱动账号 ls_dir 缓存调度加载失败: {e}")
-
     def shutdown(self) -> None:
         if self.scheduler is None:
             return
@@ -581,109 +558,6 @@ def run_drive_account_probe() -> None:
                     break
 
     logger.info("驱动账号自动探测完成 ok=%s skipped=%s failed=%s", ok, skipped, failed)
-
-
-def run_drive_account_lsdir_cache_refresh() -> None:
-    recover_incomplete_drive_account_lsdir_scans(source="scheduler.drive_account_lsdir_cache_refresh.recover")
-    recover_incomplete_drive_account_static_scans(source="scheduler.drive_account_lsdir_cache_refresh.static_recover")
-    with SessionLocal() as db:
-        accounts = (
-            db.execute(
-                select(DriveAccount).where(
-                    DriveAccount.enabled.is_(True),
-                    DriveAccount.runtime_status == "active",
-                ).order_by(DriveAccount.is_default.desc(), DriveAccount.id.asc())
-            )
-            .scalars()
-            .all()
-        )
-        targets: list[tuple[int, str]] = []
-        unsupported = 0
-        missing_path = 0
-        for account in accounts:
-            account_id = int(getattr(account, "id", 0) or 0)
-            if account_id <= 0:
-                continue
-            meta = AdapterRegistry.get_drive_type_meta(str(getattr(account, "drive_type", "") or ""))
-            default_config = meta.get("default_config") or {}
-            fields = meta.get("config_fields") or []
-            supports_cache_path = (
-                bool("lsdir_cache_path" in default_config)
-                or bool("302_path" in default_config)
-                or any(str(item.get("key") or "") in {"lsdir_cache_path", "302_path"} for item in fields if isinstance(item, dict))
-            )
-            if not supports_cache_path:
-                unsupported += 1
-                continue
-            runtime_config = AdapterRegistry.parse_config_json(account.drive_type, account.config_json, account.cookie)
-            raw_path = str(runtime_config.get("lsdir_cache_path") or runtime_config.get("302_path") or "").strip()
-            if not raw_path:
-                missing_path += 1
-                continue
-            targets.append((account_id, raw_path))
-
-    triggered = 0
-    skipped_fresh = 0
-    skipped_running = 0
-    checked = 0
-    for account_id, base_path in targets:
-        checked += 1
-        with SessionLocal() as db:
-            freshness = get_drive_account_lsdir_cache_subtree_freshness(db, account_id=account_id, full_path=base_path)
-        if bool(freshness.get("is_fresh")):
-            skipped_fresh += 1
-            continue
-        if trigger_drive_account_lsdir_targeted_scan(
-            account_id,
-            savepath=base_path,
-            relative_dir_paths=None,
-            recursive_savepath=True,
-            source="scheduler.drive_account_lsdir_cache_refresh.cache_path",
-        ):
-            triggered += 1
-        else:
-            skipped_running += 1
-
-    logger.info(
-        "驱动账号 ls_dir 缓存巡检完成 accounts=%s checked=%s triggered=%s skipped_fresh=%s skipped_running=%s unsupported=%s missing_cache_path=%s",
-        len(accounts),
-        checked,
-        triggered,
-        skipped_fresh,
-        skipped_running,
-        unsupported,
-        missing_path,
-    )
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        with SessionLocal() as db:
-            try:
-                result = maybe_auto_generate_dl302_strm(db, source="scheduler.drive_account_lsdir_cache_refresh.reconcile")
-                db.commit()
-                if result:
-                    logger.info(
-                        "驱动账号 ls_dir 缓存巡检后 STRM 对账完成 mode=%s total=%s added=%s updated=%s removed=%s unchanged=%s dirs=%s skipped_accounts=%s",
-                        result.get("mode"),
-                        result.get("generated_files"),
-                        result.get("added_files"),
-                        result.get("updated_files"),
-                        result.get("removed_files"),
-                        result.get("unchanged_files"),
-                        result.get("generated_dirs"),
-                        result.get("skipped_accounts"),
-                    )
-                break
-            except OperationalError as exc:
-                db.rollback()
-                if attempt < max_attempts and is_lock_error(exc):
-                    time.sleep(0.2 * attempt)
-                    continue
-                logger.exception("驱动账号 ls_dir 缓存巡检后 STRM 对账失败")
-                break
-            except Exception:
-                db.rollback()
-                logger.exception("驱动账号 ls_dir 缓存巡检后 STRM 对账失败")
-                break
 
 
 task_scheduler_manager = TaskSchedulerManager()

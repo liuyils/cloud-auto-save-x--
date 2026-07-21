@@ -750,7 +750,7 @@ async function loadBrowseDir(dirPath: string) {
       max_items: 200,
     })
     browsePath.value = data.dir_path || dirPath
-    browseItems.value = (data.items || []).filter((item) => item.is_dir)
+    browseItems.value = data.items || []
   } catch (e: any) {
     browseError.value = e?.message || '浏览失败'
     browseItems.value = []
@@ -1161,16 +1161,23 @@ function getTmdbPoster(item: TMDBBrief): string {
             <Loader2 class="h-5 w-5 animate-spin text-[hsl(var(--muted-foreground))]" />
           </div>
           <div v-else-if="browseError" class="text-xs text-red-500 py-4 text-center">{{ browseError }}</div>
-          <div v-else-if="browseItems.length === 0" class="text-xs text-[hsl(var(--muted-foreground))] py-4 text-center">无子目录</div>
+          <div v-else-if="browseItems.length === 0" class="text-xs text-[hsl(var(--muted-foreground))] py-4 text-center">无文件或目录</div>
           <div v-else class="space-y-0.5">
             <div
               v-for="item in browseItems"
               :key="item.fid"
-              class="flex items-center gap-2 px-2 py-2 rounded cursor-pointer hover:bg-[hsl(var(--accent))] text-sm"
-              @click="enterDir(item)"
+              class="flex items-center gap-2 px-2 py-2 rounded text-sm"
+              :class="item.is_dir ? 'cursor-pointer hover:bg-[hsl(var(--accent))]' : 'opacity-80'"
+              @click="item.is_dir && enterDir(item)"
             >
-              <Folder class="h-4 w-4 text-[hsl(var(--muted-foreground))] shrink-0" />
-              <span class="truncate text-[hsl(var(--foreground))]">{{ item.name }}</span>
+              <component
+                :is="item.is_dir ? Folder : FileText"
+                class="h-4 w-4 text-[hsl(var(--muted-foreground))] shrink-0"
+              />
+              <span class="truncate text-[hsl(var(--foreground))] flex-1 min-w-0">{{ item.file_name || item.name }}</span>
+              <span class="shrink-0 text-[10px] text-[hsl(var(--muted-foreground))]">
+                {{ item.is_dir ? `${item.include_items || 0}项` : formatSize(item.size || 0) || '-' }}
+              </span>
             </div>
           </div>
         </div>

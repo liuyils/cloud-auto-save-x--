@@ -117,6 +117,12 @@ class DramaLinkedBatchItem:
     changed_relative_dirs: list[str] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DramaPreRefreshContext:
+    account_id: int
+    savepath: str
+
+
 def _normalize_batch_items(items: list[DramaLinkedBatchItem] | None) -> list[DramaLinkedBatchItem]:
     normalized: list[DramaLinkedBatchItem] = []
     seen: set[str] = set()
@@ -141,6 +147,105 @@ def _normalize_batch_items(items: list[DramaLinkedBatchItem] | None) -> list[Dra
             )
         )
     return normalized
+
+
+def _normalize_relative_dir(value: str) -> str:
+    text = str(value or "").strip().strip("/")
+    if not text:
+        return ""
+    normalized = str(PurePosixPath(text)).strip().strip("/")
+    if normalized in {"", "."}:
+        return ""
+    return normalized
+
+
+def _collect_pre_refresh_requests(items: list[DramaLinkedBatchItem]) -> list[tuple[int, str, list[str] | None]]:
+    grouped: dict[tuple[int, str], set[str]] = {}
+    for item in items:
+        key = (int(item.account_id), _norm_abs_path(item.savepath))
+        rel_dirs = grouped.setdefault(key, set())
+        for raw in item.changed_relative_dirs or []:
+            normalized = _normalize_relative_dir(raw)
+            if normalized:
+                rel_dirs.add(normalized)
+    requests: list[tuple[int, str, list[str] | None]] = []
+    for (account_id, savepath), rel_dirs in sorted(grouped.items(), key=lambda it: (it[0][0], it[0][1])):
+        requests.append((account_id, savepath, sorted(rel_dirs) if rel_dirs else None))
+    return requests
+
+
+def _run_pre_sync_lsdir_refresh_stage(
+    *,
+    items: list[DramaLinkedBatchItem],
+    source: str,
+    log: ExecutionLog,
+) -> list[DramaPreRefreshContext]:
+    log.set_stage("linked_pre_refresh_lsdir")
+    log.section("前置刷新 lsdir 缓存")
+    requests = _collect_pre_refresh_requests(items)
+    if not requests:
+        log.line("跳过: 无有效追剧保存目录")
+        return []
+
+    successful: list[DramaPreRefreshContext] = []
+    for account_id, savepath, relative_dir_paths in requests:
+        try:
+            stats = refresh_drive_account_lsdir_paths(
+                account_id=int(account_id),
+                savepath=str(savepath),
+                relative_dir_paths=relative_dir_paths,
+                recursive_savepath=False,
+                source=f"{source}.pre_sync",
+                wait_if_busy=True,
+                max_wait_seconds=600.0,
+                include_cas_root_dir=False,
+            )
+            successful.append(DramaPreRefreshContext(account_id=int(account_id), savepath=str(savepath)))
+            log.line(
+                "OK: "
+                f"account_id={int(account_id)} savepath={savepath} "
+                f"touched_dirs={len(relative_dir_paths or [])} "
+                f"scanned_dirs={int(getattr(stats, 'scanned_dirs', 0) or 0)} "
+                f"cached_items={int(getattr(stats, 'cached_items', 0) or 0)}"
+            )
+        except Exception as exc:
+            msg = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
+            log.line(
+                "WARN: "
+                f"account_id={int(account_id)} savepath={savepath} "
+                f"前置刷新失败 err={msg}"
+            )
+    return successful
+
+
+def _build_linked_sync_strategy_override(
+    task: object,
+    *,
+    successful_pre_refreshes: list[DramaPreRefreshContext],
+) -> dict[str, Any] | None:
+    if not successful_pre_refreshes:
+        return None
+    endpoint_candidates = (
+        (
+            str(getattr(task, "source_type", "") or "").strip().lower(),
+            int(getattr(task, "source_account_id", 0) or 0),
+            _norm_abs_path(str(getattr(task, "source_path", "") or "")),
+        ),
+        (
+            str(getattr(task, "target_type", "") or "").strip().lower(),
+            int(getattr(task, "target_account_id", 0) or 0),
+            _norm_abs_path(str(getattr(task, "target_path", "") or "")),
+        ),
+    )
+    for endpoint_type, account_id, endpoint_path in endpoint_candidates:
+        if endpoint_type != "netdisk" or account_id <= 0 or not endpoint_path:
+            continue
+        for ctx in successful_pre_refreshes:
+            if int(ctx.account_id) != int(account_id):
+                continue
+            if _is_within_base(ctx.savepath, endpoint_path):
+                return {"force_refresh": False}
+    return None
 
 
 def _load_drive_accounts(account_ids: set[int]) -> dict[int, DriveAccount]:
@@ -230,45 +335,6 @@ def run_cas_strm_stage(
     source: str,
     log: ExecutionLog,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    log.set_stage("linked_refresh_lsdir")
-    log.section("刷新 lsdir 缓存")
-    for account_id, payload in sorted(delta_by_account.items(), key=lambda it: it[0]):
-        base_path = account_base_path.get(account_id)
-        if not base_path:
-            log.line(f"跳过: account_id={account_id} 缺少 base_path")
-            continue
-        rel_dirs: set[str] = set()
-        for dir_path in payload.get("dir_paths") or set():
-            dir_path = _norm_abs_path(dir_path)
-            if not _is_within_base(base_path, dir_path):
-                continue
-            suffix = dir_path[len(_norm_abs_path(base_path)) :]
-            rel = suffix.strip("/").strip()
-            rel_dirs.add(rel)
-        for file_path in payload.get("file_paths") or set():
-            file_path = _norm_abs_path(file_path)
-            parent = _norm_abs_path(str(PurePosixPath(file_path).parent))
-            if not _is_within_base(base_path, parent):
-                continue
-            suffix = parent[len(_norm_abs_path(base_path)) :]
-            rel = suffix.strip("/").strip()
-            rel_dirs.add(rel)
-        relative_dir_paths = sorted(rel_dirs) if rel_dirs else None
-        try:
-            stats = refresh_drive_account_lsdir_paths(
-                account_id=int(account_id),
-                savepath=str(base_path),
-                relative_dir_paths=relative_dir_paths,
-                recursive_savepath=False,
-                source=f"{source}.linked_pipeline",
-                wait_if_busy=True,
-                max_wait_seconds=600.0,
-            )
-            log.line(f"OK: account_id={account_id} scanned_dirs={stats.scanned_dirs} cached_items={stats.cached_items}")
-        except Exception as exc:
-            msg = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
-            log.line(f"WARN: account_id={account_id} 刷新失败 err={msg}")
-
     cas_tasks: list[dict[str, Any]] = []
     log.set_stage("linked_cas_delta")
     log.section("增量 CAS 生成")
@@ -347,10 +413,20 @@ def run_drama_linked_batch_pipeline(
     time.sleep(2.0)
     log.line("OK: sleep=2.0s")
 
+    successful_pre_refreshes = _run_pre_sync_lsdir_refresh_stage(
+        items=batch_items,
+        source=source,
+        log=log,
+    )
+
     sync_results = run_linked_sync_tasks_blocking(
         [item.task_uid for item in batch_items],
         source=source,
         log=log,
+        strategy_override_resolver=lambda task: _build_linked_sync_strategy_override(
+            task,
+            successful_pre_refreshes=successful_pre_refreshes,
+        ),
     )
 
     delta_by_account, account_base_path, cas_base_path_by_account = _build_linked_stage_context(

@@ -13,7 +13,6 @@ class DriveAccountLsdirCache(Base):
     __table_args__ = (
         UniqueConstraint("account_id", "full_path", name="uq_drive_account_lsdir_cache_account_path"),
         Index("ix_drive_account_lsdir_cache_account_parent", "account_id", "parent_fid"),
-        Index("ix_drive_account_lsdir_cache_expires_at", "expires_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -27,7 +26,6 @@ class DriveAccountLsdirCache(Base):
     size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at_remote: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     children_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

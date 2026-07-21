@@ -139,6 +139,25 @@ class DL302CasGenerateIn(BaseModel):
     fast_compute: bool = Field(default=False)
 
 
+class DL302InternalCasRefreshIn(BaseModel):
+    drive_type: str = ""
+    account: str = ""
+    task_id: str = ""
+    relative_dir_paths: list[str] = Field(default_factory=list)
+
+
+class DL302InternalCasRefreshOut(BaseModel):
+    ok: bool = True
+    account_id: int = 0
+    drive_type: str = ""
+    account: str = ""
+    savepath: str = ""
+    relative_dir_paths: list[str] = Field(default_factory=list)
+    scanned_dirs: int = 0
+    cached_items: int = 0
+    message: str = ""
+
+
 
 class DL302CasGenerateOut(BaseModel):
     ok: bool = True

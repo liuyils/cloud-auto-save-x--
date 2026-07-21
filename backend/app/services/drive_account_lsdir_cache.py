@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import case, delete, func, select
@@ -49,14 +49,6 @@ def is_path_excluded(full_path: str | None, excluded_subtrees: list[str] | tuple
         if is_same_or_child_path(parent_path=excluded, child_path=normalized):
             return True
     return False
-
-
-def get_static_lsdir_cache_expires_at(now: datetime | None = None) -> datetime:
-    base = now or _utcnow()
-    try:
-        return base + timedelta(days=365 * 100)
-    except OverflowError:
-        return datetime.max.replace(tzinfo=base.tzinfo)
 
 
 def _pick_name(payload: dict[str, Any]) -> str:
@@ -198,20 +190,6 @@ def normalize_lsdir_items(parent_path: str, items: list[dict[str, Any]] | None) 
     return result
 
 
-def purge_expired_drive_account_lsdir_cache(db: Session) -> int:
-    res = db.execute(delete(DriveAccountLsdirCache).where(DriveAccountLsdirCache.expires_at < _utcnow()))
-    db.flush()
-    return int(getattr(res, "rowcount", 0) or 0)
-
-
-def purge_old_drive_account_lsdir_cache(db: Session, *, retention_seconds: int) -> int:
-    keep = max(1, int(retention_seconds or 0))
-    threshold = _utcnow() - timedelta(seconds=keep)
-    res = db.execute(delete(DriveAccountLsdirCache).where(DriveAccountLsdirCache.expires_at < threshold))
-    db.flush()
-    return int(getattr(res, "rowcount", 0) or 0)
-
-
 def delete_drive_account_lsdir_cache_by_account(db: Session, account_id: int) -> int:
     res = db.execute(delete(DriveAccountLsdirCache).where(DriveAccountLsdirCache.account_id == int(account_id)))
     db.flush()
@@ -255,12 +233,9 @@ def upsert_drive_account_lsdir_items(
     parent_fid: str,
     parent_path: str,
     items: list[dict[str, Any]] | None,
-    ttl_seconds: int,
     scanned_at: datetime | None = None,
-    expires_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     now = scanned_at or _utcnow()
-    target_expires_at = expires_at or (now + timedelta(seconds=max(1, int(ttl_seconds or 0))))
     deduped_items: dict[str, dict[str, Any]] = {}
     for item in normalize_lsdir_items(parent_path, items):
         deduped_items[str(item["full_path"])] = item
@@ -289,7 +264,6 @@ def upsert_drive_account_lsdir_items(
                 full_path=item["full_path"],
                 fid=item["fid"],
                 name=item["name"],
-                expires_at=target_expires_at,
             )
             db.add(row)
             existing_map[str(item["full_path"])] = row
@@ -304,7 +278,6 @@ def upsert_drive_account_lsdir_items(
         row.updated_at_remote = item["updated_at_remote"]
         row.children_count = item["children_count"]
         row.scanned_at = now
-        row.expires_at = target_expires_at
 
     existing_children = (
         db.execute(
@@ -340,19 +313,16 @@ def get_drive_account_lsdir_cache_freshness(db: Session, *, account_id: int) -> 
         db.execute(
             select(
                 func.max(DriveAccountLsdirCache.scanned_at),
-                func.max(DriveAccountLsdirCache.expires_at),
                 func.count(DriveAccountLsdirCache.id),
             ).where(DriveAccountLsdirCache.account_id == int(account_id))
         )
         .one()
     )
-    scanned_at, expires_at, total = latest
-    now = _utcnow()
+    scanned_at, total = latest
     return {
         "account_id": int(account_id),
         "scanned_at": scanned_at,
-        "expires_at": expires_at,
-        "is_fresh": bool(expires_at and expires_at > now),
+        "has_entries": bool(total),
         "total": int(total or 0),
     }
 
@@ -367,7 +337,6 @@ def get_drive_account_lsdir_cache_subtree_freshness(db: Session, *, account_id: 
         db.execute(
             select(
                 func.max(DriveAccountLsdirCache.scanned_at),
-                func.max(DriveAccountLsdirCache.expires_at),
                 func.count(DriveAccountLsdirCache.id),
             ).where(
                 DriveAccountLsdirCache.account_id == int(account_id),
@@ -376,14 +345,12 @@ def get_drive_account_lsdir_cache_subtree_freshness(db: Session, *, account_id: 
         )
         .one()
     )
-    scanned_at, expires_at, total = latest
-    now = _utcnow()
+    scanned_at, total = latest
     return {
         "account_id": int(account_id),
         "full_path": normalized_path,
         "scanned_at": scanned_at,
-        "expires_at": expires_at,
-        "is_fresh": bool(expires_at and expires_at > now),
+        "has_entries": bool(total),
         "total": int(total or 0),
     }
 
@@ -395,11 +362,10 @@ def get_drive_account_lsdir_cache_subtree_stats(db: Session, *, account_id: int,
         like_prefix = f"{normalized_path}/%"
         filters.append((DriveAccountLsdirCache.full_path == normalized_path) | (DriveAccountLsdirCache.full_path.like(like_prefix)))
 
-    scanned_at, expires_at, entry_total, file_total, dir_total = (
+    scanned_at, entry_total, file_total, dir_total = (
         db.execute(
             select(
                 func.max(DriveAccountLsdirCache.scanned_at),
-                func.max(DriveAccountLsdirCache.expires_at),
                 func.count(DriveAccountLsdirCache.id),
                 func.coalesce(func.sum(case((DriveAccountLsdirCache.is_dir.is_(False), 1), else_=0)), 0),
                 func.coalesce(func.sum(case((DriveAccountLsdirCache.is_dir.is_(True), 1), else_=0)), 0),
@@ -407,13 +373,10 @@ def get_drive_account_lsdir_cache_subtree_stats(db: Session, *, account_id: int,
         )
         .one()
     )
-    now = _utcnow()
     return {
         "account_id": int(account_id),
         "full_path": normalized_path,
         "scanned_at": scanned_at,
-        "expires_at": expires_at,
-        "is_fresh": bool(expires_at and expires_at > now),
         "entry_total": int(entry_total or 0),
         "file_total": int(file_total or 0),
         "dir_total": int(dir_total or 0),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
 
 from sqlalchemy import select
 
@@ -56,6 +57,7 @@ def run_linked_sync_tasks_blocking(
     *,
     source: str,
     log: ExecutionLog | None = None,
+    strategy_override_resolver: Callable[[SyncTask], dict[str, Any] | None] | None = None,
 ) -> list[dict[str, object]]:
     uids = _normalize_task_uids(drama_task_uids)
     if not uids:
@@ -135,7 +137,15 @@ def run_linked_sync_tasks_blocking(
                 )
                 continue
             try:
-                execution = SyncExecutor(db=None).run_sync_task(row, log=log)
+                strategy_override = None
+                if strategy_override_resolver is not None:
+                    strategy_override = strategy_override_resolver(row)
+                    if not isinstance(strategy_override, dict) or not strategy_override:
+                        strategy_override = None
+                force_refresh_suppressed = bool(strategy_override and strategy_override.get("force_refresh") is False)
+                if force_refresh_suppressed:
+                    log.line(f"联动覆盖: {sync_task_name} force_refresh=false")
+                execution = SyncExecutor(db=None).run_sync_task(row, log=log, strategy_override=strategy_override)
                 execution_id = int(getattr(execution, "id", 0) or 0) or None
                 status = str(getattr(execution, "status", "") or "").strip() or "unknown"
                 message = str(getattr(execution, "message", "") or "").strip()
@@ -151,6 +161,7 @@ def run_linked_sync_tasks_blocking(
                         "target_account_id": target_account_id,
                         "target_path": target_path,
                         "message": message,
+                        "force_refresh_suppressed": force_refresh_suppressed,
                     }
                 )
             except Exception as exc:
@@ -167,6 +178,7 @@ def run_linked_sync_tasks_blocking(
                         "target_account_id": target_account_id,
                         "target_path": target_path,
                         "message": message,
+                        "force_refresh_suppressed": False,
                     }
                 )
     return results
