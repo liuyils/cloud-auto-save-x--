@@ -2,6 +2,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -215,7 +216,28 @@ def get_sync_tasks(current: CurrentUser = Depends(get_current_user), db: Session
         for it in links:
             mapping.setdefault(str(it.sync_task_uid), []).append(str(it.task_uid))
     account_map = _build_account_map(db, rows)
-    return [_task_out(t, drama_task_uids=mapping.get(str(t.uid), []), account_map=account_map) for t in rows]
+    # Query running executions for all tasks
+    task_ids = [int(t.id) for t in rows]
+    running_map: dict[int, int] = {}
+    if task_ids:
+        running_execs = (
+            db.execute(
+                select(SyncExecution)
+                .where(SyncExecution.sync_task_id.in_(task_ids), SyncExecution.status == "running", SyncExecution.finished_at.is_(None))
+            )
+            .scalars()
+            .all()
+        )
+        for ex in running_execs:
+            running_map[int(ex.sync_task_id)] = int(ex.id)
+    result = []
+    for t in rows:
+        out = _task_out(t, drama_task_uids=mapping.get(str(t.uid), []), account_map=account_map)
+        if int(t.id) in running_map:
+            out.is_running = True
+            out.running_execution_id = running_map[int(t.id)]
+        result.append(out)
+    return result
 
 
 @router.post("", response_model=SyncTaskOut, dependencies=[Depends(require_permissions(SYNC_WRITE))])
@@ -465,6 +487,128 @@ def post_run_sync_task(
         )
         adb.commit()
     return _execution_out(execution)
+
+
+@router.get("/{sync_task_id:int}/log/stream", dependencies=[Depends(require_permissions_scoped(SYNC_READ))])
+def get_running_log_stream(
+    request: Request,
+    sync_task_id: int,
+    current: CurrentUser = Depends(get_current_user_scoped),
+):
+    """SSE endpoint that tails the run_log of the currently running execution for a task."""
+    with SessionLocal() as db:
+        # 先找 running 的
+        running = (
+            db.execute(
+                select(SyncExecution)
+                .where(
+                    SyncExecution.sync_task_id == sync_task_id,
+                    SyncExecution.status == "running",
+                    SyncExecution.finished_at.is_(None),
+                )
+                .order_by(SyncExecution.started_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+        # 没有 running 的就找最近一条
+        if running is None:
+            running = (
+                db.execute(
+                    select(SyncExecution)
+                    .where(SyncExecution.sync_task_id == sync_task_id)
+                    .order_by(SyncExecution.started_at.desc())
+                )
+                .scalars()
+                .first()
+            )
+        if running is None:
+            raise ApiError(code="SYNC_EXECUTION_NOT_FOUND", message="该任务没有执行记录", http_status=404)
+        execution_id = int(running.id)
+        is_already_finished = running.finished_at is not None or running.status != "running"
+
+    def sse(event: str, data: object) -> bytes:
+        payload = json.dumps(data, ensure_ascii=False)
+        return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
+
+    def _parse_stats(exe) -> dict:
+        """Parse stats_json field into a progress dict."""
+        raw = exe.stats_json
+        if not raw:
+            return {}
+        try:
+            s = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return {
+            "total_files": s.get("total_files", 0),
+            "done_files": s.get("done_files", 0),
+            "success_files": s.get("success_files", s.get("copied_files", 0)),
+            "skipped_files": s.get("skipped_files", 0),
+            "failed_files": s.get("failed_files", 0),
+        }
+
+    def gen():
+        yield sse("init", {"sync_task_id": sync_task_id, "execution_id": execution_id, "started_at": datetime.now().isoformat()})
+
+        # If execution already finished, send all data at once and exit
+        if is_already_finished:
+            with SessionLocal() as db:
+                exe = db.execute(select(SyncExecution).where(SyncExecution.id == execution_id)).scalars().first()
+                if exe is None:
+                    yield sse("done", {"status": "failed", "message": "执行记录不存在"})
+                    return
+                current_log = str(exe.run_log or "")
+                current_status = str(exe.status or "")
+                message = str(exe.message or "")
+                progress = _parse_stats(exe)
+            # Send all log lines
+            for line in current_log.splitlines():
+                if line:
+                    yield sse("log", {"line": line})
+            # Send progress
+            if progress:
+                yield sse("progress", progress)
+            # Send done
+            yield sse("done", {"status": current_status, "message": message})
+            return
+
+        # Live tailing for running execution
+        last_log_len = 0
+        while True:
+            time.sleep(2)
+            with SessionLocal() as db:
+                exe = db.execute(select(SyncExecution).where(SyncExecution.id == execution_id)).scalars().first()
+                if exe is None:
+                    yield sse("done", {"status": "failed", "message": "执行记录不存在"})
+                    break
+                current_log = str(exe.run_log or "")
+                current_status = str(exe.status or "")
+                current_stage = str(exe.stage or "")
+                finished = exe.finished_at is not None
+                message = str(exe.message or "")
+                progress = _parse_stats(exe)
+            # Emit new log lines
+            if len(current_log) > last_log_len:
+                new_text = current_log[last_log_len:]
+                for line in new_text.splitlines():
+                    if line:
+                        yield sse("log", {"line": line})
+                last_log_len = len(current_log)
+            # Emit progress
+            if progress:
+                yield sse("progress", progress)
+            # Emit stage
+            if current_stage:
+                yield sse("stage", {"stage": current_stage})
+            # Check if done
+            if finished or current_status != "running":
+                yield sse("done", {"status": current_status, "message": message})
+                break
+            # Keep alive
+            yield b": ping\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.post("/{sync_task_id:int}/run/stream", dependencies=[Depends(require_permissions_scoped(SYNC_RUN))])

@@ -127,6 +127,10 @@ class DL302StrmGenerateOut(BaseModel):
     strm_root_dir: str = "/strm"
     generated_files: int = 0
     generated_dirs: int = 0
+    added_files: int = 0
+    updated_files: int = 0
+    removed_files: int = 0
+    unchanged_files: int = 0
     skipped_accounts: int = 0
     message: str = ""
 

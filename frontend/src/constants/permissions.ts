@@ -1,3 +1,5 @@
+// 与后端 permissions 表完全一致
+export const AUDIT_READ = 'audit:read'
 export const USER_READ = 'user:read'
 export const USER_WRITE = 'user:write'
 export const ROLE_READ = 'role:read'
@@ -12,8 +14,6 @@ export const NOTIFY_WRITE = 'notify:write'
 export const TASK_READ = 'task:read'
 export const TASK_WRITE = 'task:write'
 export const TASK_RUN = 'task:run'
-export const AUDIT_READ = 'audit:read'
-
 export const SYNC_READ = 'sync:read'
 export const SYNC_WRITE = 'sync:write'
 export const SYNC_RUN = 'sync:run'

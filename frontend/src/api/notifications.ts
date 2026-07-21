@@ -6,7 +6,7 @@ export async function fetchNotificationConfig() {
   return response.data
 }
 
-export async function updateNotificationConfig(payload: { enabled?: boolean; config?: Record<string, any> }) {
+export async function updateNotificationConfig(payload: { config: Record<string, any> }) {
   const response = await http.patch<NotificationConfig>('/notifications/config', payload)
   return response.data
 }

@@ -64,6 +64,8 @@ export type SyncTaskItem = {
   strategy: SyncStrategy
   drama_task_uids?: string[]
   addition?: Record<string, any>
+  is_running?: boolean
+  running_execution_id?: number | null
   created_at: string
   updated_at: string
 }

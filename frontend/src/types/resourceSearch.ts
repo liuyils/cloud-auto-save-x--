@@ -21,6 +21,8 @@ export type TaskSuggestionItem = {
   channel?: string | null
   source?: string | null
   verify?: boolean | null
+  maxFileSize?: number | null
+  isLargest?: boolean
 }
 
 export type TaskSuggestionResponse = {

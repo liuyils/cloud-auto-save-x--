@@ -313,8 +313,17 @@ def rebuild_dl302_strm(
         "strm_root_dir": root_dir,
         "generated_files": int(stats["generated_files"]),
         "generated_dirs": int(stats["generated_dirs"]),
+        "added_files": int(stats["added_files"]),
+        "updated_files": int(stats["updated_files"]),
+        "removed_files": int(stats["removed_files"]),
+        "unchanged_files": int(stats["unchanged_files"]),
         "skipped_accounts": int(skipped_accounts),
-        "message": f"STRM 生成完成 trigger={trigger} mode={effective_mode} files={stats['generated_files']}",
+        "message": (
+            f"STRM 增量生成完成 trigger={trigger} mode={effective_mode} "
+            f"total={stats['generated_files']} added={stats['added_files']} "
+            f"updated={stats['updated_files']} removed={stats['removed_files']} "
+            f"unchanged={stats['unchanged_files']}"
+        ),
     }
 
 
@@ -376,25 +385,44 @@ def _write_strm_files(*, root_dir: str, mode: str, tree: dict[str, str]) -> dict
     root = Path(root_dir)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / f"{_MANIFEST_PREFIX}{_normalize_strm_mode(mode)}.json"
-    previous_files = _load_manifest(manifest_path)
-    for relative_strm_path in previous_files:
-        _delete_managed_file(root, relative_strm_path)
+    previous_files = set(_load_manifest(manifest_path))
 
     generated_dirs: set[str] = set()
     current_manifest: list[str] = []
+    added_files = 0
+    updated_files = 0
+    unchanged_files = 0
     for relative_strm_path, url in tree.items():
         target = root / Path(relative_strm_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(str(url), encoding="utf-8")
+        desired = str(url)
+        existing = _read_managed_file(target)
+        if existing is not None and existing == desired:
+            unchanged_files += 1
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(desired, encoding="utf-8")
+            if existing is None:
+                added_files += 1
+            else:
+                updated_files += 1
         current_manifest.append(relative_strm_path)
         parent_rel = str(Path(relative_strm_path).parent)
         if parent_rel and parent_rel != ".":
             generated_dirs.add(parent_rel)
 
+    removed_files = 0
+    for relative_strm_path in previous_files - set(tree.keys()):
+        if _delete_managed_file(root, relative_strm_path):
+            removed_files += 1
+
     manifest_path.write_text(json.dumps(sorted(current_manifest), ensure_ascii=False, indent=2), encoding="utf-8")
     return {
         "generated_files": len(current_manifest),
         "generated_dirs": len(generated_dirs),
+        "added_files": added_files,
+        "updated_files": updated_files,
+        "removed_files": removed_files,
+        "unchanged_files": unchanged_files,
     }
 
 
@@ -519,6 +547,15 @@ def _load_manifest(path: Path) -> list[str]:
 
 def _normalize_strm_mode(mode: str | None) -> str:
     return "independent" if str(mode or "").strip() == "independent" else "auto"
+
+
+def _read_managed_file(target: Path) -> str | None:
+    try:
+        if not target.is_file():
+            return None
+        return target.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _delete_managed_file(root: Path, relative_strm_path: str) -> bool:

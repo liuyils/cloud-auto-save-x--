@@ -11,6 +11,8 @@ export async function patchTMDBConfig(payload: {
   language?: string | null
   poster_language?: string | null
   disable_guessit_tmdb_fallback_rename?: boolean | null
+  guessit_tmdb_tv_rename_template?: string | null
+  guessit_tmdb_movie_rename_template?: string | null
 }) {
   const response = await http.patch<TMDBConfig>('/tmdb/config', payload)
   return response.data

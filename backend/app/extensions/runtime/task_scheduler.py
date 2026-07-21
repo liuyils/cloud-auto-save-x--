@@ -662,9 +662,13 @@ def run_drive_account_lsdir_cache_refresh() -> None:
                 db.commit()
                 if result:
                     logger.info(
-                        "驱动账号 ls_dir 缓存巡检后 STRM 对账完成 mode=%s files=%s dirs=%s skipped_accounts=%s",
+                        "驱动账号 ls_dir 缓存巡检后 STRM 对账完成 mode=%s total=%s added=%s updated=%s removed=%s unchanged=%s dirs=%s skipped_accounts=%s",
                         result.get("mode"),
                         result.get("generated_files"),
+                        result.get("added_files"),
+                        result.get("updated_files"),
+                        result.get("removed_files"),
+                        result.get("unchanged_files"),
                         result.get("generated_dirs"),
                         result.get("skipped_accounts"),
                     )

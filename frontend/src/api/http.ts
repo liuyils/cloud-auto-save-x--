@@ -1,8 +1,10 @@
 import axios, { type AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios'
-import { ElMessage } from 'element-plus'
 
 import { useAuthStore } from '@/stores/auth'
-import { router } from '@/router'
+import router from '@/router'
+import { useToast } from '@/composables/useToast'
+
+const { toast } = useToast()
 
 type ApiErrorBody = {
   code?: string
@@ -114,7 +116,7 @@ export function createHttpClient(): AxiosInstance {
       }
 
       if (status === 403) {
-        if (!silentToast) ElMessage.error(data?.message || '权限不足')
+        if (!silentToast) toast.error(data?.message || '权限不足')
         if (router.currentRoute.value.path !== '/403') {
           router.replace('/403')
         }
@@ -122,7 +124,7 @@ export function createHttpClient(): AxiosInstance {
       }
 
       if (status && status >= 500) {
-        if (!silentToast) ElMessage.error(data?.message || '服务异常')
+        if (!silentToast) toast.error(data?.message || '服务异常')
         return Promise.reject(error)
       }
 
@@ -130,12 +132,12 @@ export function createHttpClient(): AxiosInstance {
         if (originalConfig && shouldRetry(originalConfig)) {
           return withRetry(() => instance.request(originalConfig), 2)
         }
-        if (!silentToast) ElMessage.error('网络异常')
+        if (!silentToast) toast.error('网络异常')
         return Promise.reject(error)
       }
 
       if (data?.message) {
-        if (!silentToast) ElMessage.error(data.message)
+        if (!silentToast) toast.error(data.message)
       }
 
       return Promise.reject(error)

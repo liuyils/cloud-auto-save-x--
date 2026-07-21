@@ -39,8 +39,10 @@ export async function updateDriveAccount(
   return data
 }
 
-export async function setDriveAccountStatus(accountId: number, enabled: boolean) {
-  const { data } = await http.patch<DriveAccountItem>(`/drive-accounts/${accountId}/status`, { enabled })
+export async function setDriveAccountStatus(accountId: number, enabled: boolean, options?: { silentToast?: boolean }) {
+  const headers: Record<string, string> = {}
+  if (options?.silentToast) headers['X-Silent-Toast'] = '1'
+  const { data } = await http.patch<DriveAccountItem>(`/drive-accounts/${accountId}/status`, { enabled }, { headers })
   return data
 }
 
@@ -66,9 +68,12 @@ export async function refreshDriveAccountLsdirCache(accountId: number, payload?:
   return data
 }
 
-export async function signInDriveAccount(accountId: number) {
+export async function signInDriveAccount(accountId: number, options?: { silentToast?: boolean }) {
+  const headers: Record<string, string> = {}
+  if (options?.silentToast) headers['X-Silent-Toast'] = '1'
   const { data } = await http.post(`/drive-accounts/${accountId}/sign-in`, null, {
     params: { async: 1 },
+    headers,
   })
   return data as any
 }

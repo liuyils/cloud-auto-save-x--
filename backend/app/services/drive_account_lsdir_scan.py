@@ -1102,10 +1102,14 @@ def _trigger_dl302_strm_after_scan(*, db, source: str) -> None:
         result = maybe_auto_generate_dl302_strm(db, source=source)
         if result:
             logger.info(
-                "dl302 strm auto generation finished source=%s mode=%s files=%s dirs=%s skipped_accounts=%s",
+                "dl302 strm auto generation finished source=%s mode=%s total=%s added=%s updated=%s removed=%s unchanged=%s dirs=%s skipped_accounts=%s",
                 source,
                 result.get("mode"),
                 result.get("generated_files"),
+                result.get("added_files"),
+                result.get("updated_files"),
+                result.get("removed_files"),
+                result.get("unchanged_files"),
                 result.get("generated_dirs"),
                 result.get("skipped_accounts"),
             )

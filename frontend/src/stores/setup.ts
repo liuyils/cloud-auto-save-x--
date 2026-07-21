@@ -27,4 +27,3 @@ export const useSetupStore = defineStore('setup', {
     },
   },
 })
-

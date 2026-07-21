@@ -10,7 +10,7 @@ export async function getSetupStatus() {
   return data
 }
 
-export async function initAdmin(payload: { username: string; email: string; password: string }) {
+export async function initAdmin(payload: { username: string; password: string; email?: string }) {
   const { data } = await http.post<LoginResponse>('/setup/admin', payload)
   return data
 }

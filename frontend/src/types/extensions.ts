@@ -66,6 +66,30 @@ export type DriveAccountLsdirCacheRefreshResult = {
   static_skipped_reason?: string | null
 }
 
+export type DriveAccountProbeScheduler = {
+  enabled: boolean
+  crontab: string
+  timezone: string
+  enabled_only: boolean
+}
+
+export type DriveAccountAuthMethod = 'captcha' | 'sms' | 'qrcode'
+
+export type DriveAccountAuthChallenge = {
+  account_id: number
+  drive_type: string
+  method: DriveAccountAuthMethod
+  session_id: string
+  payload?: Record<string, any>
+}
+
+export type DriveAccountSignInJob = {
+  status: string
+  message?: string | null
+  result?: Record<string, any> | null
+  error?: { message?: string } | null
+}
+
 export type PluginItem = {
   id: number
   plugin_key: string

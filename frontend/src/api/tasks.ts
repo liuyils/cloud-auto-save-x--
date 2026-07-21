@@ -217,3 +217,16 @@ export async function stopCompletedDramaTasks() {
   })
   return data
 }
+
+export async function runAllDramaTasks() {
+  const { data } = await http.post('/tasks/run-all')
+  return data
+}
+
+export async function fetchTaskSuggestions(q: string, d: number, drive_type?: string | null) {
+  const params: Record<string, any> = { q, d }
+  const dt = String(drive_type || '').trim()
+  if (dt) params.drive_type = dt
+  const { data } = await http.get('/tasks/suggestions', { params, timeout: 60000 })
+  return data
+}

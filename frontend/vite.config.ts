@@ -1,36 +1,40 @@
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
-import AutoImport from 'unplugin-auto-import/vite'
-import Components from 'unplugin-vue-components/vite'
-import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
-import path from 'node:path'
+import { fileURLToPath, URL } from "node:url";
+import { defineConfig } from "vite";
+import vue from "@vitejs/plugin-vue";
+import tailwindcss from "@tailwindcss/vite";
+import AutoImport from "unplugin-auto-import/vite";
+import Components from "unplugin-vue-components/vite";
 
 // https://vite.dev/config/
 export default defineConfig({
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
-  },
   plugins: [
     vue(),
+    tailwindcss(),
     AutoImport({
-      resolvers: [ElementPlusResolver()],
-      imports: ['vue', 'vue-router', 'pinia'],
-      dts: 'src/auto-imports.d.ts',
+      imports: ["vue", "vue-router", "pinia"],
+      dts: "src/auto-imports.d.ts",
+      dirs: ["src/composables"],
+      vueTemplate: true,
     }),
     Components({
-      resolvers: [ElementPlusResolver()],
-      dts: 'src/components.d.ts',
+      dts: "src/components.d.ts",
+      dirs: ["src/components"],
     }),
   ],
-  server: {
-    host: true,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
-})
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-vue': ['vue', 'vue-router', 'pinia'],
+          'vendor-query': ['@tanstack/vue-query'],
+          'vendor-ui': ['radix-vue', 'lucide-vue-next'],
+        }
+      }
+    }
+  }
+});

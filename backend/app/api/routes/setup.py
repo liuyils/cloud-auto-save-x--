@@ -25,8 +25,9 @@ def post_admin(request: Request, response: Response, payload: SetupAdminIn, db: 
     if is_initialized(db):
         raise ApiError(code="SETUP_ALREADY_INITIALIZED", message="系统已初始化", http_status=409)
 
+    email = payload.email or f"{payload.username}@local"
     try:
-        user = create_initial_admin(db, username=payload.username, email=str(payload.email), password=payload.password)
+        user = create_initial_admin(db, username=payload.username, email=email, password=payload.password)
         db.flush()
     except (OperationalError, ProgrammingError):
         db.rollback()

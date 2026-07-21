@@ -79,6 +79,8 @@ class SyncTaskOut(BaseModel):
     strategy: SyncStrategy
     drama_task_uids: list[str] = Field(default_factory=list)
     addition: dict[str, Any] = Field(default_factory=dict)
+    is_running: bool = False
+    running_execution_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
