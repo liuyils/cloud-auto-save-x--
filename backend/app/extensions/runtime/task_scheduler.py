@@ -7,10 +7,12 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from app.core.settings import settings
 from app.db.session import SessionLocal, is_lock_error
+from app.models.drive_account import DriveAccount
 from app.models.task import Task
 from app.services.notifications.sender import send_runtime
 from app.services.notifications.task_notify import DRAMA_NOTIFY_TITLE, build_task_section

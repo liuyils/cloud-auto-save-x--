@@ -17,8 +17,7 @@ import {
   Plus, Search, Film, Play, Wrench, Square, Camera, ChevronDown, ChevronUp,
 } from 'lucide-vue-next'
 import TaskCard from '@/components/business/drama/TaskCard.vue'
-import CreateTaskSheet from '@/components/business/drama/CreateTaskSheet.vue'
-import StreamLogDialog from '@/components/business/common/StreamLogDialog.vue'
+import DramaTaskLauncher from '@/components/business/drama/DramaTaskLauncher.vue'
 import { useTasksQuery, useTaskSchedulerSettingQuery } from '@/hooks/queries/tasks'
 import {
   useDeleteTaskMutation,
@@ -30,20 +29,13 @@ import {
   useRunAllTasksMutation,
 } from '@/hooks/mutations/tasks'
 import { useToast } from '@/composables/useToast'
+import { useDramaTaskLauncher } from '@/composables/useDramaTaskLauncher'
 import type { TaskItem } from '@/types/tasks'
 
 const { toast } = useToast()
+const launcher = useDramaTaskLauncher()
 
 const searchQuery = ref('')
-const sheetOpen = ref(false)
-const editingTask = ref<TaskItem | undefined>(undefined)
-
-// Stream log state
-const showStreamLog = ref(false)
-const streamLogUrl = ref('')
-const streamLogTitle = ref('执行日志')
-const streamLogMethod = ref<'GET' | 'POST'>('GET')
-const streamLogBody = ref<Record<string, any> | null>(null)
 
 // Delete confirm state
 const deleteDialogOpen = ref(false)
@@ -132,11 +124,11 @@ const categoryCounts = computed(() => {
 
 // --- Batch actions ---
 function handleRunAll() {
-  streamLogTitle.value = '执行全部：日志'
-  streamLogUrl.value = '/api/tasks/run-all/stream'
-  streamLogMethod.value = 'POST'
-  streamLogBody.value = null
-  showStreamLog.value = true
+  launcher.streamLogTitle.value = '执行全部：日志'
+  launcher.streamLogUrl.value = '/api/tasks/run-all/stream'
+  launcher.streamLogMethod.value = 'POST'
+  launcher.streamLogBody.value = null
+  launcher.showStreamLog.value = true
 }
 
 function handleRepairBanned() {
@@ -177,34 +169,23 @@ function saveScheduler() {
 
 // --- Per-task actions ---
 function handleRun(task: TaskItem) {
-  streamLogTitle.value = `运行：${task.taskname}`
-  streamLogUrl.value = `/api/tasks/${task.id}/run/stream`
-  streamLogMethod.value = 'POST'
-  streamLogBody.value = null
-  showStreamLog.value = true
+  launcher.streamLogTitle.value = `运行：${task.taskname}`
+  launcher.streamLogUrl.value = `/api/tasks/${task.id}/run/stream`
+  launcher.streamLogMethod.value = 'POST'
+  launcher.streamLogBody.value = null
+  launcher.showStreamLog.value = true
 }
 
 function handleRunOnceTask(task: TaskItem) {
-  streamLogTitle.value = `运行一次: ${task.taskname}`
-  streamLogUrl.value = `/api/tasks/${task.id}/run/stream`
-  streamLogMethod.value = 'POST'
-  streamLogBody.value = null
-  showStreamLog.value = true
-}
-
-function handleRunOnce(payload: Record<string, any>) {
-  streamLogTitle.value = `运行一次：${payload.taskname || '任务'}`
-  streamLogUrl.value = '/api/tasks/run/stream'
-  streamLogMethod.value = 'POST'
-  streamLogBody.value = payload
-  showStreamLog.value = true
-  sheetOpen.value = false
-  editingTask.value = undefined
+  launcher.streamLogTitle.value = `运行一次: ${task.taskname}`
+  launcher.streamLogUrl.value = `/api/tasks/${task.id}/run/stream`
+  launcher.streamLogMethod.value = 'POST'
+  launcher.streamLogBody.value = null
+  launcher.showStreamLog.value = true
 }
 
 function handleEdit(task: TaskItem) {
-  editingTask.value = task
-  sheetOpen.value = true
+  launcher.openEdit(task)
 }
 
 function handleDeleteConfirm(task: TaskItem) {
@@ -234,10 +215,6 @@ function handleToggleStatus(task: TaskItem) {
   )
 }
 
-function handleSheetClose() {
-  sheetOpen.value = false
-  editingTask.value = undefined
-}
 </script>
 
 <template>
@@ -313,7 +290,7 @@ function handleSheetClose() {
           <Search class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
           <Input v-model="searchQuery" placeholder="搜索任务..." class="pl-9" />
         </div>
-        <Button size="sm" @click="editingTask = undefined; sheetOpen = true">
+        <Button size="sm" @click="launcher.openCreate()">
           <Plus class="mr-1 h-4 w-4" />
           新建任务
         </Button>
@@ -350,7 +327,7 @@ function handleSheetClose() {
         </div>
         <h3 class="mb-1 text-lg font-medium text-[hsl(var(--foreground))]">还没有追剧任务</h3>
         <p class="mb-4 text-sm text-[hsl(var(--muted-foreground))]">创建第一个任务，开始自动追剧吧</p>
-        <Button size="sm" @click="sheetOpen = true">
+        <Button size="sm" @click="launcher.openCreate()">
           <Plus class="mr-1 h-4 w-4" />
           创建任务
         </Button>
@@ -395,17 +372,7 @@ function handleSheetClose() {
       </div>
     </div>
 
-    <!-- Create/Edit Task Sheet -->
-    <CreateTaskSheet :open="sheetOpen" :edit-task="editingTask" :preset-tmdb="null" @close="handleSheetClose" @run-once="handleRunOnce" />
-
-    <!-- Stream Log Dialog -->
-    <StreamLogDialog
-      v-model:visible="showStreamLog"
-      :url="streamLogUrl"
-      :title="streamLogTitle"
-      :method="streamLogMethod"
-      :body="streamLogBody"
-    />
+    <DramaTaskLauncher :launcher="launcher" />
 
     <!-- Delete Confirm Dialog -->
     <AlertDialog :open="deleteDialogOpen" @update:open="deleteDialogOpen = $event">

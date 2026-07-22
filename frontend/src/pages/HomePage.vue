@@ -6,34 +6,23 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import DramaCalendar from '@/components/business/drama/DramaCalendar.vue'
 import DramaDashboard from '@/components/business/drama/DramaDashboard.vue'
-import CreateTaskSheet from '@/components/business/drama/CreateTaskSheet.vue'
-import StreamLogDialog from '@/components/business/common/StreamLogDialog.vue'
+import DramaTaskLauncher from '@/components/business/drama/DramaTaskLauncher.vue'
 import { useMediaDiscoverQuery, useDoubanListQuery } from '@/hooks/queries/media'
-import { useTasksQuery } from '@/hooks/queries/tasks'
+import { useToast } from '@/composables/useToast'
+import { useDramaTaskLauncher } from '@/composables/useDramaTaskLauncher'
+import { resolveDoubanDramaPreset } from '@/utils/dramaTmdbMatcher'
 import type { DoubanCategory, DoubanListItem } from '@/types/media'
-import type { TaskItem } from '@/types/tasks'
 
 const router = useRouter()
-
-const { data: tasks } = useTasksQuery()
-
-// Find an existing drama task already bound to the given TMDB id + media type.
-function findExistingTask(tmdbId: number, mediaType: string): TaskItem | undefined {
-  if (!tmdbId) return undefined
-  return (tasks.value || []).find(
-    (t) =>
-      t.task_type === 'drama' &&
-      Number(t.tmdb_id) === tmdbId &&
-      String(t.tmdb_media_type || '').toLowerCase() === mediaType,
-  )
-}
+const { toast } = useToast()
+const launcher = useDramaTaskLauncher()
 
 // Whether a hot item already has a drama task (edit vs add button state).
 function itemTracked(item: DoubanListItem): boolean {
   const id = Number(item.tmdb?.id) || 0
   if (!id) return false
   const mt = String(item.tmdb?.media_type || 'tv').toLowerCase()
-  return !!findExistingTask(id, mt)
+  return launcher.trackedKeys.value.has(`${mt}:${id}`)
 }
 
 // --- Compact discover entry ---
@@ -53,6 +42,8 @@ const currentHotCategory = computed(() => categories.value.find((c) => c.key ===
 
 const { data: hotData, isLoading: hotLoading } = useDoubanListQuery(hotCategory, hotSub, hotStart, 14)
 const hotItems = computed<DoubanListItem[]>(() => hotData.value?.items || [])
+const hotTmdbConfigured = computed(() => Boolean(hotData.value?.tmdb_configured))
+const resolvingHotId = ref('')
 
 function bestPoster(item: DoubanListItem) {
   const url = String(item.pic?.normal || '').trim()
@@ -67,51 +58,56 @@ function goDiscover() {
 }
 
 // --- One-click add to drama ---
-const sheetOpen = ref(false)
-const editingTask = ref<TaskItem | undefined>(undefined)
-const presetTmdb = ref<{ tmdb_id: number; tmdb_media_type: 'movie' | 'tv'; taskname: string } | null>(null)
-
-const showStreamLog = ref(false)
-const streamLogUrl = ref('')
-const streamLogTitle = ref('执行日志')
-const streamLogMethod = ref<'GET' | 'POST'>('GET')
-const streamLogBody = ref<Record<string, any> | null>(null)
-
-function handleAddFromDouban(item: DoubanListItem) {
-  let payload: { tmdb_id: number; tmdb_media_type: 'movie' | 'tv'; taskname: string }
+async function handleAddFromDouban(item: DoubanListItem) {
   if (item.tmdb?.id) {
     const mt = String(item.tmdb.media_type || 'tv').toLowerCase()
-    payload = { tmdb_id: Number(item.tmdb.id), tmdb_media_type: mt === 'movie' ? 'movie' : 'tv', taskname: item.title || '' }
-  } else {
-    const mt = String(currentHotCategory.value?.media_type || 'tv').toLowerCase()
-    payload = { tmdb_id: 0, tmdb_media_type: mt === 'movie' ? 'movie' : 'tv', taskname: item.title || '' }
+    launcher.openFromPreset({
+      tmdb_id: Number(item.tmdb.id),
+      tmdb_media_type: mt === 'movie' ? 'movie' : 'tv',
+      taskname: item.title || '',
+      open_tmdb_search: false,
+      tmdb_search_query: '',
+      tmdb_search_reason: null,
+    })
+    return
   }
-  const existing = findExistingTask(payload.tmdb_id, payload.tmdb_media_type)
-  if (existing) {
-    // Already tracked → open the existing task for editing instead of creating a new one.
-    presetTmdb.value = null
-    editingTask.value = existing
-  } else {
-    editingTask.value = undefined
-    presetTmdb.value = payload
+  const mediaType = String(currentHotCategory.value?.media_type || 'tv').toLowerCase() === 'movie' ? 'movie' : 'tv'
+  const itemId = String(item.id || '')
+  resolvingHotId.value = itemId
+  try {
+    const result = await resolveDoubanDramaPreset({ item, mediaType })
+    if (result.resolved) {
+      launcher.openFromPreset(result.resolved)
+      return
+    }
+    if (result.manualSearch) {
+      if (!result.configured) {
+        toast.info('TMDB 未配置', { description: '已打开追剧任务抽屉，你仍可先保存任务，后续再补 TMDB 关联。' })
+      }
+      launcher.openFromPreset(result.manualSearch)
+      return
+    }
+    launcher.openFromPreset({
+      taskname: item.title || '',
+      tmdb_id: null,
+      tmdb_media_type: mediaType,
+      open_tmdb_search: hotTmdbConfigured.value,
+      tmdb_search_query: item.title || '',
+      tmdb_search_reason: 'no-match',
+    })
+  } catch (e: any) {
+    toast.error(e?.message || 'TMDB 自动识别失败')
+    launcher.openFromPreset({
+      taskname: item.title || '',
+      tmdb_id: null,
+      tmdb_media_type: mediaType,
+      open_tmdb_search: hotTmdbConfigured.value,
+      tmdb_search_query: item.title || '',
+      tmdb_search_reason: hotTmdbConfigured.value ? 'ambiguous' : 'not-configured',
+    })
+  } finally {
+    if (resolvingHotId.value === itemId) resolvingHotId.value = ''
   }
-  sheetOpen.value = true
-}
-
-function handleSheetClose() {
-  sheetOpen.value = false
-  editingTask.value = undefined
-  presetTmdb.value = null
-}
-
-function handleRunOnce(payload: Record<string, any>) {
-  streamLogTitle.value = `运行一次：${payload.taskname || '任务'}`
-  streamLogUrl.value = '/api/tasks/run/stream'
-  streamLogMethod.value = 'POST'
-  streamLogBody.value = payload
-  showStreamLog.value = true
-  sheetOpen.value = false
-  editingTask.value = undefined
 }
 </script>
 
@@ -182,10 +178,11 @@ function handleRunOnce(payload: Record<string, any>) {
                   <Button
                     size="sm"
                     class="h-7 gap-1 border-0 bg-white px-2.5 text-xs text-black shadow-lg hover:bg-white/90"
+                    :disabled="resolvingHotId === String(item.id || '')"
                     @click.stop="handleAddFromDouban(item)"
                   >
-                    <component :is="itemTracked(item) ? Pencil : Plus" class="h-3.5 w-3.5" />
-                    {{ itemTracked(item) ? '编辑' : '追剧' }}
+                    <component :is="resolvingHotId === String(item.id || '') ? Search : (itemTracked(item) ? Pencil : Plus)" class="h-3.5 w-3.5" :class="resolvingHotId === String(item.id || '') ? 'animate-spin' : ''" />
+                    {{ resolvingHotId === String(item.id || '') ? '识别中' : (itemTracked(item) ? '编辑' : '追剧') }}
                   </Button>
                 </div>
               </div>
@@ -215,22 +212,6 @@ function handleRunOnce(payload: Record<string, any>) {
       </div>
     </section>
 
-    <!-- Create/Edit Task Sheet -->
-    <CreateTaskSheet
-      :open="sheetOpen"
-      :edit-task="editingTask"
-      :preset-tmdb="presetTmdb"
-      @close="handleSheetClose"
-      @run-once="handleRunOnce"
-    />
-
-    <!-- Stream Log Dialog -->
-    <StreamLogDialog
-      v-model:visible="showStreamLog"
-      :url="streamLogUrl"
-      :title="streamLogTitle"
-      :method="streamLogMethod"
-      :body="streamLogBody"
-    />
+    <DramaTaskLauncher :launcher="launcher" />
   </div>
 </template>

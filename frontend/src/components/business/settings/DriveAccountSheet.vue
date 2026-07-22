@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, watch, reactive } from 'vue'
+import { computed, watch, reactive, ref } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { X } from 'lucide-vue-next'
+import { Eye, EyeOff, X } from 'lucide-vue-next'
 import type { ConfigFieldItem, DriveAccountItem, DriveTypeItem } from '@/types/extensions'
 
 interface Props {
@@ -37,6 +37,7 @@ const state = reactive({
   is_default: false,
   capacity_warning_threshold: 85,
 })
+const revealedSecretFields = ref<Record<string, boolean>>({})
 
 const isEditing = computed(() => Boolean(props.editAccount?.id))
 const currentDriveType = computed(() => props.driveTypes.find((item) => item.code === state.drive_type) || null)
@@ -47,7 +48,23 @@ function cloneConfig<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? {}))
 }
 
+function resetRevealedSecretFields() {
+  revealedSecretFields.value = {}
+}
+
+function isSecretFieldRevealed(key: string) {
+  return Boolean(revealedSecretFields.value[key])
+}
+
+function toggleSecretField(key: string) {
+  revealedSecretFields.value = {
+    ...revealedSecretFields.value,
+    [key]: !revealedSecretFields.value[key],
+  }
+}
+
 function syncState() {
+  resetRevealedSecretFields()
   if (props.editAccount) {
     state.name = props.editAccount.name
     state.drive_type = props.editAccount.drive_type
@@ -84,6 +101,7 @@ watch(
 )
 
 function handleClose() {
+  resetRevealedSecretFields()
   emit('close')
 }
 
@@ -235,12 +253,24 @@ function handleSubmit() {
                 />
 
                 <!-- Password / Text -->
-                <Input
-                  v-else
-                  v-model="state.configData[field.key]"
-                  :type="field.input_type === 'password' ? 'password' : 'text'"
-                  :placeholder="field.placeholder || ''"
-                />
+                <div v-else class="relative">
+                  <Input
+                    v-model="state.configData[field.key]"
+                    :type="field.input_type === 'password' && !isSecretFieldRevealed(field.key) ? 'password' : 'text'"
+                    :placeholder="field.placeholder || ''"
+                    :class="field.input_type === 'password' ? 'pr-10' : ''"
+                  />
+                  <button
+                    v-if="field.input_type === 'password'"
+                    type="button"
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))] transition-colors hover:text-[hsl(var(--foreground))]"
+                    :aria-label="isSecretFieldRevealed(field.key) ? '隐藏' : '显示'"
+                    @click="toggleSecretField(field.key)"
+                  >
+                    <EyeOff v-if="isSecretFieldRevealed(field.key)" class="h-4 w-4" />
+                    <Eye v-else class="h-4 w-4" />
+                  </button>
+                </div>
 
                 <p v-if="field.description" class="text-xs text-[hsl(var(--muted-foreground))]">
                   {{ field.description }}

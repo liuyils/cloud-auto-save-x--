@@ -5,15 +5,19 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { useMediaDiscoverQuery, useDoubanListQuery, useTmdbSearchQuery } from '@/hooks/queries/media'
+import { useToast } from '@/composables/useToast'
+import { resolveDoubanDramaPreset } from '@/utils/dramaTmdbMatcher'
+import type { DramaTaskPreset } from '@/types/dramaLauncher'
 import type { DoubanCategory, DoubanListItem, TMDBBrief } from '@/types/media'
 
 const emit = defineEmits<{
-  'add-task': [payload: { tmdb_id: number; tmdb_media_type: 'movie' | 'tv'; taskname: string }]
+  'add-task': [payload: DramaTaskPreset]
 }>()
 
 const props = defineProps<{ initialQuery?: string; trackedKeys?: Set<string> }>()
 
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w342'
+const { toast } = useToast()
 
 // View mode: douban browse or tmdb search
 const viewMode = ref<'douban' | 'tmdb'>('douban')
@@ -50,9 +54,11 @@ const subOptions = computed(() => currentCategory.value?.subs || [])
 
 const doubanItems = computed<DoubanListItem[]>(() => doubanData.value?.items || [])
 const doubanTotal = computed(() => doubanData.value?.total || 0)
+const doubanTmdbConfigured = computed(() => Boolean(doubanData.value?.tmdb_configured))
 
 const tmdbItems = computed<TMDBBrief[]>(() => tmdbData.value?.items || [])
 const tmdbTotalPages = computed(() => tmdbData.value?.total_pages || 0)
+const resolvingDoubanId = ref('')
 
 // Auto-select first category
 watch(categories, (cats) => {
@@ -143,7 +149,7 @@ function tmdbYear(item: TMDBBrief) {
 }
 
 // One-click add task
-function handleAddFromDouban(item: DoubanListItem) {
+async function handleAddFromDouban(item: DoubanListItem) {
   // If the item has tmdb data attached
   if (item.tmdb?.id) {
     const mt = String(item.tmdb.media_type || 'tv').toLowerCase()
@@ -151,16 +157,49 @@ function handleAddFromDouban(item: DoubanListItem) {
       tmdb_id: Number(item.tmdb.id),
       tmdb_media_type: (mt === 'movie' ? 'movie' : 'tv') as 'movie' | 'tv',
       taskname: item.title || '',
+      open_tmdb_search: false,
+      tmdb_search_query: '',
+      tmdb_search_reason: null,
     })
     return
   }
-  // Otherwise try to use the category media_type
-  const mt = String(currentCategory.value?.media_type || 'tv').toLowerCase()
-  emit('add-task', {
-    tmdb_id: 0,
-    tmdb_media_type: (mt === 'movie' ? 'movie' : 'tv') as 'movie' | 'tv',
-    taskname: item.title || '',
-  })
+  const mediaType = String(currentCategory.value?.media_type || 'tv').toLowerCase() === 'movie' ? 'movie' : 'tv'
+  const itemId = String(item.id || '')
+  resolvingDoubanId.value = itemId
+  try {
+    const result = await resolveDoubanDramaPreset({ item, mediaType })
+    if (result.resolved) {
+      emit('add-task', result.resolved)
+      return
+    }
+    if (result.manualSearch) {
+      if (!result.configured) {
+        toast.info('TMDB 未配置', { description: '已打开追剧任务抽屉，你仍可先保存任务，后续再补 TMDB 关联。' })
+      }
+      emit('add-task', result.manualSearch)
+      return
+    }
+    emit('add-task', {
+      taskname: item.title || '',
+      tmdb_id: null,
+      tmdb_media_type: mediaType,
+      open_tmdb_search: doubanTmdbConfigured.value,
+      tmdb_search_query: item.title || '',
+      tmdb_search_reason: 'no-match',
+    })
+  } catch (e: any) {
+    toast.error(e?.message || 'TMDB 自动识别失败')
+    emit('add-task', {
+      taskname: item.title || '',
+      tmdb_id: null,
+      tmdb_media_type: mediaType,
+      open_tmdb_search: doubanTmdbConfigured.value,
+      tmdb_search_query: item.title || '',
+      tmdb_search_reason: doubanTmdbConfigured.value ? 'ambiguous' : 'not-configured',
+    })
+  } finally {
+    if (resolvingDoubanId.value === itemId) resolvingDoubanId.value = ''
+  }
 }
 
 function handleAddFromTmdb(item: TMDBBrief) {
@@ -170,6 +209,9 @@ function handleAddFromTmdb(item: TMDBBrief) {
     tmdb_id: Number(item.id) || 0,
     tmdb_media_type: mt as 'movie' | 'tv',
     taskname: bestTmdbTitle(item),
+    open_tmdb_search: false,
+    tmdb_search_query: '',
+    tmdb_search_reason: null,
   })
 }
 
@@ -297,10 +339,12 @@ function tmdbTracked(item: TMDBBrief): boolean {
               <Button 
                 size="sm" 
                 class="gap-1 bg-white text-black shadow-lg hover:bg-white/90 border-0"
+                :disabled="resolvingDoubanId === String(item.id || '')"
                 @click.stop="handleAddFromDouban(item)"
               >
-                <component :is="doubanTracked(item) ? Pencil : Plus" class="h-3.5 w-3.5" />
-                {{ doubanTracked(item) ? '编辑' : '追剧' }}
+                <Loader2 v-if="resolvingDoubanId === String(item.id || '')" class="h-3.5 w-3.5 animate-spin" />
+                <component v-else :is="doubanTracked(item) ? Pencil : Plus" class="h-3.5 w-3.5" />
+                {{ resolvingDoubanId === String(item.id || '') ? '识别中' : (doubanTracked(item) ? '编辑' : '追剧') }}
               </Button>
             </div>
           </div>

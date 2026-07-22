@@ -33,6 +33,7 @@ declare module 'vue' {
     Dl302Section: typeof import('./components/business/settings/Dl302Section.vue')['default']
     DramaCalendar: typeof import('./components/business/drama/DramaCalendar.vue')['default']
     DramaDashboard: typeof import('./components/business/drama/DramaDashboard.vue')['default']
+    DramaTaskLauncher: typeof import('./components/business/drama/DramaTaskLauncher.vue')['default']
     DriveAccountAuthDialog: typeof import('./components/business/settings/DriveAccountAuthDialog.vue')['default']
     DriveAccountSheet: typeof import('./components/business/settings/DriveAccountSheet.vue')['default']
     DriveAccountsSection: typeof import('./components/business/settings/DriveAccountsSection.vue')['default']

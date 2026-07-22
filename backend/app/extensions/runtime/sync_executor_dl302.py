@@ -46,6 +46,7 @@ class Dl302Endpoint:
 class Dl302Strategy:
     overwrite: bool
     force_refresh: bool
+    concurrency: int
 
 
 class SyncCancelled(Exception):
@@ -262,6 +263,7 @@ class Dl302SyncExecutor:
                 dst_account=target.account_name,
                 dst_path=target.path,
                 conflict_policy=conflict_policy,
+                concurrency=int(getattr(strategy, "concurrency", 4) or 4),
             )
             dl302_task_id = str(getattr(submit_resp, "task_id", "") or "").strip()
             if not dl302_task_id:
@@ -489,6 +491,7 @@ class Dl302SyncExecutor:
         return Dl302Strategy(
             overwrite=bool(base.get("overwrite", False)),
             force_refresh=bool(base.get("force_refresh", False)),
+            concurrency=max(1, min(32, int(base.get("concurrency", 4) or 4))),
         )
 
     def _refresh_netdisk_endpoints_if_needed(

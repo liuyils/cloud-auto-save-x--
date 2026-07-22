@@ -44,7 +44,13 @@ from app.services.drive_account_lsdir_cache import (
 )
 from app.services.drive_account_lsdir_scan import rebuild_drive_account_lsdir_cache_for_current_302_path
 from app.services.drive_account_lsdir_static_state import clear_lsdir_scan_state, clear_static_scan_state
-from app.services.dl302_settings import extract_dl302_cache_base_path, extract_dl302_static_cache_base_path
+from app.services.dl302_settings import (
+    extract_dl302_cache_base_path,
+    extract_dl302_static_cache_base_path,
+    get_or_create_dl302_setting,
+    load_dl302_config,
+)
+from app.services.dl302_strm import ensure_strm_prefix_url
 from app.services.drive_account_signin_jobs import get_drive_account_signin_job, submit_drive_account_signin_job
 from app.thirdparty.dl302_grpc_client import reload_dl302
 
@@ -339,6 +345,9 @@ def post_account_lsdir_cache_refresh(
     static_base_path = extract_dl302_static_cache_base_path(account)
     if not base_path and not static_base_path:
         raise bad_request("DRIVE_ACCOUNT_302_PATH_REQUIRED", "当前账号未配置缓存路径")
+    dl302_config = load_dl302_config(get_or_create_dl302_setting(db))
+    if bool(dl302_config.get("strm_enabled")):
+        ensure_strm_prefix_url(db, request, persist_if_empty=True)
     result = rebuild_drive_account_lsdir_cache_for_current_302_path(
         int(account_id),
         source="api.drive_accounts.lsdir_cache_refresh",

@@ -162,6 +162,7 @@ def submit_copy_task(
     dst_parent_id: str = "",
     dst_path: str = "",
     conflict_policy: str = "",
+    concurrency: int = 0,
     timeout_seconds: float = 20.0,
 ):
     request = dl302_pb2.CopyTaskRequest(
@@ -173,6 +174,7 @@ def submit_copy_task(
         dst_parent_id=str(dst_parent_id or ""),
         dst_path=str(dst_path or ""),
         conflict_policy=str(conflict_policy or ""),
+        concurrency=int(concurrency or 0),
     )
     return _call_dl302_rpc("SubmitCopyTask", request, timeout_seconds=timeout_seconds, fallback="submit copy task failed", retries=1)
 

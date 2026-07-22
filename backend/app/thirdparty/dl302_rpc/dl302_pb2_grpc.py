@@ -3,7 +3,10 @@
 import grpc
 import warnings
 
-from . import dl302_pb2 as dl302__pb2
+try:
+    from . import dl302_pb2 as dl302__pb2
+except ImportError:  # pragma: no cover
+    import dl302_pb2 as dl302__pb2
 
 GRPC_GENERATED_VERSION = '1.81.0'
 GRPC_VERSION = grpc.__version__

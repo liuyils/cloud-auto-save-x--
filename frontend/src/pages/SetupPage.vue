@@ -36,6 +36,7 @@ const driveTypesLoading = ref(false)
 const selectedDriveType = ref('')
 const driveConfig = ref<Record<string, any>>({})
 const driveAccountName = ref('')
+const revealedDriveSecretFields = ref<Record<string, boolean>>({})
 
 const currentDriveType = computed(
   () => driveTypes.value.find((item) => item.code === selectedDriveType.value) || null,
@@ -44,6 +45,21 @@ const currentDriveFields = computed<ConfigFieldItem[]>(() => currentDriveType.va
 
 function cloneConfig<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? {}))
+}
+
+function resetDriveSecretFields() {
+  revealedDriveSecretFields.value = {}
+}
+
+function isDriveSecretFieldRevealed(key: string) {
+  return Boolean(revealedDriveSecretFields.value[key])
+}
+
+function toggleDriveSecretField(key: string) {
+  revealedDriveSecretFields.value = {
+    ...revealedDriveSecretFields.value,
+    [key]: !revealedDriveSecretFields.value[key],
+  }
 }
 
 // Keep in sync with DriveAccountsSection: a new account needs at least one
@@ -73,6 +89,7 @@ async function loadDriveTypes() {
 watch(selectedDriveType, (value) => {
   const target = driveTypes.value.find((item) => item.code === value)
   driveConfig.value = cloneConfig(target?.default_config || {})
+  resetDriveSecretFields()
 })
 
 // shared state
@@ -402,13 +419,26 @@ onMounted(async () => {
                 />
 
                 <!-- Password / Text -->
-                <Input
-                  v-else
-                  v-model="driveConfig[field.key]"
-                  :type="field.input_type === 'password' ? 'password' : 'text'"
-                  :placeholder="field.placeholder || ''"
-                  :disabled="loading"
-                />
+                <div v-else class="relative">
+                  <Input
+                    v-model="driveConfig[field.key]"
+                    :type="field.input_type === 'password' && !isDriveSecretFieldRevealed(field.key) ? 'password' : 'text'"
+                    :placeholder="field.placeholder || ''"
+                    :disabled="loading"
+                    :class="field.input_type === 'password' ? 'pr-10' : ''"
+                  />
+                  <button
+                    v-if="field.input_type === 'password'"
+                    type="button"
+                    class="absolute right-3 top-1/2 -translate-y-1/2 transition-colors"
+                    style="color: hsl(var(--muted-foreground))"
+                    :aria-label="isDriveSecretFieldRevealed(field.key) ? '隐藏' : '显示'"
+                    @click="toggleDriveSecretField(field.key)"
+                  >
+                    <EyeOff v-if="isDriveSecretFieldRevealed(field.key)" class="h-4 w-4" />
+                    <Eye v-else class="h-4 w-4" />
+                  </button>
+                </div>
 
                 <p v-if="field.description" class="text-xs" style="color: hsl(var(--muted-foreground))">
                   {{ field.description }}

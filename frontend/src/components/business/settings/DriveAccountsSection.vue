@@ -384,13 +384,13 @@ async function confirmCacheRefresh(rescanStatic: boolean) {
   try {
     const result = await refreshCacheMutation.mutateAsync({ accountId: account.id, rescanStatic })
     if (result.reason === 'running') {
-      toast.info('缓存刷新任务已在后台执行中')
+      toast.info('缓存刷新任务已在后台执行中，完成后会自动触发 STRM 对账')
     } else if (result.static_requested && result.static_queued) {
-      toast.success('普通缓存与静态目录重扫任务已提交')
+      toast.success('普通缓存与静态目录重扫任务已提交，完成后会自动触发 STRM 对账')
     } else if (result.static_requested && !result.static_queued) {
-      toast.info(`普通缓存刷新已提交，静态目录未重扫：${result.static_skipped_reason || '未配置静态目录'}`)
+      toast.info(`普通缓存刷新已提交，完成后会自动触发 STRM 对账；静态目录未重扫：${result.static_skipped_reason || '未配置静态目录'}`)
     } else {
-      toast.success('缓存刷新任务已提交')
+      toast.success('缓存刷新任务已提交，完成后会自动触发 STRM 对账')
     }
   } catch (e) {
     toast.error(extractErrorMessage(e, '刷新缓存失败'))

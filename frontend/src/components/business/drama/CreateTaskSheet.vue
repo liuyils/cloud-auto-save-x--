@@ -17,13 +17,14 @@ import { useDriveAccountsQuery, usePluginsQuery } from '@/hooks/queries/extensio
 import { useSyncTasksQuery } from '@/hooks/queries/sync'
 import { useTasksQuery, useMagicRegexQuery } from '@/hooks/queries/tasks'
 import { detectDriveTypeByUrl } from '@/utils/driveType'
+import type { DramaTaskPreset } from '@/types/dramaLauncher'
 import type { TaskItem, SharePreviewItem, DriveBrowseItem } from '@/types/tasks'
 import type { TMDBBrief } from '@/types/media'
 
 const props = defineProps<{
   open: boolean
   editTask?: TaskItem
-  presetTmdb?: { tmdb_id: number; tmdb_media_type: 'movie' | 'tv'; taskname: string } | null
+  presetTmdb?: DramaTaskPreset | null
 }>()
 
 const emit = defineEmits<{
@@ -103,6 +104,7 @@ const showTmdbSearch = ref(false)
 const tmdbQuery = ref('')
 const tmdbSearching = ref(false)
 const tmdbResults = ref<TMDBBrief[]>([])
+const tmdbSearchConfigured = ref(true)
 
 // StartFID picker state
 const showStartfidPicker = ref(false)
@@ -219,6 +221,8 @@ watch(
   () => [props.open, props.editTask, props.presetTmdb] as const,
   ([open, task, preset]) => {
     if (!open) return
+    const shouldOpenTmdbSearch = !task && Boolean(preset?.open_tmdb_search)
+    const nextTmdbQuery = shouldOpenTmdbSearch ? String(preset?.tmdb_search_query || preset?.taskname || '').trim() : ''
     if (task) {
       isInitializing.value = true
       state.taskname = task.taskname || ''
@@ -264,7 +268,10 @@ watch(
     previewError.value = ''
     previewTotal.value = 0
     showPathBrowser.value = false
-    showTmdbSearch.value = false
+    showTmdbSearch.value = shouldOpenTmdbSearch
+    tmdbQuery.value = nextTmdbQuery
+    tmdbResults.value = []
+    tmdbSearchConfigured.value = true
     showStartfidPicker.value = false
     showPreviewModal.value = false
     previewPage.value = 1
@@ -276,6 +283,11 @@ watch(
     taskSuggestions.items = []
     taskSuggestions.message = ''
     taskSuggestions.loading = false
+    if (shouldOpenTmdbSearch && nextTmdbQuery) {
+      nextTick(() => {
+        doTmdbSearch().catch(() => {})
+      })
+    }
   },
   { immediate: true },
 )
@@ -302,6 +314,33 @@ function resetForm() {
   state.update_subdir_resave_mode = 'none'
   state.addition = {}
   advancedOpen.value = false
+}
+
+function extractRunweekFromTmdbDetail(detail: any) {
+  const raw: any[] = Array.isArray(detail?.episode_weekdays) && detail.episode_weekdays.length
+    ? detail.episode_weekdays
+    : Array.isArray(detail?.update_weekdays)
+      ? detail.update_weekdays
+      : []
+  const normalized = raw
+    .map((x) => Number(x))
+    .filter((x): x is number => Number.isFinite(x) && x >= 1 && x <= 7)
+  return Array.from(new Set<number>(normalized)).sort((a, b) => a - b)
+}
+
+async function applyAutoRunweekFromTmdb(tmdbId: number, mediaType: 'tv' | 'movie') {
+  if (mediaType !== 'tv' || tmdbId <= 0) {
+    state.runweek_mode = 'manual'
+    state.runweek = []
+    return
+  }
+  state.runweek_mode = 'auto'
+  try {
+    const detail = await fetchTMDBDetail('tv', tmdbId)
+    state.runweek = extractRunweekFromTmdbDetail(detail)
+  } catch {
+    state.runweek = []
+  }
 }
 
 function initAdditionDefaults() {
@@ -796,8 +835,9 @@ function openTmdbSearch() {
   if (showTmdbSearch.value) {
     tmdbQuery.value = state.taskname || ''
     tmdbResults.value = []
+    tmdbSearchConfigured.value = true
     if (tmdbQuery.value.trim()) {
-      doTmdbSearch()
+      doTmdbSearch().catch(() => {})
     }
   }
 }
@@ -817,6 +857,7 @@ async function doTmdbSearch() {
   tmdbResults.value = []
   try {
     const data = await searchTMDB({ q, type: state.tmdb_media_type })
+    tmdbSearchConfigured.value = Boolean(data.configured)
     tmdbResults.value = data.items || []
   } catch (e: any) {
     toast.error(e?.message || 'TMDB搜索失败')
@@ -825,14 +866,24 @@ async function doTmdbSearch() {
   }
 }
 
-function selectTmdb(item: TMDBBrief) {
+async function selectTmdb(item: TMDBBrief) {
   state.tmdb_id = item.id || null
   state.tmdb_media_type = (item.media_type as 'tv' | 'movie') || state.tmdb_media_type
   if (!state.taskname) {
     state.taskname = item.title || item.name || ''
   }
+  await applyAutoRunweekFromTmdb(Number(item.id) || 0, state.tmdb_media_type)
   showTmdbSearch.value = false
   toast.success(`已关联: ${item.title || item.name} (${item.id})`)
+}
+
+function clearTmdbSelection() {
+  state.tmdb_id = null
+  state.runweek_mode = 'manual'
+  state.runweek = []
+  tmdbResults.value = []
+  showTmdbSearch.value = false
+  toast.success('已清除 TMDB 关联')
 }
 
 // ===== StartFID Picker =====
@@ -1352,6 +1403,9 @@ function getTmdbPoster(item: TMDBBrief): string {
                     <Button variant="outline" size="sm" @click="openTmdbSearch">
                       <Search class="h-4 w-4" />
                     </Button>
+                    <Button v-if="state.tmdb_id" variant="outline" size="sm" @click="clearTmdbSelection">
+                      清除
+                    </Button>
                   </div>
                 </div>
                 <div>
@@ -1368,17 +1422,28 @@ function getTmdbPoster(item: TMDBBrief): string {
 
               <!-- TMDB 搜索面板 -->
               <div v-if="showTmdbSearch" class="rounded-md border border-[hsl(var(--border))] p-3 space-y-2">
+                <div v-if="props.presetTmdb?.tmdb_search_reason" class="rounded-md bg-[hsl(var(--muted))] px-2.5 py-2 text-xs text-[hsl(var(--muted-foreground))]">
+                  <span v-if="props.presetTmdb.tmdb_search_reason === 'ambiguous'">自动识别到多个可能结果，请手动确认正确的 TMDB 条目。</span>
+                  <span v-else-if="props.presetTmdb.tmdb_search_reason === 'no-match'">未自动识别到 TMDB 条目，请手动搜索并关联。</span>
+                  <span v-else>当前未配置 TMDB API Key，暂时无法自动搜索关联。</span>
+                </div>
                 <Input
                   v-model="tmdbQuery"
                   placeholder="输入影视名称搜索TMDB..."
                   class="h-8 text-xs"
                   @keydown.enter="doTmdbSearch"
                 />
+                <div v-if="!tmdbSearchConfigured" class="text-xs text-amber-600 py-1 text-center">
+                  未配置 TMDB API Key，无法返回搜索结果
+                </div>
                 <div v-if="tmdbSearching" class="flex items-center justify-center py-3">
                   <Loader2 class="h-4 w-4 animate-spin text-[hsl(var(--muted-foreground))]" />
                 </div>
-                <div v-else-if="tmdbResults.length === 0 && tmdbQuery.trim()" class="text-xs text-[hsl(var(--muted-foreground))] py-2 text-center">
-                  正在等待搜索结果...
+                <div v-else-if="tmdbResults.length === 0 && !tmdbQuery.trim()" class="text-xs text-[hsl(var(--muted-foreground))] py-2 text-center">
+                  输入影视名称后可搜索并手动关联
+                </div>
+                <div v-else-if="tmdbResults.length === 0 && tmdbQuery.trim() && tmdbSearchConfigured" class="text-xs text-[hsl(var(--muted-foreground))] py-2 text-center">
+                  未找到匹配的 TMDB 结果
                 </div>
                 <div v-else class="max-h-48 overflow-y-auto space-y-1">
                   <div

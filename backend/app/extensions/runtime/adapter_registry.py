@@ -7,6 +7,10 @@ from app.extensions.adapters.adapter_factory import AdapterFactory
 
 
 class AdapterRegistry:
+    _DL302_LEGACY_PATH_DRIVE_TYPES = {"115", "cloud189", "cloud139", "quark", "uc"}
+    _DL302_CACHE_PATH_KEY = "lsdir_cache_path"
+    _DL302_LEGACY_CACHE_PATH_KEYS = ("302_path", "302Path")
+
     @staticmethod
     def _adapter_class(drive_type: str):
         return AdapterFactory.ADAPTER_MAP.get(drive_type)
@@ -79,8 +83,37 @@ class AdapterRegistry:
     def normalize_config(cls, drive_type: str, config: dict[str, Any] | None) -> dict[str, Any]:
         meta = cls.get_drive_type_meta(drive_type)
         result = dict(meta.get("default_config", {}) or {})
+        source_keys = set((config or {}).keys())
         for key, value in (config or {}).items():
             result[key] = value
+        return cls._normalize_legacy_dl302_aliases(drive_type, result, source_keys)
+
+    @classmethod
+    def _normalize_legacy_dl302_aliases(
+        cls,
+        drive_type: str,
+        config: dict[str, Any],
+        source_keys: set[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_drive_type = str(drive_type or "").strip().lower()
+        if normalized_drive_type not in cls._DL302_LEGACY_PATH_DRIVE_TYPES:
+            return config
+
+        result = dict(config or {})
+        explicit_keys = source_keys or set()
+        if cls._DL302_CACHE_PATH_KEY in explicit_keys:
+            cache_path = result.get(cls._DL302_CACHE_PATH_KEY)
+        else:
+            cache_path = None
+            for legacy_key in cls._DL302_LEGACY_CACHE_PATH_KEYS:
+                if legacy_key in explicit_keys:
+                    cache_path = result.get(legacy_key)
+                    break
+            if cache_path is not None:
+                result[cls._DL302_CACHE_PATH_KEY] = cache_path
+
+        for legacy_key in cls._DL302_LEGACY_CACHE_PATH_KEYS:
+            result.pop(legacy_key, None)
         return result
 
     @classmethod
