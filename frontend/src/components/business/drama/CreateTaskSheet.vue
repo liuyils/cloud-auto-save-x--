@@ -993,6 +993,11 @@ function handleRunOnce() {
     return
   }
   const payload = buildPayload()
+  payload.extra = {
+    ...(payload.extra || {}),
+    allow_once: true,
+    runweek: [],
+  }
   emit('run-once', payload)
 }
 

@@ -23,6 +23,7 @@ export type TaskItem = {
   taskname: string
   shareurl: string
   savepath: string
+  sync_task_uids?: string[]
   pattern?: string | null
   replace?: string | null
   enddate?: string | null

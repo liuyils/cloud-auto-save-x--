@@ -176,11 +176,38 @@ function handleRun(task: TaskItem) {
   launcher.showStreamLog.value = true
 }
 
+function buildRunOncePayloadFromTask(task: TaskItem) {
+  return {
+    task_type: task.task_type,
+    taskname: String(task.taskname || '').trim(),
+    shareurl: String(task.shareurl || '').trim(),
+    savepath: String(task.savepath || '').trim(),
+    sync_task_uids: [...(task.sync_task_uids || [])],
+    pattern: task.pattern ?? null,
+    replace: task.replace ?? null,
+    enddate: task.enddate ?? null,
+    ignore_extension: Boolean(task.ignore_extension),
+    sort_index: task.sort_index ?? null,
+    startfid: task.startfid ?? null,
+    account_name: task.account_name ?? null,
+    update_subdir: task.update_subdir ?? null,
+    tmdb_id: task.tmdb_id ?? null,
+    tmdb_media_type: task.tmdb_media_type ?? null,
+    enabled: Boolean(task.enabled),
+    addition: { ...(task.addition || {}) },
+    extra: {
+      ...(task.extra || {}),
+      allow_once: true,
+      runweek: [],
+    },
+  }
+}
+
 function handleRunOnceTask(task: TaskItem) {
   launcher.streamLogTitle.value = `运行一次: ${task.taskname}`
-  launcher.streamLogUrl.value = `/api/tasks/${task.id}/run/stream`
+  launcher.streamLogUrl.value = '/api/tasks/run/stream'
   launcher.streamLogMethod.value = 'POST'
-  launcher.streamLogBody.value = null
+  launcher.streamLogBody.value = buildRunOncePayloadFromTask(task)
   launcher.showStreamLog.value = true
 }
 

@@ -24,6 +24,7 @@ from app.extensions.runtime.account_manager import DatabaseAccountManager
 from app.extensions.runtime.execution_log import ExecutionLog
 from app.extensions.runtime.magic_rename import MagicRename
 from app.models.drive_account import DriveAccount
+from app.models.sync_task_drama_link import SyncTaskDramaLink
 from app.models.task import Task
 from app.models.task_savepath_snapshot import TaskSavepathSnapshot
 from app.models.tmdb_media_cache import TMDBMediaCache
@@ -252,6 +253,29 @@ def _get_tmdb_status(db: Session, mt: str, tid: int) -> str | None:
     return status or None
 
 
+def _load_sync_task_uids_map(db: Session, items: list[object]) -> dict[str, list[str]]:
+    task_uids = [str(getattr(item, "task_uid", "") or "").strip() for item in items]
+    task_uids = [uid for uid in task_uids if uid]
+    if not task_uids:
+        return {}
+    rows = (
+        db.execute(
+            select(SyncTaskDramaLink.task_uid, SyncTaskDramaLink.sync_task_uid)
+            .where(SyncTaskDramaLink.task_uid.in_(task_uids))
+            .order_by(SyncTaskDramaLink.task_uid.asc(), SyncTaskDramaLink.created_at.asc(), SyncTaskDramaLink.sync_task_uid.asc())
+        )
+        .all()
+    )
+    result: dict[str, list[str]] = {uid: [] for uid in task_uids}
+    for task_uid, sync_task_uid in rows:
+        uid = str(task_uid or "").strip()
+        sync_uid = str(sync_task_uid or "").strip()
+        if not uid or not sync_uid:
+            continue
+        result.setdefault(uid, []).append(sync_uid)
+    return result
+
+
 def _task_out(
     db: Session,
     item,
@@ -259,9 +283,18 @@ def _task_out(
     tmdb_status_map: dict[tuple[str, int], str | None] | None = None,
     tmdb_payload_map: dict[tuple[str, int], dict[str, object] | None] | None = None,
     snapshot_map: dict[str, TaskSavepathSnapshot] | None = None,
+    sync_task_uids_map: dict[str, list[str]] | None = None,
 ) -> TaskOut:
     raw_executions = list(getattr(item, "executions", None) or [])
     raw_executions.sort(key=lambda x: x.started_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    task_uid = str(getattr(item, "task_uid", "") or "").strip()
+    sync_task_uids = list((sync_task_uids_map or {}).get(task_uid, []))
+    if sync_task_uids_map is None and task_uid:
+        sync_task_uids = [
+            str(x)
+            for x in db.execute(select(SyncTaskDramaLink.sync_task_uid).where(SyncTaskDramaLink.task_uid == task_uid)).scalars().all()
+            if str(x or "").strip()
+        ]
 
     tmdb_status: str | None = None
     tmdb_is_ended: bool | None = None
@@ -291,6 +324,7 @@ def _task_out(
         taskname=item.taskname,
         shareurl=item.shareurl,
         savepath=item.savepath,
+        sync_task_uids=sync_task_uids,
         pattern=item.pattern,
         replace=item.replace,
         enddate=item.enddate,
@@ -508,6 +542,7 @@ def get_tasks(db: Session = Depends(get_db)):
     tmdb_status_map = _load_tmdb_status_map(db, items)
     tmdb_payload_map = _load_tmdb_payload_map(db, items)
     snapshot_map = _load_savepath_snapshot_map(db, items)
+    sync_task_uids_map = _load_sync_task_uids_map(db, items)
     return [
         _task_out(
             db,
@@ -515,6 +550,7 @@ def get_tasks(db: Session = Depends(get_db)):
             tmdb_status_map=tmdb_status_map,
             tmdb_payload_map=tmdb_payload_map,
             snapshot_map=snapshot_map,
+            sync_task_uids_map=sync_task_uids_map,
         )
         for item in items
     ]

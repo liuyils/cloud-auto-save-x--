@@ -89,6 +89,7 @@ class TaskOut(BaseModel):
     taskname: str
     shareurl: str
     savepath: str
+    sync_task_uids: list[str] = []
     pattern: str | None = None
     replace: str | None = None
     enddate: str | None = None
