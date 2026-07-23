@@ -262,7 +262,7 @@ def _load_sync_task_uids_map(db: Session, items: list[object]) -> dict[str, list
         db.execute(
             select(SyncTaskDramaLink.task_uid, SyncTaskDramaLink.sync_task_uid)
             .where(SyncTaskDramaLink.task_uid.in_(task_uids))
-            .order_by(SyncTaskDramaLink.task_uid.asc(), SyncTaskDramaLink.created_at.asc(), SyncTaskDramaLink.sync_task_uid.asc())
+            .order_by(SyncTaskDramaLink.task_uid.asc(), SyncTaskDramaLink.sort_order.asc(), SyncTaskDramaLink.sync_task_uid.asc())
         )
         .all()
     )
@@ -292,7 +292,11 @@ def _task_out(
     if sync_task_uids_map is None and task_uid:
         sync_task_uids = [
             str(x)
-            for x in db.execute(select(SyncTaskDramaLink.sync_task_uid).where(SyncTaskDramaLink.task_uid == task_uid)).scalars().all()
+            for x in db.execute(
+                select(SyncTaskDramaLink.sync_task_uid)
+                .where(SyncTaskDramaLink.task_uid == task_uid)
+                .order_by(SyncTaskDramaLink.sort_order.asc())
+            ).scalars().all()
             if str(x or "").strip()
         ]
 
@@ -1040,12 +1044,40 @@ def post_run_task_stream_by_payload(request: Request, payload: TaskCreateIn, cur
                 wdb.close()
                 execution = TaskExecutor(db=None).run_task(wtask, log=log, persist_execution=False)
                 if str(getattr(wtask, "task_type", "") or "") == "drama":
-                    task_uid_for_sync = str(getattr(wtask, "task_uid", "") or "").strip()
                     if should_trigger_linked_sync_for_drama_execution(execution):
-                        # 优先用 payload.sync_task_uids（前端透传，未保存时 DB 无关联记录）
-                        payload_sync_uids = getattr(payload, "sync_task_uids", None) or []
-                        if payload_sync_uids:
-                            trigger_sync_tasks_by_sync_uids(list(payload_sync_uids), source="api.tasks.run.stream.preview")
+                        drama_uid = str(getattr(wtask, "task_uid", "") or "").strip()
+                        account_name = str(getattr(wtask, "account_name", "") or "").strip() or str(
+                            getattr(getattr(execution, "_runtime_adapter", None), "account_name", "") or ""
+                        ).strip()
+                        savepath = str(getattr(wtask, "savepath", "") or "").strip() or str(
+                            (getattr(execution, "_runtime_task_data", None) or {}).get("savepath") or ""
+                        ).strip()
+                        tree = getattr(execution, "_runtime_tree", None)
+                        changed_dirs = getattr(tree, "_changed_relative_dirs", None) if tree is not None else None
+                        changed_relative_dirs = changed_dirs if isinstance(changed_dirs, list) else []
+                        with SessionLocal() as tdb:
+                            account_id = (
+                                tdb.execute(select(DriveAccount.id).where(DriveAccount.name == account_name)).scalars().first()
+                                if account_name
+                                else None
+                            )
+                        if drama_uid and account_id and savepath:
+                            payload_sync_uids = [str(u) for u in (getattr(payload, "sync_task_uids", None) or []) if str(u or "").strip()]
+                            run_drama_linked_pipeline(
+                                drama_task_uid=drama_uid,
+                                drama_task_id=int(getattr(wtask, "id", 0) or 0) or None,
+                                drama_account_id=int(account_id),
+                                drama_savepath=savepath,
+                                changed_relative_dirs=changed_relative_dirs,
+                                source="api.tasks.run.stream.preview",
+                                log=log,
+                                sync_task_uids=payload_sync_uids or None,
+                            )
+                        else:
+                            # Fallback: trigger sync tasks from payload if full pipeline cannot run
+                            payload_sync_uids = getattr(payload, "sync_task_uids", None) or []
+                            if payload_sync_uids:
+                                trigger_sync_tasks_by_sync_uids(list(payload_sync_uids), source="api.tasks.run.stream.preview")
                 q.put(
                     (
                         "done",

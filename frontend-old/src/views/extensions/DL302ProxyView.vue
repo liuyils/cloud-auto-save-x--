@@ -16,7 +16,7 @@ import {
 } from '@/api/dl302'
 import { TASK_WRITE } from '@/constants/permissions'
 import { useAuthStore } from '@/stores/auth'
-import type { DL302CASTask, DL302CASTaskItem, DL302Config, DL302SupportedAccount, DL302SupportedDriver, DL302StrmGenerateResult } from '@/types/dl302'
+import type { DL302CASTask, DL302CASTaskItem, DL302Config, DL302SupportedAccount, DL302SupportedDriver, DL302StrmGenerateResult, ProxyTarget } from '@/types/dl302'
 import { formatBytes } from '@/utils/capacity'
 
 const auth = useAuthStore()
@@ -73,6 +73,33 @@ const strmSummary = reactive({
   generated_dir_count: 0,
 })
 
+// --- Proxy Targets ---
+const PROXY_TYPE_OPTIONS = [
+  { value: 'fnos', label: '飞牛影视' },
+  { value: 'emby', label: 'Emby' },
+  { value: 'jellyfin', label: 'Jellyfin' },
+  { value: 'generic', label: '通用透传' },
+]
+const proxyTargets = ref<(ProxyTarget & { _key: number })[]>([])
+let proxyTargetKeySeq = 0
+
+function addProxyTarget() {
+  proxyTargets.value.push({
+    id: '',
+    name: '',
+    type: 'generic',
+    target_url: '',
+    listen_addr: '',
+    path_offset: 0,
+    enabled: true,
+    _key: ++proxyTargetKeySeq,
+  })
+}
+
+function removeProxyTarget(index: number) {
+  proxyTargets.value.splice(index, 1)
+}
+
 function applyConfig(data: DL302Config) {
   settings.proxy_url = String(data.proxy_url || '')
   settings.proxy_path_offset = Number.isFinite(Number(data.proxy_path_offset)) ? Number(data.proxy_path_offset) : -1
@@ -95,6 +122,10 @@ function applyConfig(data: DL302Config) {
   strmSummary.path_missing_account_count = Number(data.strm_summary?.path_missing_account_count || 0)
   strmSummary.generated_file_count = Number(data.strm_summary?.generated_file_count || 0)
   strmSummary.generated_dir_count = Number(data.strm_summary?.generated_dir_count || 0)
+  // proxy targets
+  if (Array.isArray(data.proxy_targets)) {
+    proxyTargets.value = data.proxy_targets.map((t) => ({ ...t, _key: ++proxyTargetKeySeq }))
+  }
 }
 
 async function loadPage() {
@@ -543,6 +574,7 @@ async function saveProxySettings() {
   if (!canWrite.value) return
   settings.savingProxy = true
   try {
+    const targets = proxyTargets.value.map(({ _key, ...rest }) => rest)
     const data = await patchDL302Config({
       proxy_url: settings.proxy_url ? String(settings.proxy_url).trim() : null,
       proxy_path_offset: Number(settings.proxy_path_offset),
@@ -554,6 +586,7 @@ async function saveProxySettings() {
       strm_prefix_url: settings.strm_prefix_url ? String(settings.strm_prefix_url).trim() : null,
       strm_include_cas_root_dir: Boolean(settings.strm_include_cas_root_dir),
       strm_source_priority: settings.strm_source_priority,
+      proxy_targets: targets.length > 0 ? targets : null,
     })
     applyConfig(data)
     ElMessage.success('反代设置已保存，已触发 dl302 重载')
@@ -786,14 +819,67 @@ onUnmounted(stopCasPoller)
 
         <el-tab-pane label="反代设置" name="proxy">
           <div class="form-card">
+            <!-- 多目标反代配置 -->
+            <div style="margin-bottom: 20px;">
+              <h4 style="margin-bottom: 10px; font-size: 14px; font-weight: 500;">反代目标列表</h4>
+              <p style="color: #909399; font-size: 12px; margin-bottom: 12px;">配置多个反代目标，每个系统独立端口和处理方式。类型说明：飞牛影视＝响应改写，Emby/Jellyfin＝下载 302 拦截，通用透传＝纯代理。</p>
+              <div v-if="proxyTargets.length === 0" style="padding: 20px; text-align: center; border: 1px dashed #ddd; border-radius: 6px; color: #909399; font-size: 13px;">
+                暂无反代目标，点击下方按钮添加
+              </div>
+              <div v-for="(target, idx) in proxyTargets" :key="target._key" style="border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                  <span style="font-size: 13px; font-weight: 500;">#{{ idx + 1 }} {{ target.name || '未命名' }}</span>
+                  <el-button type="danger" size="small" text :disabled="!canWrite" @click="removeProxyTarget(idx)">删除</el-button>
+                </div>
+                <el-form label-width="80px" size="small">
+                  <el-row :gutter="12">
+                    <el-col :span="12">
+                      <el-form-item label="名称">
+                        <el-input v-model="target.name" placeholder="如：飞牛影视" :disabled="!canWrite" />
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                      <el-form-item label="类型">
+                        <el-select v-model="target.type" :disabled="!canWrite" style="width: 100%;">
+                          <el-option v-for="opt in PROXY_TYPE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                        </el-select>
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                      <el-form-item label="目标地址">
+                        <el-input v-model="target.target_url" placeholder="http://192.168.1.100:8096" :disabled="!canWrite" />
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                      <el-form-item label="监听端口">
+                        <el-input v-model="target.listen_addr" placeholder="5225" :disabled="!canWrite" />
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                      <el-form-item label="路径偏移">
+                        <el-input-number v-model="target.path_offset" :step="1" :disabled="!canWrite" />
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="12">
+                      <el-form-item label="启用">
+                        <el-switch v-model="target.enabled" :disabled="!canWrite" />
+                      </el-form-item>
+                    </el-col>
+                  </el-row>
+                </el-form>
+              </div>
+              <el-button size="small" :disabled="!canWrite" @click="addProxyTarget">+ 添加反代目标</el-button>
+            </div>
+
+            <!-- 全局配置 -->
             <el-form label-width="150px">
-              <el-form-item label="ProxyURL">
+              <el-form-item label="ProxyURL（兼容）">
                 <div class="form-field">
                   <el-input v-model="settings.proxy_url" placeholder="http://127.0.0.1:5666" :disabled="!canWrite" />
-                  <div class="form-field-hint">反代目标地址。</div>
+                  <div class="form-field-hint">旧版单地址配置，当无反代目标时自动作为飞牛影视目标使用。</div>
                 </div>
               </el-form-item>
-              <el-form-item label="飞牛影视路径偏移">
+              <el-form-item label="路径偏移（兼容）">
                 <div class="form-field">
                   <el-input-number v-model="settings.proxy_path_offset" :step="1" :disabled="!canWrite" />
                   <div class="form-field-hint">
@@ -810,6 +896,7 @@ onUnmounted(stopCasPoller)
                     placeholder="10.0.0.0/8&#10;172.16.0.0/12&#10;192.168.0.0/16&#10;127.0.0.0/8&#10;::1/128&#10;fc00::/7&#10;fe80::/10"
                     :disabled="!canWrite"
                   />
+                  <div class="form-field-hint">每行一个网段，命中内网直连绕过代理（所有反代目标共享）。</div>
                 </div>
               </el-form-item>
               <el-form-item>

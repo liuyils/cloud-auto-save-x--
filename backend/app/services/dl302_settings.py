@@ -147,6 +147,7 @@ def load_dl302_config(item: DL302Setting) -> dict[str, object]:
         "strm_source_priority": strm_source_priority,
         "cas_root_dir": cas_root_dir,
         "cas_workers": cas_workers,
+        "proxy_targets": parse_proxy_targets_json(getattr(item, "proxy_targets_json", None)),
     }
 
 
@@ -158,6 +159,87 @@ def validate_proxy_url(value: str | None) -> str | None:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise bad_request("DL302_PROXY_URL_INVALID", "ProxyURL 必须是合法的 http/https 地址")
     return text
+
+
+DL302_PROXY_TARGET_TYPES = ("fnos", "emby", "jellyfin", "generic")
+
+
+def parse_proxy_targets_json(raw: str | None) -> list[dict]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        items = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        target_id = str(item.get("id") or "").strip()
+        if not target_id:
+            continue
+        out.append({
+            "id": target_id,
+            "name": str(item.get("name") or "").strip(),
+            "type": str(item.get("type") or "generic").strip(),
+            "target_url": str(item.get("target_url") or "").strip(),
+            "listen_addr": str(item.get("listen_addr") or "").strip(),
+            "path_offset": int(item.get("path_offset") or 0),
+            "enabled": bool(item.get("enabled", True)),
+        })
+    return out
+
+
+def validate_proxy_targets(targets: list[dict] | None) -> str | None:
+    """Validate and serialize proxy targets to JSON string."""
+    if targets is None:
+        return None
+    if not targets:
+        return "[]"
+    import uuid as uuid_mod
+    seen_addrs: set[str] = set()
+    out: list[dict] = []
+    for item in targets:
+        target_id = str(item.get("id") or "").strip()
+        if not target_id:
+            target_id = str(uuid_mod.uuid4())
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise bad_request("DL302_PROXY_TARGET_NAME_EMPTY", "反代目标名称不能为空")
+        target_type = str(item.get("type") or "generic").strip().lower()
+        if target_type not in DL302_PROXY_TARGET_TYPES:
+            raise bad_request("DL302_PROXY_TARGET_TYPE_INVALID", f"反代目标类型不合法: {target_type}")
+        target_url = str(item.get("target_url") or "").strip()
+        if target_url:
+            parsed = urlparse(target_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise bad_request("DL302_PROXY_TARGET_URL_INVALID", f"反代目标地址不合法: {target_url}")
+        listen_addr = str(item.get("listen_addr") or "").strip()
+        if not listen_addr:
+            raise bad_request("DL302_PROXY_TARGET_LISTEN_ADDR_EMPTY", "反代目标监听地址不能为空")
+        # Auto-prepend colon if user only entered a port number.
+        if listen_addr.isdigit():
+            listen_addr = ":" + listen_addr
+        elif not listen_addr.startswith(":") and ":" not in listen_addr:
+            listen_addr = ":" + listen_addr
+        if listen_addr in seen_addrs:
+            raise bad_request("DL302_PROXY_TARGET_LISTEN_ADDR_DUPLICATE", f"反代目标监听地址重复: {listen_addr}")
+        seen_addrs.add(listen_addr)
+        path_offset = int(item.get("path_offset") or 0)
+        enabled = bool(item.get("enabled", True))
+        out.append({
+            "id": target_id,
+            "name": name,
+            "type": target_type,
+            "target_url": target_url,
+            "listen_addr": listen_addr,
+            "path_offset": path_offset,
+            "enabled": enabled,
+        })
+    return json.dumps(out, ensure_ascii=False)
 
 
 def parse_intranet_cidrs(value: object) -> list[str]:
@@ -507,6 +589,21 @@ def update_dl302_setting(db: Session, *, payload: dict[str, object]) -> DL302Set
             current.pop(DL302_CAS_WORKERS_KEY, None)
         else:
             current[DL302_CAS_WORKERS_KEY] = str(validate_cas_workers(value))
+
+    if "proxy_targets" in payload:
+        targets_raw = payload.get("proxy_targets")
+        if targets_raw is None:
+            item.proxy_targets_json = None
+        else:
+            targets_list = [
+                (t.model_dump() if hasattr(t, "model_dump") else dict(t))
+                for t in targets_raw
+            ] if not isinstance(targets_raw, list) else [
+                (t.model_dump() if hasattr(t, "model_dump") else dict(t)) if not isinstance(t, dict) else t
+                for t in targets_raw
+            ]
+            validated_json = validate_proxy_targets(targets_list)
+            item.proxy_targets_json = validated_json
 
     item.config_kv = serialize_dl302_config_kv(current)
     db.flush()

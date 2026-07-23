@@ -2119,9 +2119,25 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
                 parent_id = found
                 continue
             url = f"{self.HOST_URL}/v2/createFolder.action"
-            j = self._request_json("GET", url, params={"parentId": str(parent_id), "fileName": name}, timeout=15)
+            try:
+                j = self._request_json("GET", url, params={"parentId": str(parent_id), "fileName": name}, timeout=15)
+            except Exception:
+                fallback_fid = self._create_folder_fallback(parent_id, name)
+                if fallback_fid:
+                    parent_id = fallback_fid
+                    continue
+                time.sleep(0.3)
+                retry_found = self._find_child_folder(parent_id, name)
+                if retry_found:
+                    parent_id = retry_found
+                    continue
+                return {"code": 1, "message": f"mkdir failed: createFolder 异常且目录未找到 parent={parent_id} name={name}", "data": {}}
             fid = j.get("fileId") if isinstance(j, dict) else None
             if not fid:
+                retry_found = self._find_child_folder(parent_id, name)
+                if retry_found:
+                    parent_id = retry_found
+                    continue
                 return {"code": 1, "message": "创建目录失败", "data": {}}
             parent_id = str(fid)
             time.sleep(0.1)
@@ -2167,6 +2183,55 @@ FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE
             if page > 50:
                 break
             time.sleep(0.1)
+        if page <= 2:
+            try:
+                params_alt = {
+                    "folderId": str(parent_id),
+                    "orderBy": "filename",
+                    "descending": "false",
+                    "pageNum": 1,
+                    "pageSize": 200,
+                    "mediaType": 0,
+                    "noCache": str(time.time()),
+                }
+                resp2 = self._session.get(url, params=params_alt, timeout=15)
+                if resp2.status_code == 200:
+                    j2 = resp2.json()
+                    ao2 = j2.get("fileListAO") or {}
+                    folder_list2 = ao2.get("folderList") or []
+                    if isinstance(folder_list2, list):
+                        for it in folder_list2:
+                            if (it.get("name") or "") == folder_name:
+                                return str(it.get("id", ""))
+            except Exception:
+                pass
+        return ""
+
+    def _create_folder_fallback(self, parent_id: str, folder_name: str) -> str:
+
+        try:
+            url = f"{self.HOST_URL}/v2/createFolder.action"
+            resp = self._request(
+                "GET", url,
+                params={"parentId": str(parent_id), "fileName": folder_name},
+                timeout=15,
+                raise_status=False,
+            )
+            try:
+                j = resp.json()
+            except Exception:
+                return ""
+            if isinstance(j, dict):
+                fid = j.get("fileId") or j.get("id") or ""
+                if fid:
+                    return str(fid)
+                res_data = j.get("data") or j.get("res") or {}
+                if isinstance(res_data, dict):
+                    fid = res_data.get("fileId") or res_data.get("id") or res_data.get("folderId") or ""
+                    if fid:
+                        return str(fid)
+        except Exception:
+            pass
         return ""
 
     def rename(self, fid: str, file_name: str) -> Dict:

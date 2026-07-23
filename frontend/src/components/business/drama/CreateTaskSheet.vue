@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import {
   X, Eye, Loader2, ChevronDown, ChevronUp, Folder, FolderOpen, Search,
-  Play, ArrowUp, FileText, ChevronLeft, ChevronRight, RefreshCw,
+  Play, ArrowUp, ArrowDown, FileText, ChevronLeft, ChevronRight, RefreshCw, GripVertical,
 } from 'lucide-vue-next'
 import { previewShare, previewShareBatch, browseDrive, fetchTasks } from '@/api/tasks'
 import { fetchTaskSuggestions } from '@/api/resourceSearch'
@@ -246,12 +246,18 @@ watch(
       const rw = Array.isArray((extra as any).runweek) ? (extra as any).runweek : []
       state.runweek = rw.map((x: any) => Number(x)).filter((x: number) => x >= 1 && x <= 7)
       const taskUid = String(task.task_uid || '').trim()
-      state.sync_task_uids = taskUid
-        ? syncTasks.value
-            .filter((st) => Array.isArray(st.drama_task_uids) && st.drama_task_uids.includes(taskUid))
-            .map((st) => String(st.uid || '').trim())
-            .filter(Boolean)
-        : []
+      // Use the ordered sync_task_uids from the task response (backend returns them sorted by sort_order)
+      const savedSyncUids = Array.isArray(task.sync_task_uids) ? task.sync_task_uids.map((u: any) => String(u || '').trim()).filter(Boolean) : []
+      if (savedSyncUids.length > 0) {
+        state.sync_task_uids = savedSyncUids
+      } else {
+        state.sync_task_uids = taskUid
+          ? syncTasks.value
+              .filter((st) => Array.isArray(st.drama_task_uids) && st.drama_task_uids.includes(taskUid))
+              .map((st) => String(st.uid || '').trim())
+              .filter(Boolean)
+          : []
+      }
       // Load addition from task
       initAdditionFromTask(task.addition)
       nextTick(() => { isInitializing.value = false })
@@ -261,6 +267,13 @@ watch(
         state.taskname = preset.taskname || ''
         state.tmdb_id = preset.tmdb_id || null
         state.tmdb_media_type = preset.tmdb_media_type || 'tv'
+        // 有TMDB关联时默认使用自动更新日模式
+        if (preset.tmdb_id && preset.tmdb_media_type === 'tv') {
+          state.runweek_mode = 'auto'
+          nextTick(() => {
+            applyAutoRunweekFromTmdb(Number(preset.tmdb_id) || 0, preset.tmdb_media_type || 'tv').catch(() => {})
+          })
+        }
       }
       initAdditionDefaults()
     }
@@ -748,6 +761,17 @@ function previewGoBack() {
   loadPreviewDir(last)
 }
 
+function previewGoRoot() {
+  previewDirStack.value = []
+  loadPreviewDir(undefined)
+}
+
+/** Whether the current shareurl already points to a subdir (has fid param) */
+const shareurlHasFid = computed(() => {
+  const raw = String(state.shareurl || '').trim()
+  return /[?&#]fid=/i.test(raw) || /#\/list\/share\//i.test(raw)
+})
+
 function pickCurrentShareFolder() {
   const current = previewDirStack.value.at(-1)
   if (current) {
@@ -898,7 +922,14 @@ async function openStartfidPicker() {
   startfidItems.value = []
   try {
     const data = await previewShare(buildPreviewParams({ max_items: 500, startfid: null }))
-    startfidItems.value = (data.items || []).filter((item) => !item.is_dir)
+    // Filter non-dir files and sort by date descending (newest first)
+    const files = (data.items || []).filter((item) => !item.is_dir)
+    files.sort((a, b) => {
+      const ta = a.updated_at ? new Date(a.updated_at).getTime() : 0
+      const tb = b.updated_at ? new Date(b.updated_at).getTime() : 0
+      return tb - ta
+    })
+    startfidItems.value = files
   } catch (e: any) {
     startfidError.value = e?.message || '获取文件列表失败'
   } finally {
@@ -921,6 +952,45 @@ function toggleWeekday(day: number) {
   } else {
     state.runweek.splice(idx, 1)
   }
+}
+
+// ===== Sync Task Reorder (Drag & Arrow) =====
+const syncDragIndex = ref<number | null>(null)
+
+function moveSyncTask(index: number, direction: -1 | 1) {
+  const target = index + direction
+  if (target < 0 || target >= state.sync_task_uids.length) return
+  const arr = [...state.sync_task_uids]
+  const [item] = arr.splice(index, 1)
+  arr.splice(target, 0, item)
+  state.sync_task_uids = arr
+}
+
+function onSyncDragStart(index: number, event: DragEvent) {
+  syncDragIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+  }
+}
+
+function onSyncDragOver(_index: number, event: DragEvent) {
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+}
+
+function onSyncDrop(targetIndex: number) {
+  const fromIndex = syncDragIndex.value
+  if (fromIndex === null || fromIndex === targetIndex) return
+  const arr = [...state.sync_task_uids]
+  const [item] = arr.splice(fromIndex, 1)
+  arr.splice(targetIndex, 0, item)
+  state.sync_task_uids = arr
+  syncDragIndex.value = null
+}
+
+function onSyncDragEnd() {
+  syncDragIndex.value = null
 }
 
 // ===== Build Payload =====
@@ -1147,10 +1217,14 @@ function getTmdbPoster(item: TMDBBrief): string {
           <button class="rounded p-1.5 hover:bg-[hsl(var(--accent))] text-[hsl(var(--muted-foreground))]" title="刷新" @click="handlePreviewRefresh" :disabled="previewing">
             <RefreshCw class="h-4 w-4" :class="previewing ? 'animate-spin' : ''" />
           </button>
+          <button v-if="previewDirStack.length > 0 || shareurlHasFid" class="rounded p-1.5 hover:bg-[hsl(var(--accent))] text-[hsl(var(--muted-foreground))] flex items-center gap-1 text-xs" @click="previewGoRoot" title="回到分享根目录">
+            <Folder class="h-3.5 w-3.5" /> 根目录
+          </button>
           <button v-if="previewDirStack.length > 0" class="rounded p-1.5 hover:bg-[hsl(var(--accent))] text-[hsl(var(--muted-foreground))] flex items-center gap-1 text-xs" @click="previewGoBack">
             <ArrowUp class="h-3.5 w-3.5" /> 返回上级
           </button>
           <span v-if="previewDirStack.length > 0" class="text-xs text-[hsl(var(--muted-foreground))] truncate">/ {{ previewDirStack.map(d => d.name).join(' / ') }}</span>
+          <span v-else-if="shareurlHasFid" class="text-xs text-[hsl(var(--muted-foreground))]">当前位于指定子目录</span>
           <div class="flex-1" />
           <Button size="sm" variant="default" @click="pickCurrentShareFolder" :disabled="!previewDirStack.length">
             使用当前文件夹
@@ -1190,6 +1264,60 @@ function getTmdbPoster(item: TMDBBrief): string {
           <button class="rounded p-1 hover:bg-[hsl(var(--accent))] disabled:opacity-30" :disabled="previewPage >= previewTotalPages" @click="previewPage++">
             <ChevronRight class="h-4 w-4 text-[hsl(var(--foreground))]" />
           </button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- ===== StartFID Picker Modal ===== -->
+  <Teleport to="body">
+    <div v-if="showStartfidPicker" class="fixed inset-0 z-[100] flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/60" @click="showStartfidPicker = false" />
+      <div class="relative z-10 w-[560px] max-h-[70vh] rounded-lg bg-[hsl(var(--background))] shadow-xl flex flex-col">
+        <div class="flex items-center justify-between px-5 py-3 border-b border-[hsl(var(--border))]">
+          <h3 class="text-sm font-semibold text-[hsl(var(--foreground))]">选择起始文件</h3>
+          <button class="rounded p-1 hover:bg-[hsl(var(--accent))]" @click="showStartfidPicker = false">
+            <X class="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
+          </button>
+        </div>
+        <div class="px-5 py-2 border-b border-[hsl(var(--border))]">
+          <p class="text-xs text-[hsl(var(--muted-foreground))]">选择一个文件作为转存起始点，排在此文件之前的文件将被跳过（按日期从新到旧排序）</p>
+        </div>
+        <!-- Table Header -->
+        <div class="grid grid-cols-[1fr_70px_110px] gap-2 px-5 py-2 border-b border-[hsl(var(--border))] text-xs font-medium text-[hsl(var(--muted-foreground))]">
+          <span>文件名</span><span>大小</span><span>日期</span>
+        </div>
+        <div class="flex-1 overflow-y-auto px-5 py-3">
+          <div v-if="startfidLoading" class="flex items-center justify-center py-8">
+            <Loader2 class="h-5 w-5 animate-spin text-[hsl(var(--muted-foreground))]" />
+          </div>
+          <div v-else-if="startfidError" class="text-xs text-red-500 py-4 text-center">{{ startfidError }}</div>
+          <div v-else-if="startfidItems.length === 0" class="text-xs text-[hsl(var(--muted-foreground))] py-4 text-center">无文件可选</div>
+          <div v-else class="space-y-0.5">
+            <div
+              v-for="item in startfidItems"
+              :key="item.fid"
+              class="grid grid-cols-[1fr_70px_110px] gap-2 items-center px-3 py-2 rounded cursor-pointer hover:bg-[hsl(var(--accent))] text-sm"
+              :class="state.startfid === item.fid ? 'bg-[hsl(var(--accent))] ring-1 ring-[hsl(var(--primary))]' : ''"
+              @click="selectStartfid(item)"
+            >
+              <div class="flex items-center gap-2 min-w-0">
+                <FileText class="h-4 w-4 text-[hsl(var(--muted-foreground))] shrink-0" />
+                <span class="truncate text-[hsl(var(--foreground))]">{{ item.name }}</span>
+              </div>
+              <span class="text-[hsl(var(--muted-foreground))] text-xs">{{ item.size ? formatSize(item.size) : '-' }}</span>
+              <span class="text-[hsl(var(--muted-foreground))] text-xs">{{ formatTime(item.updated_at) }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="px-5 py-3 border-t border-[hsl(var(--border))] flex items-center justify-between">
+          <Button v-if="state.startfid" size="sm" variant="outline" @click="state.startfid = ''; showStartfidPicker = false">
+            清除选择
+          </Button>
+          <div v-else />
+          <Button size="sm" variant="outline" @click="showStartfidPicker = false">
+            关闭
+          </Button>
         </div>
       </div>
     </div>
@@ -1387,6 +1515,12 @@ function getTmdbPoster(item: TMDBBrief): string {
                   </option>
                 </select>
               </div>
+
+              <!-- 115自动换链（仅115驱动时显示） -->
+              <label v-if="currentDriveType() === '115'" class="flex items-center gap-2 text-sm text-[hsl(var(--foreground))] cursor-pointer">
+                <input v-model="state.auto_update_115_shareurl" type="checkbox" class="h-4 w-4 rounded border-[hsl(var(--border))] text-[hsl(var(--primary))]" />
+                115自动换链
+              </label>
             </section>
 
             <!-- ===== TMDB 关联 ===== -->
@@ -1623,33 +1757,65 @@ function getTmdbPoster(item: TMDBBrief): string {
                   启用任务
                 </label>
 
-                <label class="flex items-center gap-2 text-sm text-[hsl(var(--foreground))] cursor-pointer">
-                  <input v-model="state.auto_update_115_shareurl" type="checkbox" class="h-4 w-4 rounded border-[hsl(var(--border))] text-[hsl(var(--primary))]" />
-                  115自动换链
-                </label>
-
-                <!-- 关联同步任务 -->
+                <!-- 关联同步任务（可排序多选） -->
                 <div>
                   <label class="mb-1.5 block text-xs font-medium text-[hsl(var(--muted-foreground))]">关联同步任务</label>
                   <div v-if="syncTasks.length === 0" class="text-xs text-[hsl(var(--muted-foreground))]">暂无同步任务</div>
-                  <div v-else class="max-h-32 overflow-y-auto space-y-1.5 rounded-md border border-[hsl(var(--border))] p-2">
-                    <label
-                      v-for="st in syncTasks"
-                      :key="st.uid"
-                      class="flex items-center gap-2 text-xs text-[hsl(var(--foreground))] cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="state.sync_task_uids.includes(st.uid)"
-                        class="h-3.5 w-3.5 rounded border-[hsl(var(--border))]"
-                        @change="
-                          state.sync_task_uids.includes(st.uid)
-                            ? state.sync_task_uids = state.sync_task_uids.filter(u => u !== st.uid)
-                            : state.sync_task_uids = [...state.sync_task_uids, st.uid]
-                        "
-                      />
-                      {{ st.name }}
-                    </label>
+                  <div v-else class="space-y-2">
+                    <!-- Selection area -->
+                    <div class="max-h-28 overflow-y-auto space-y-1.5 rounded-md border border-[hsl(var(--border))] p-2">
+                      <label
+                        v-for="st in syncTasks"
+                        :key="st.uid"
+                        class="flex items-center gap-2 text-xs text-[hsl(var(--foreground))] cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          :checked="state.sync_task_uids.includes(st.uid)"
+                          class="h-3.5 w-3.5 rounded border-[hsl(var(--border))]"
+                          @change="
+                            state.sync_task_uids.includes(st.uid)
+                              ? state.sync_task_uids = state.sync_task_uids.filter(u => u !== st.uid)
+                              : state.sync_task_uids = [...state.sync_task_uids, st.uid]
+                          "
+                        />
+                        {{ st.name }}
+                      </label>
+                    </div>
+                    <!-- Sorted list with reorder controls -->
+                    <div v-if="state.sync_task_uids.length > 0" class="rounded-md border border-[hsl(var(--border))] p-2 space-y-1">
+                      <div class="text-[10px] text-[hsl(var(--muted-foreground))] mb-1">执行顺序（拖拽或点击箭头排序）</div>
+                      <div
+                        v-for="(uid, index) in state.sync_task_uids"
+                        :key="uid"
+                        class="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs bg-[hsl(var(--muted))] group"
+                        draggable="true"
+                        @dragstart="onSyncDragStart(index, $event)"
+                        @dragover.prevent="onSyncDragOver(index, $event)"
+                        @drop="onSyncDrop(index)"
+                        @dragend="onSyncDragEnd"
+                      >
+                        <GripVertical class="h-3 w-3 text-[hsl(var(--muted-foreground))] cursor-grab shrink-0" />
+                        <span class="text-[10px] font-mono text-[hsl(var(--muted-foreground))] w-4 text-center shrink-0">{{ index + 1 }}</span>
+                        <span class="flex-1 truncate">{{ syncTasks.find(s => s.uid === uid)?.name || uid }}</span>
+                        <button
+                          type="button"
+                          class="p-0.5 rounded hover:bg-[hsl(var(--background))] disabled:opacity-30"
+                          :disabled="index === 0"
+                          @click="moveSyncTask(index, -1)"
+                        >
+                          <ArrowUp class="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          class="p-0.5 rounded hover:bg-[hsl(var(--background))] disabled:opacity-30"
+                          :disabled="index === state.sync_task_uids.length - 1"
+                          @click="moveSyncTask(index, 1)"
+                        >
+                          <ArrowDown class="h-3 w-3" />
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -1673,31 +1839,6 @@ function getTmdbPoster(item: TMDBBrief): string {
                       <FileText class="h-4 w-4 mr-1" />
                       选择
                     </Button>
-                  </div>
-
-                  <!-- StartFID 文件选择器 -->
-                  <div v-if="showStartfidPicker" class="mt-2 rounded-md border border-[hsl(var(--border))] p-3">
-                    <div v-if="startfidLoading" class="flex items-center justify-center py-3">
-                      <Loader2 class="h-4 w-4 animate-spin text-[hsl(var(--muted-foreground))]" />
-                    </div>
-                    <div v-else-if="startfidError" class="text-xs text-red-500 py-2">{{ startfidError }}</div>
-                    <div v-else-if="startfidItems.length === 0" class="text-xs text-[hsl(var(--muted-foreground))] py-2 text-center">
-                      无文件可选
-                    </div>
-                    <div v-else class="max-h-40 overflow-y-auto space-y-0.5">
-                      <div
-                        v-for="item in startfidItems"
-                        :key="item.fid"
-                        class="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-[hsl(var(--accent))] text-xs"
-                        @click="selectStartfid(item)"
-                      >
-                        <span class="text-[hsl(var(--muted-foreground))]">📄</span>
-                        <span class="truncate flex-1 text-[hsl(var(--foreground))]">{{ item.name }}</span>
-                        <span v-if="item.size" class="text-[hsl(var(--muted-foreground))] shrink-0 text-[10px]">
-                          {{ formatSize(item.size) }}
-                        </span>
-                      </div>
-                    </div>
                   </div>
                 </div>
 

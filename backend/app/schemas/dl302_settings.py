@@ -83,6 +83,26 @@ class DL302StrmSummaryOut(BaseModel):
     generated_dir_count: int = 0
 
 
+class ProxyTargetOut(BaseModel):
+    id: str
+    name: str
+    type: Literal["fnos", "emby", "jellyfin", "generic"]
+    target_url: str
+    listen_addr: str
+    path_offset: int = 0
+    enabled: bool = True
+
+
+class ProxyTargetIn(BaseModel):
+    id: str | None = None
+    name: str
+    type: Literal["fnos", "emby", "jellyfin", "generic"]
+    target_url: str
+    listen_addr: str
+    path_offset: int = 0
+    enabled: bool = True
+
+
 class DL302ConfigOut(BaseModel):
     proxy_url: str | None = None
     proxy_path_offset: int = -1
@@ -98,6 +118,7 @@ class DL302ConfigOut(BaseModel):
     cas_root_dir: str | None = None
     cas_workers: int = 4
     strm_summary: DL302StrmSummaryOut = Field(default_factory=DL302StrmSummaryOut)
+    proxy_targets: list[ProxyTargetOut] = Field(default_factory=list)
 
 
 class DL302ConfigUpdateIn(BaseModel):
@@ -114,6 +135,7 @@ class DL302ConfigUpdateIn(BaseModel):
     strm_source_priority: Literal["video_first", "cas_first"] | None = Field(default=None)
     cas_root_dir: str | None = Field(default=None)
     cas_workers: int | None = Field(default=None)
+    proxy_targets: list[ProxyTargetIn] | None = Field(default=None)
 
 
 class DL302StrmGenerateIn(BaseModel):

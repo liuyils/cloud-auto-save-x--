@@ -385,6 +385,7 @@ def run_drama_linked_batch_pipeline(
     items: list[DramaLinkedBatchItem],
     source: str,
     log: ExecutionLog | None = None,
+    sync_task_uids: list[str] | None = None,
 ) -> dict[str, Any]:
     log = log or ExecutionLog()
     batch_items = _normalize_batch_items(items)
@@ -427,6 +428,7 @@ def run_drama_linked_batch_pipeline(
             task,
             successful_pre_refreshes=successful_pre_refreshes,
         ),
+        sync_task_uids_override=sync_task_uids,
     )
 
     delta_by_account, account_base_path, cas_base_path_by_account = _build_linked_stage_context(
@@ -458,6 +460,7 @@ def run_drama_linked_pipeline(
     changed_relative_dirs: list[str] | None,
     source: str,
     log: ExecutionLog | None = None,
+    sync_task_uids: list[str] | None = None,
 ) -> dict[str, Any]:
     log = log or ExecutionLog()
     drama_uid = str(drama_task_uid or "").strip()
@@ -480,6 +483,7 @@ def run_drama_linked_pipeline(
         ],
         source=source,
         log=log,
+        sync_task_uids=sync_task_uids,
     )
     result["drama_task_uid"] = drama_uid
     return result

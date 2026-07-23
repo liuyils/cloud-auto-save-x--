@@ -60,6 +60,16 @@ export type DL302SupportedDriver = {
   accounts: DL302SupportedAccount[]
 }
 
+export type ProxyTarget = {
+  id: string
+  name: string
+  type: 'fnos' | 'emby' | 'jellyfin' | 'generic'
+  target_url: string
+  listen_addr: string
+  path_offset: number
+  enabled: boolean
+}
+
 export type DL302Config = {
   proxy_url?: string | null
   proxy_path_offset: number
@@ -74,6 +84,7 @@ export type DL302Config = {
   strm_include_cas_root_dir: boolean
   strm_source_priority: 'video_first' | 'cas_first'
   cas_workers: number
+  proxy_targets: ProxyTarget[]
   strm_summary: {
     enabled: boolean
     mode: 'auto' | 'independent'

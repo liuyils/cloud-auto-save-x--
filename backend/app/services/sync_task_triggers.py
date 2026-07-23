@@ -5,7 +5,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.db.session import SessionLocal
 from app.extensions.runtime.sync_executor import SyncExecutor
@@ -13,6 +13,7 @@ from app.extensions.runtime.execution_log import ExecutionLog
 from app.models.sync_execution import SyncExecution
 from app.models.sync_task import SyncTask
 from app.models.sync_task_drama_link import SyncTaskDramaLink
+from app.services.drive_account_lsdir_scan import refresh_drive_account_lsdir_paths
 
 
 logger = logging.getLogger(__name__)
@@ -58,24 +59,45 @@ def run_linked_sync_tasks_blocking(
     source: str,
     log: ExecutionLog | None = None,
     strategy_override_resolver: Callable[[SyncTask], dict[str, Any] | None] | None = None,
+    sync_task_uids_override: list[str] | None = None,
 ) -> list[dict[str, object]]:
     uids = _normalize_task_uids(drama_task_uids)
-    if not uids:
+    if not uids and not sync_task_uids_override:
         return []
     log = log or ExecutionLog()
 
     with SessionLocal() as db:
-        links = db.execute(select(SyncTaskDramaLink.sync_task_uid).where(SyncTaskDramaLink.task_uid.in_(uids))).scalars().all()
-        sync_uids = _normalize_task_uids([str(x) for x in links if x])
+        if sync_task_uids_override:
+            # Use provided sync_task_uids directly (e.g. from payload for preview/run-once)
+            sync_uids = _normalize_task_uids(sync_task_uids_override)
+        else:
+            # For batch: compute min(sort_order) per sync_task_uid across all drama tasks,
+            # then order by that min — this deduplicates and produces optimal ordering.
+            rows = (
+                db.execute(
+                    select(
+                        SyncTaskDramaLink.sync_task_uid,
+                        func.min(SyncTaskDramaLink.sort_order).label("min_order"),
+                    )
+                    .where(SyncTaskDramaLink.task_uid.in_(uids))
+                    .group_by(SyncTaskDramaLink.sync_task_uid)
+                    .order_by(func.min(SyncTaskDramaLink.sort_order).asc())
+                )
+                .all()
+            )
+            sync_uids = [str(r[0]) for r in rows if str(r[0] or "").strip()]
         if not sync_uids:
             return []
         tasks = (
-            db.execute(select(SyncTask).where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True)).order_by(SyncTask.id.asc()))
+            db.execute(select(SyncTask).where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True)))
             .scalars()
             .all()
         )
         if not tasks:
             return []
+        # Sort tasks by the order defined in sync_uids
+        uid_order = {uid: idx for idx, uid in enumerate(sync_uids)}
+        tasks = sorted(tasks, key=lambda t: uid_order.get(str(getattr(t, 'uid', '') or ''), 999999))
 
     results: list[dict[str, object]] = []
     log.section("关联同步任务（阻塞）")
@@ -91,6 +113,8 @@ def run_linked_sync_tasks_blocking(
         target_account_id = int(getattr(task, "target_account_id", 0) or 0) or None
         target_path = str(getattr(task, "target_path", "") or "").strip()
 
+        # Short session: check running status and load task
+        row = None
         with SessionLocal() as tdb:
             running = (
                 tdb.execute(
@@ -136,51 +160,65 @@ def run_linked_sync_tasks_blocking(
                     }
                 )
                 continue
-            try:
-                strategy_override = None
-                if strategy_override_resolver is not None:
-                    strategy_override = strategy_override_resolver(row)
-                    if not isinstance(strategy_override, dict) or not strategy_override:
-                        strategy_override = None
-                force_refresh_suppressed = bool(strategy_override and strategy_override.get("force_refresh") is False)
-                if force_refresh_suppressed:
-                    log.line(f"联动覆盖: {sync_task_name} force_refresh=false")
-                execution = SyncExecutor(db=None).run_sync_task(row, log=log, strategy_override=strategy_override)
-                execution_id = int(getattr(execution, "id", 0) or 0) or None
-                status = str(getattr(execution, "status", "") or "").strip() or "unknown"
-                message = str(getattr(execution, "message", "") or "").strip()
-                log.line(f"完成: {sync_task_name} status={status}")
-                results.append(
-                    {
-                        "sync_task_id": sync_task_id,
-                        "uid": sync_task_uid,
-                        "name": sync_task_name,
-                        "status": status,
-                        "execution_id": execution_id,
-                        "target_type": target_type,
-                        "target_account_id": target_account_id,
-                        "target_path": target_path,
-                        "message": message,
-                        "force_refresh_suppressed": force_refresh_suppressed,
-                    }
+            # Compute strategy override while session is open
+            strategy_override = None
+            if strategy_override_resolver is not None:
+                strategy_override = strategy_override_resolver(row)
+                if not isinstance(strategy_override, dict) or not strategy_override:
+                    strategy_override = None
+            # Expunge row from session so it can be used after session closes
+            tdb.expunge(row)
+
+        # Session closed — execute sync task (potentially long-running)
+        force_refresh_suppressed = bool(strategy_override and strategy_override.get("force_refresh") is False)
+        if force_refresh_suppressed:
+            log.line(f"联动覆盖: {sync_task_name} force_refresh=false")
+        try:
+            execution = SyncExecutor(db=None).run_sync_task(row, log=log, strategy_override=strategy_override)
+            execution_id = int(getattr(execution, "id", 0) or 0) or None
+            status = str(getattr(execution, "status", "") or "").strip() or "unknown"
+            message = str(getattr(execution, "message", "") or "").strip()
+            log.line(f"完成: {sync_task_name} status={status}")
+            results.append(
+                {
+                    "sync_task_id": sync_task_id,
+                    "uid": sync_task_uid,
+                    "name": sync_task_name,
+                    "status": status,
+                    "execution_id": execution_id,
+                    "target_type": target_type,
+                    "target_account_id": target_account_id,
+                    "target_path": target_path,
+                    "message": message,
+                    "force_refresh_suppressed": force_refresh_suppressed,
+                }
+            )
+            # Post-sync: targeted lsdir refresh of the sync task's target directory
+            if status == "success" and target_type == "netdisk" and target_account_id and target_path:
+                _post_sync_refresh_target_lsdir(
+                    account_id=int(target_account_id),
+                    target_path=target_path,
+                    sync_task_name=sync_task_name,
+                    source=source,
+                    log=log,
                 )
-            except Exception as exc:
-                message = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
-                log.line(f"失败: {sync_task_name} err={message}")
-                results.append(
-                    {
-                        "sync_task_id": sync_task_id,
-                        "uid": sync_task_uid,
-                        "name": sync_task_name,
-                        "status": "failed",
-                        "execution_id": None,
-                        "target_type": target_type,
-                        "target_account_id": target_account_id,
-                        "target_path": target_path,
-                        "message": message,
-                        "force_refresh_suppressed": False,
-                    }
-                )
+        except Exception as exc:
+            message = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
+            log.line(f"失败: {sync_task_name} err={message}")
+            results.append(
+                {
+                    "sync_task_id": sync_task_id,
+                    "uid": sync_task_uid,
+                    "name": sync_task_name,
+                    "status": "failed",
+                    "execution_id": None,
+                    "target_type": target_type,
+                    "target_account_id": target_account_id,
+                    "target_path": target_path,
+                    "message": message,
+                    "force_refresh_suppressed": False,
+                }
+            )
     return results
 
 
@@ -198,11 +236,60 @@ def _normalize_task_uids(values: list[str] | None) -> list[str]:
     return out
 
 
+def _post_sync_refresh_target_lsdir(
+    *,
+    account_id: int,
+    target_path: str,
+    sync_task_name: str,
+    source: str,
+    log: ExecutionLog | None = None,
+) -> None:
+    """After a sync task completes successfully, refresh its target directory lsdir cache."""
+    if not target_path or account_id <= 0:
+        return
+    try:
+        stats = refresh_drive_account_lsdir_paths(
+            account_id=int(account_id),
+            savepath=str(target_path),
+            relative_dir_paths=None,
+            recursive_savepath=False,
+            source=f"{source}.post_sync_refresh",
+            wait_if_busy=True,
+            max_wait_seconds=600.0,
+            include_cas_root_dir=False,
+        )
+        if log:
+            log.line(
+                f"后置刷新: {sync_task_name} account_id={account_id} target={target_path} "
+                f"scanned_dirs={int(getattr(stats, 'scanned_dirs', 0) or 0)} "
+                f"cached_items={int(getattr(stats, 'cached_items', 0) or 0)}"
+            )
+    except Exception as exc:
+        msg = str(getattr(exc, "message", None) or str(exc) or type(exc).__name__).strip()
+        if log:
+            log.line(f"后置刷新失败: {sync_task_name} account_id={account_id} target={target_path} err={msg}")
+        logger.warning(
+            "同步任务后置lsdir刷新失败 sync_task=%s account_id=%s target=%s err=%s",
+            sync_task_name, account_id, target_path, msg,
+        )
+
+
 def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
     try:
         with SessionLocal() as db:
-            links = db.execute(select(SyncTaskDramaLink.sync_task_uid).where(SyncTaskDramaLink.task_uid.in_(task_uids))).scalars().all()
-            sync_uids = _normalize_task_uids([str(x) for x in links if x])
+            rows = (
+                db.execute(
+                    select(
+                        SyncTaskDramaLink.sync_task_uid,
+                        func.min(SyncTaskDramaLink.sort_order).label("min_order"),
+                    )
+                    .where(SyncTaskDramaLink.task_uid.in_(task_uids))
+                    .group_by(SyncTaskDramaLink.sync_task_uid)
+                    .order_by(func.min(SyncTaskDramaLink.sort_order).asc())
+                )
+                .all()
+            )
+            sync_uids = [str(r[0]) for r in rows if str(r[0] or "").strip()]
             if not sync_uids:
                 return
 
@@ -210,12 +297,14 @@ def _run_linked_sync_tasks(task_uids: list[str], source: str) -> None:
                 db.execute(
                     select(SyncTask.id, SyncTask.uid, SyncTask.name)
                     .where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True))
-                    .order_by(SyncTask.id.asc())
                 )
                 .all()
             )
             if not tasks:
                 return
+            # Sort tasks by the order defined in sync_uids
+            uid_order = {uid: idx for idx, uid in enumerate(sync_uids)}
+            tasks = sorted(tasks, key=lambda t: uid_order.get(str(t[1] or ''), 999999))
 
         logger.info("触发关联同步任务 source=%s drama_tasks=%s sync_tasks=%s", source, len(task_uids), len(tasks))
         skipped = 0
@@ -289,12 +378,14 @@ def _run_sync_tasks_by_uids(sync_uids: list[str], source: str) -> None:
                 db.execute(
                     select(SyncTask.id, SyncTask.uid, SyncTask.name)
                     .where(SyncTask.uid.in_(sync_uids), SyncTask.enabled.is_(True))
-                    .order_by(SyncTask.id.asc())
                 )
                 .all()
             )
             if not tasks:
                 return
+            # Sort tasks by the order defined in sync_uids
+            uid_order = {uid: idx for idx, uid in enumerate(sync_uids)}
+            tasks = sorted(tasks, key=lambda t: uid_order.get(str(t[1] or ''), 999999))
 
         logger.info("直接触发同步任务 source=%s sync_tasks=%s", source, len(tasks))
         for task_id, task_uid, task_name in tasks:

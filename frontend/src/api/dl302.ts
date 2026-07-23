@@ -1,5 +1,5 @@
 import { http } from '@/api/http'
-import type { DL302CASTask, DL302CASTaskItem, DL302CASTaskListResult, DL302CasGenerateResult, DL302Config, DL302StrmGenerateResult, DL302SupportedDriver } from '@/types/dl302'
+import type { DL302CASTask, DL302CASTaskItem, DL302CASTaskListResult, DL302CasGenerateResult, DL302Config, DL302StrmGenerateResult, DL302SupportedDriver, ProxyTarget } from '@/types/dl302'
 
 export async function fetchDL302SupportedDrivers() {
   const { data } = await http.get<DL302SupportedDriver[]>('/dl302/drivers')
@@ -25,6 +25,7 @@ export async function patchDL302Config(payload: {
   strm_include_cas_root_dir?: boolean | null
   strm_source_priority?: 'video_first' | 'cas_first' | null
   cas_workers?: number | null
+  proxy_targets?: Omit<ProxyTarget, 'id'> & { id?: string | null }[] | null
 }) {
   const { data } = await http.patch<DL302Config>('/dl302/config', payload)
   return data

@@ -28,6 +28,8 @@ import {
   Globe,
   FileCode2,
   HardDrive,
+  Plus,
+  Trash2,
 } from 'lucide-vue-next'
 import {
   fetchDL302SupportedDrivers,
@@ -59,7 +61,7 @@ import {
   taskProgressText,
 } from '@/lib/dl302'
 import Dl302CasTaskDialog from './Dl302CasTaskDialog.vue'
-import type { DL302Config, DL302CASTask, DL302SupportedAccount, DL302SupportedDriver, DL302StrmGenerateResult } from '@/types/dl302'
+import type { DL302Config, DL302CASTask, DL302SupportedAccount, DL302SupportedDriver, DL302StrmGenerateResult, ProxyTarget } from '@/types/dl302'
 
 const { toast } = useToast()
 const auth = useAuthStore()
@@ -77,8 +79,6 @@ const loading = ref(false)
 const drivers = ref<DL302SupportedDriver[]>([])
 
 const form = reactive({
-  proxy_url: '',
-  proxy_path_offset: -1,
   intranet_cidrs_text: '',
   auto_balance: false,
   cas_root_dir: '',
@@ -109,6 +109,33 @@ const savingCas = ref(false)
 const savingStrm = ref(false)
 const generatingStrm = ref(false)
 
+// --- Proxy Targets ---
+const PROXY_TYPE_OPTIONS = [
+  { value: 'fnos', label: '飞牛影视' },
+  { value: 'emby', label: 'Emby' },
+  { value: 'jellyfin', label: 'Jellyfin' },
+  { value: 'generic', label: '通用透传' },
+] as const
+const proxyTargets = ref<(ProxyTarget & { _key: number })[]>([])
+let proxyTargetKeySeq = 0
+
+function addProxyTarget() {
+  proxyTargets.value.push({
+    id: '',
+    name: '',
+    type: 'generic',
+    target_url: '',
+    listen_addr: '',
+    path_offset: 0,
+    enabled: true,
+    _key: ++proxyTargetKeySeq,
+  })
+}
+
+function removeProxyTarget(index: number) {
+  proxyTargets.value.splice(index, 1)
+}
+
 const casSubmitting = reactive<Record<number, boolean>>({})
 const casActionLoading = reactive<Record<string, boolean>>({})
 
@@ -121,8 +148,6 @@ let pollDelayMs = 3000
 let pollSession = 0
 
 function applyConfig(data: DL302Config) {
-  form.proxy_url = String(data.proxy_url || '')
-  form.proxy_path_offset = Number.isFinite(Number(data.proxy_path_offset)) ? Number(data.proxy_path_offset) : -1
   form.intranet_cidrs_text = Array.isArray(data.intranet_cidrs) ? data.intranet_cidrs.filter(Boolean).join('\n') : ''
   form.auto_balance = Boolean(data.auto_balance)
   form.cas_root_dir = String(data.cas_root_dir || '')
@@ -143,6 +168,10 @@ function applyConfig(data: DL302Config) {
   strmSummary.path_missing_account_count = Number(s?.path_missing_account_count || 0)
   strmSummary.generated_file_count = Number(s?.generated_file_count || 0)
   strmSummary.generated_dir_count = Number(s?.generated_dir_count || 0)
+  // proxy targets
+  if (Array.isArray(data.proxy_targets)) {
+    proxyTargets.value = data.proxy_targets.map((t) => ({ ...t, _key: ++proxyTargetKeySeq }))
+  }
 }
 
 async function loadPage() {
@@ -346,10 +375,10 @@ async function saveProxy() {
   if (!canWrite.value) return
   savingProxy.value = true
   try {
+    const targets = proxyTargets.value.map(({ _key, ...rest }) => rest)
     const data = await patchDL302Config({
-      proxy_url: form.proxy_url ? form.proxy_url.trim() : null,
-      proxy_path_offset: Number(form.proxy_path_offset),
       intranet_cidrs: parseCIDRText(form.intranet_cidrs_text),
+      proxy_targets: targets.length > 0 ? targets as any : null,
     })
     applyConfig(data)
     toast.success('反代设置已保存，已触发 dl302 重载')
@@ -587,18 +616,65 @@ onBeforeUnmount(stopPoller)
       </div>
 
       <!-- ================= 反代设置 ================= -->
-      <div v-show="activeTab === 'proxy'" class="max-w-3xl">
-        <SettingCard title="反代设置" description="dl302 反向代理相关参数，保存后自动触发 dl302 重载" :icon="Server">
-          <div>
-            <label class="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]">ProxyURL</label>
-            <Input v-model="form.proxy_url" placeholder="http://127.0.0.1:5666" :disabled="!canWrite" />
-            <p class="mt-1 text-xs text-[hsl(var(--muted-foreground))]">反代目标地址。</p>
+      <div v-show="activeTab === 'proxy'" class="max-w-3xl space-y-4">
+        <!-- 多目标反代列表 -->
+        <SettingCard title="反代目标" description="配置多个反代目标，每个系统独立端口和处理方式" :icon="Server">
+          <div v-if="proxyTargets.length === 0" class="rounded-lg border border-dashed border-[hsl(var(--border))] py-6 text-center text-sm text-[hsl(var(--muted-foreground))]">
+            暂无反代目标，点击下方按钮添加
           </div>
-          <div>
-            <label class="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]">飞牛影视路径偏移</label>
-            <Input v-model="form.proxy_path_offset" type="number" placeholder="-1" :disabled="!canWrite" />
-            <p class="mt-1 text-xs text-[hsl(var(--muted-foreground))]">影响代理重写时目录回退层级，通常为负数。</p>
+          <div v-for="(target, idx) in proxyTargets" :key="target._key" class="rounded-lg border border-[hsl(var(--border))] p-3 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium text-[hsl(var(--foreground))]">#{{ idx + 1 }} {{ target.name || '未命名' }}</span>
+              <Button variant="ghost" size="sm" class="h-7 w-7 p-0 text-[hsl(var(--destructive))]" :disabled="!canWrite" @click="removeProxyTarget(idx)">
+                <Trash2 class="h-4 w-4" />
+              </Button>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="mb-1 block text-xs text-[hsl(var(--muted-foreground))]">名称</label>
+                <Input v-model="target.name" placeholder="如：飞牛影视" :disabled="!canWrite" class="h-8 text-sm" />
+              </div>
+              <div>
+                <label class="mb-1 block text-xs text-[hsl(var(--muted-foreground))]">系统类型</label>
+                <select
+                  v-model="target.type"
+                  :disabled="!canWrite"
+                  class="h-8 w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-2 text-sm text-[hsl(var(--foreground))] focus:outline-none focus:ring-2 focus:ring-[hsl(var(--ring))] disabled:opacity-50"
+                >
+                  <option v-for="opt in PROXY_TYPE_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="mb-1 block text-xs text-[hsl(var(--muted-foreground))]">目标地址</label>
+                <Input v-model="target.target_url" placeholder="http://192.168.1.100:8096" :disabled="!canWrite" class="h-8 text-sm" />
+              </div>
+              <div>
+                <label class="mb-1 block text-xs text-[hsl(var(--muted-foreground))]">监听端口</label>
+                <Input v-model="target.listen_addr" placeholder="5225" :disabled="!canWrite" class="h-8 text-sm" />
+              </div>
+              <div>
+                <label class="mb-1 block text-xs text-[hsl(var(--muted-foreground))]">路径偏移</label>
+                <Input v-model="target.path_offset" type="number" placeholder="0" :disabled="!canWrite" class="h-8 text-sm" />
+              </div>
+              <div class="flex items-end">
+                <label class="flex items-center gap-2 text-xs text-[hsl(var(--muted-foreground))]">
+                  <input type="checkbox" v-model="target.enabled" :disabled="!canWrite" class="rounded" />
+                  启用
+                </label>
+              </div>
+            </div>
           </div>
+          <Button variant="outline" size="sm" :disabled="!canWrite" @click="addProxyTarget">
+            <Plus class="mr-1 h-4 w-4" />
+            添加反代目标
+          </Button>
+          <p class="text-xs text-[hsl(var(--muted-foreground))]">
+            类型说明：飞牛影视＝响应改写模式，Emby/Jellyfin＝下载接口 302 拦截，通用透传＝纯代理无干预。
+          </p>
+        </SettingCard>
+
+        <!-- 全局配置（内网CIDR等） -->
+        <SettingCard title="全局设置" description="所有反代目标共享的全局配置" :icon="Globe">
           <div>
             <label class="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]">内网网段 (CIDR)</label>
             <textarea
@@ -608,7 +684,7 @@ onBeforeUnmount(stopPoller)
               placeholder="10.0.0.0/8&#10;172.16.0.0/12&#10;192.168.0.0/16&#10;127.0.0.0/8&#10;::1/128"
               class="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2 font-mono text-sm text-[hsl(var(--foreground))] placeholder:text-[hsl(var(--muted-foreground))] focus:outline-none focus:ring-2 focus:ring-[hsl(var(--ring))] disabled:opacity-50"
             />
-            <p class="mt-1 text-xs text-[hsl(var(--muted-foreground))]">每行一个网段，命中内网直连绕过代理。</p>
+            <p class="mt-1 text-xs text-[hsl(var(--muted-foreground))]">每行一个网段，命中内网直连绕过代理（所有反代目标共享）。</p>
           </div>
           <template #footer>
             <Button size="sm" :disabled="!canWrite || savingProxy" @click="saveProxy">

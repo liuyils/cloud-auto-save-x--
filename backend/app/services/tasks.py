@@ -47,7 +47,7 @@ def _replace_sync_links_for_drama(db: Session, *, task_uid: str, sync_task_uids:
     _validate_sync_task_uids(db, uids)
     db.query(SyncTaskDramaLink).filter(SyncTaskDramaLink.task_uid == str(task_uid)).delete(synchronize_session=False)
     if uids:
-        db.add_all([SyncTaskDramaLink(sync_task_uid=str(uid), task_uid=str(task_uid)) for uid in uids])
+        db.add_all([SyncTaskDramaLink(sync_task_uid=str(uid), task_uid=str(task_uid), sort_order=idx) for idx, uid in enumerate(uids)])
     db.flush()
 
 
